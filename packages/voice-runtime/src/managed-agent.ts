@@ -32,6 +32,7 @@ import {
   internalError,
   normalizeUnknownError,
   nowTimestamp,
+  normalizeLanguageStringMap,
   PCM16_16K_MONO,
   PROVIDER_NAMES,
   TvicThrowableError,
@@ -480,23 +481,89 @@ function optionalString(value: unknown, field: string): string | undefined {
 function validateTtsVoiceLanguageMap(value: unknown): Readonly<Record<string, string>> | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value)) return configurationError("ttsVoicesByLanguage must be an object");
-  let entryCount = 0;
-  for (const language in value) {
-    if (
-      Object.prototype.hasOwnProperty.call(value, language) &&
-      ++entryCount > MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES
-    ) {
+  const result = normalizeLanguageStringMap(value, MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES);
+  if (result.ok) return result.value;
+  switch (result.reason) {
+    case "invalid_object":
+      return configurationError("ttsVoicesByLanguage must be an object");
+    case "too_many_entries":
       return configurationError(
         `ttsVoicesByLanguage must contain at most ${MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES} entries`,
       );
-    }
+    case "invalid_language":
+      return configurationError(
+        `ttsVoicesByLanguage key ${result.language} must be a valid BCP-47 language tag`,
+      );
+    case "duplicate_language":
+      return configurationError(
+        `ttsVoicesByLanguage repeats language ${result.language} after normalization`,
+      );
+    case "invalid_value":
+      return configurationError(
+        `ttsVoicesByLanguage.${result.language} must be a non-empty string`,
+      );
   }
-  const voicesByLanguage: Record<string, string> = {};
-  for (const [language, voice] of Object.entries(value)) {
-    nonEmpty(language, "ttsVoicesByLanguage language");
-    voicesByLanguage[language] = nonEmpty(voice, `ttsVoicesByLanguage.${language}`);
+}
+
+function resolveManagedRunSelections(
+  resolved: ResolvedAgent,
+  options: VoiceAgentRunOptions,
+): { readonly sttSelection: SttCallSelection; readonly ttsSelection: TtsCallSelection } {
+  try {
+    const sttSelection = resolveSttCallSelection(resolved.stt.provider, {
+      ...(resolved.stt.model !== undefined ? { model: resolved.stt.model } : {}),
+      ...(resolved.stt.allowUnknownModel ? { allowUnknownModel: true } : {}),
+      ...(options.sttLanguage !== undefined ? { sttLanguage: options.sttLanguage } : {}),
+      ...(options.sttLanguagePolicy !== undefined
+        ? { sttLanguagePolicy: options.sttLanguagePolicy }
+        : {}),
+      ...(options.sttConversationContext !== undefined
+        ? { sttConversationContext: options.sttConversationContext }
+        : {}),
+      ...((resolved.sttVocabulary !== undefined ||
+        options.sttVocabulary !== undefined ||
+        options.includeToolNamesInSttVocabulary === true) && {
+        vocabulary: [
+          ...(resolved.sttVocabulary ?? []),
+          ...(options.sttVocabulary ?? []),
+          ...(options.includeToolNamesInSttVocabulary === true
+            ? resolved.agent.tools.map((tool) => String(tool.name))
+            : []),
+        ],
+      }),
+    });
+    const ttsSelection = resolveTtsCallSelection(
+      resolved.tts.provider,
+      {
+        ...(options.ttsModel !== undefined ? { model: options.ttsModel } : {}),
+        ...(options.ttsVoice !== undefined ? { voice: options.ttsVoice } : {}),
+        ...(options.ttsLanguage !== undefined ? { language: options.ttsLanguage } : {}),
+        ...(options.ttsVoicesByLanguage !== undefined
+          ? { voicesByLanguage: options.ttsVoicesByLanguage }
+          : {}),
+        ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
+      },
+      resolved.tts,
+    );
+    return { sttSelection, ttsSelection };
+  } catch (error) {
+    throwManagedSelectionError(error);
   }
-  return Object.freeze(voicesByLanguage);
+}
+
+function throwManagedSelectionError(error: unknown): never {
+  if (error instanceof TvicThrowableError && error.category === "validation") {
+    throw TvicThrowableError.from(
+      validationError("voice_runtime.invalid_config", error.message, {
+        ...(error.provider !== undefined ? { provider: error.provider } : {}),
+        ...(error.metadata !== undefined
+          ? { metadata: { ...error.metadata, selectionErrorCode: error.code } }
+          : { metadata: { selectionErrorCode: error.code } }),
+        cause: error.error,
+      }),
+    );
+  }
+  throw error;
 }
 
 function validateAudioTapOptions(value: unknown): AudioTapOptions | undefined {
@@ -824,6 +891,7 @@ function resolveStt(
     return {
       provider,
       ...providerModelSelection(overrideModel, provider.configuredModel, model),
+      ...(provider.allowUnknownModel === true ? { allowUnknownModel: true } : {}),
     };
   }
   if (!isRecord(spec) || typeof spec.provider !== "string") {
@@ -1269,6 +1337,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
   );
   const baseSttSelection = resolveSttCallSelection(stt.provider, {
     ...(stt.model !== undefined ? { model: stt.model } : {}),
+    ...(stt.allowUnknownModel ? { allowUnknownModel: true } : {}),
     ...(options.sttVocabulary !== undefined ? { vocabulary: options.sttVocabulary } : {}),
   });
   const audioPolicy: AgentAudioPolicy = {
@@ -1399,6 +1468,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
     };
     const recordOptions: VoiceAgentRunOptions =
       callSnapshot === undefined ? normalizedOptions : { ...normalizedOptions, call: callSnapshot };
+    const selections = resolveManagedRunSelections(this.#resolved, recordOptions);
     const startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     const startupController = new AbortController();
     const runController = new AbortController();
@@ -1456,8 +1526,8 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       },
       usageSummary: { entries: [] },
       usageAccumulator: new SessionUsageAccumulator(),
-      ttsSelection: undefined,
-      sttSelection: undefined,
+      ttsSelection: selections.ttsSelection,
+      sttSelection: selections.sttSelection,
       audioTapDrainScheduled: false,
     };
     this.#records.add(record);
@@ -1564,44 +1634,6 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
     }
 
     try {
-      record.sttSelection = resolveSttCallSelection(this.#resolved.stt.provider, {
-        ...(this.#resolved.stt.model !== undefined ? { model: this.#resolved.stt.model } : {}),
-        ...(record.options.sttLanguage !== undefined
-          ? { sttLanguage: record.options.sttLanguage }
-          : {}),
-        ...(record.options.sttLanguagePolicy !== undefined
-          ? { sttLanguagePolicy: record.options.sttLanguagePolicy }
-          : {}),
-        ...(record.options.sttConversationContext !== undefined
-          ? { sttConversationContext: record.options.sttConversationContext }
-          : {}),
-        ...((this.#resolved.sttVocabulary !== undefined ||
-          record.options.sttVocabulary !== undefined ||
-          record.options.includeToolNamesInSttVocabulary === true) && {
-          vocabulary: [
-            ...(this.#resolved.sttVocabulary ?? []),
-            ...(record.options.sttVocabulary ?? []),
-            ...(record.options.includeToolNamesInSttVocabulary === true
-              ? this.#resolved.agent.tools.map((tool) => String(tool.name))
-              : []),
-          ],
-        }),
-      });
-      record.ttsSelection = resolveTtsCallSelection(
-        this.#resolved.tts.provider,
-        {
-          ...(record.options.ttsModel !== undefined ? { model: record.options.ttsModel } : {}),
-          ...(record.options.ttsVoice !== undefined ? { voice: record.options.ttsVoice } : {}),
-          ...(record.options.ttsLanguage !== undefined
-            ? { language: record.options.ttsLanguage }
-            : {}),
-          ...(record.options.ttsVoicesByLanguage !== undefined
-            ? { voicesByLanguage: record.options.ttsVoicesByLanguage }
-            : {}),
-          ...(record.options.ttsSpeed !== undefined ? { speed: record.options.ttsSpeed } : {}),
-        },
-        this.#resolved.tts,
-      );
       await this.#awaitStartup(record, this.#ensureRuntimeStarted());
       this.#assertStartupOpen(record);
       const attachmentPromise = this.#runtime.startAttachedSession(this.#resolved.agent, {
@@ -1837,10 +1869,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         llmModelSource: this.#resolved.llm.modelSource,
         sttModel: this.#resolved.stt.model,
         sttModelSource: this.#resolved.stt.modelSource,
-        ...(this.#resolved.tts.model !== undefined ? { ttsModel: this.#resolved.tts.model } : {}),
-        ttsModelSource: this.#resolved.tts.modelSource,
         ...(this.#resolved.stt.allowUnknownModel ? { sttAllowUnknownModel: true } : {}),
-        ...(this.#resolved.tts.voice !== undefined ? { ttsVoice: this.#resolved.tts.voice } : {}),
         ...(record.options.sttReconnect !== undefined
           ? { sttReconnect: record.options.sttReconnect }
           : {}),

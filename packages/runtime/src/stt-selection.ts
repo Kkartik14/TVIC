@@ -1,6 +1,7 @@
 import {
   countUnicodeCodePoints,
   MAX_STT_LANGUAGE_HINTS,
+  normalizeStrictLanguageTag,
   STT_ERROR_CODES,
   TvicThrowableError,
   validationError,
@@ -18,6 +19,7 @@ export interface SttCallSelectionInput {
   readonly model?: string;
   readonly sttLanguage?: string;
   readonly sttLanguagePolicy?: SttLanguagePolicy;
+  readonly allowUnknownModel?: boolean;
   readonly vocabulary?: readonly string[];
   readonly sttConversationContext?: boolean;
 }
@@ -39,7 +41,9 @@ export function resolveSttCallSelection(
     invalidRequest("sttLanguage and sttLanguagePolicy cannot be combined");
   }
 
-  const language = input.sttLanguage;
+  // Preserve main's legacy behavior: an empty raw provider hint is treated as
+  // absent. Managed starts validate it earlier; direct loop hosts use this path.
+  const language = input.sttLanguage === "" ? undefined : input.sttLanguage;
   const languagePolicy = resolveLanguagePolicy(input);
   if (languagePolicy !== undefined) {
     if (provider.supportsSttLanguagePolicy === undefined) {
@@ -55,7 +59,7 @@ export function resolveSttCallSelection(
     if (provider.supportsSttVocabulary === undefined) {
       invalidRequest(`Provider ${provider.name} does not declare STT vocabulary support`);
     }
-    if (!provider.supportsSttVocabulary(vocabulary, input.model)) {
+    if (!provider.supportsSttVocabulary(vocabulary, input.model, input.allowUnknownModel)) {
       invalidRequest(
         `Provider ${provider.name} does not support STT vocabulary for the selected model`,
       );
@@ -148,23 +152,19 @@ function normalizeLanguagePolicy(value: SttLanguagePolicy): SttLanguagePolicy {
 }
 
 function normalizeLanguage(value: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
+  const normalized = normalizeStrictLanguageTag(value);
+  if (normalized.ok) return normalized.value;
+  if (normalized.reason === "empty") {
     return invalidRequest("STT language must be a non-empty BCP-47 language tag");
   }
-  const normalized = value.trim();
-  if (normalized.toLowerCase() === "multi" || normalized.toLowerCase() === "unknown") {
+  if (normalized.reason === "mode_value") {
     return invalidRequest("STT mode values multi and unknown are not valid BCP-47 language tags");
   }
-  try {
-    const [canonical] = Intl.getCanonicalLocales(normalized);
-    if (!canonical) throw new RangeError("missing canonical language tag");
-    return canonical;
-  } catch {
-    return invalidRequest(`STT language ${normalized} is not a valid BCP-47 language tag`);
-  }
+  const tag = value.trim();
+  return invalidRequest(`STT language ${tag} is not a valid BCP-47 language tag`);
 }
 
-export function normalizeSttVocabulary(
+function normalizeSttVocabulary(
   input: readonly string[] | undefined,
 ): readonly string[] | undefined {
   if (input === undefined) return undefined;

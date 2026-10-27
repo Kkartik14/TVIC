@@ -26,20 +26,19 @@ import type {
   TtsSynthesisRequest,
 } from "@tvic/core";
 
-import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
+import { ADAPTER_DEFAULTS } from "./catalog.js";
 import {
   SARVAM_TTS_LANGUAGES,
+  SARVAM_TTS_MODELS,
   SARVAM_TTS_VOICES,
-  SARVAM_TTS_V4_FLASH_MODEL,
   assertSarvamTtsLanguageExplicit,
-  isSarvamTtsLanguageCompatible,
+  SarvamTtsSelectionProvider,
+  isSarvamTtsV4FlashModel,
   isSarvamTtsLanguageSupported,
-  isSarvamTtsVoiceSupported,
+  sarvamTtsLanguageAliases,
   resolveSarvamTtsLanguage,
   resolveSarvamTtsVoice,
-  sarvamTtsSpeedSupported,
   sarvamTtsLanguageUnsupportedError,
-  sarvamTtsVoiceSupportsLanguage,
   toSarvamTtsLanguageCode,
   type SarvamTtsVoiceLanguages,
 } from "./sarvam-tts-model.js";
@@ -89,7 +88,7 @@ const SARVAM_TTS_CAPABILITIES = {
   transports: ["websocket"],
   audio: { output: [PCM16_16K_MONO] },
   languages: SARVAM_TTS_LANGUAGES,
-  models: PROVIDER_CATALOG.sarvamTts.models,
+  models: SARVAM_TTS_MODELS,
   timestamps: false,
   metadata: {
     outputAudioCodec: "linear16",
@@ -104,6 +103,7 @@ export interface SarvamTtsProviderOptions {
   readonly voiceId?: string;
   readonly modelId?: string;
   readonly language?: string;
+  /** Optional host-supplied Bulbul v4 persona-to-language allowlist (up to 128 voices). */
   readonly voiceLanguages?: SarvamTtsVoiceLanguages;
   readonly pace?: number;
   readonly temperature?: number;
@@ -139,7 +139,10 @@ interface FlushWaiter {
   readonly reject: (error: unknown) => void;
 }
 
-export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
+export class SarvamTtsProvider
+  extends SarvamTtsSelectionProvider<SarvamTtsProviderOptions>
+  implements IncrementalTextToSpeechProvider
+{
   readonly name = PROVIDER_NAMES.sarvamTts;
   readonly kind = "tts";
   readonly version = "0.1.0";
@@ -152,21 +155,18 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
   readonly #webSocketFactory: NonNullable<SarvamTtsProviderOptions["webSocketFactory"]>;
 
   constructor(options: SarvamTtsProviderOptions) {
-    this.#options = options;
-    this.#modelId = options.modelId ?? PROVIDER_CATALOG.sarvamTts.defaultModel;
-    this.#language = resolveSarvamTtsLanguage(
-      options.language ?? ADAPTER_DEFAULTS.sarvamTts.language,
-      this.#modelId,
-    );
+    super(options);
+    this.#options = this.providerOptions;
+    this.#modelId = this.configuredModel;
+    this.#language = this.configuredLanguage;
     this.capabilities = {
       ...SARVAM_TTS_CAPABILITIES,
       languages: isSarvamTtsLanguageSupported(this.#language, this.#modelId)
-        ? [this.#language]
+        ? sarvamTtsLanguageAliases(this.#language)
         : [],
-      voices:
-        this.#modelId === SARVAM_TTS_V4_FLASH_MODEL
-          ? SARVAM_TTS_V4_FLASH_VOICES
-          : SARVAM_TTS_VOICES,
+      voices: isSarvamTtsV4FlashModel(this.#modelId)
+        ? SARVAM_TTS_V4_FLASH_VOICES
+        : SARVAM_TTS_VOICES,
     };
     this.#clock = options.clock ?? new SystemProviderClock();
     this.#webSocketFactory =
@@ -176,60 +176,6 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
           headers,
           maxPayload: MAX_PROVIDER_FRAME_BYTES,
         }));
-  }
-
-  get configuredModel(): string {
-    return this.#modelId;
-  }
-
-  get configuredModelSource(): "configured" | "not_reported" {
-    return this.#options.modelId === undefined ? "not_reported" : "configured";
-  }
-
-  get configuredLanguage(): string {
-    return this.#language;
-  }
-
-  get languageWasExplicitlyConfigured(): boolean {
-    return this.#options.language !== undefined;
-  }
-
-  get configuredVoice(): string | undefined {
-    return (
-      this.#options.voiceId ??
-      (this.#modelId === SARVAM_TTS_V4_FLASH_MODEL ? undefined : ADAPTER_DEFAULTS.sarvamTts.voice)
-    );
-  }
-
-  supportsVoice(voice: string, model = this.#modelId): boolean {
-    return isSarvamTtsVoiceSupported(voice, model);
-  }
-
-  supportsLanguage(language: string, model = this.#modelId): boolean {
-    return (
-      language === this.#language &&
-      isSarvamTtsLanguageCompatible(language, model, this.#options.language !== undefined)
-    );
-  }
-
-  supportsTtsLanguage(
-    language: string,
-    model = this.#modelId,
-    voice = this.configuredVoice,
-  ): boolean {
-    return sarvamTtsVoiceSupportsLanguage(language, model, voice, this.#options.voiceLanguages);
-  }
-
-  requiresTtsLanguageForModel(model = this.#modelId): boolean {
-    return model === SARVAM_TTS_V4_FLASH_MODEL;
-  }
-
-  requiresTtsVoiceForModel(model = this.#modelId): boolean {
-    return model === SARVAM_TTS_V4_FLASH_MODEL;
-  }
-
-  supportsTtsSpeed(speed: number, model = this.#modelId, voice = this.configuredVoice): boolean {
-    return sarvamTtsSpeedSupported(speed, model, voice);
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
@@ -256,27 +202,26 @@ export class SarvamTtsProvider implements IncrementalTextToSpeechProvider {
     }
 
     const model = request.model ?? this.#modelId;
-    assertSupportedModel(PROVIDER_NAMES.sarvamTts, PROVIDER_CATALOG.sarvamTts.models, model);
-    const selectedLanguage = request.language ?? this.#options.language;
+    assertSupportedModel(PROVIDER_NAMES.sarvamTts, SARVAM_TTS_MODELS, model);
+    const selectedLanguage = request.language || this.#options.language;
     assertSarvamTtsLanguageExplicit(model, selectedLanguage);
 
     const voice = resolveSarvamTtsVoice(model, request.voice ?? this.#options.voiceId);
     const language = resolveSarvamTtsLanguage(selectedLanguage ?? this.#language, model);
-    if (model === SARVAM_TTS_V4_FLASH_MODEL && !this.supportsTtsLanguage(language, model, voice)) {
+    if (isSarvamTtsV4FlashModel(model) && !this.supportsTtsLanguage(language, model, voice)) {
       throw sarvamTtsLanguageUnsupportedError(language, model, voice);
     }
 
     const pace = request.speed ?? this.#options.pace ?? ADAPTER_DEFAULTS.sarvamTts.pace;
     assertSarvamTtsNumber("pace", pace, 0.5, 2.0);
-    if (model === SARVAM_TTS_V4_FLASH_MODEL && this.#options.temperature !== undefined) {
+    if (isSarvamTtsV4FlashModel(model) && this.#options.temperature !== undefined) {
       throw sarvamTtsValidationError(
         "Sarvam Bulbul v4 does not support temperature; temperature is v3 only",
       );
     }
-    const temperature =
-      model === SARVAM_TTS_V4_FLASH_MODEL
-        ? undefined
-        : (this.#options.temperature ?? ADAPTER_DEFAULTS.sarvamTts.temperature);
+    const temperature = isSarvamTtsV4FlashModel(model)
+      ? undefined
+      : (this.#options.temperature ?? ADAPTER_DEFAULTS.sarvamTts.temperature);
     if (temperature !== undefined) assertSarvamTtsNumber("temperature", temperature, 0.01, 1.0);
     const minBufferSize = this.#options.minBufferSize ?? ADAPTER_DEFAULTS.sarvamTts.minBufferSize;
     assertSarvamTtsInteger("minBufferSize", minBufferSize, 30, 200);

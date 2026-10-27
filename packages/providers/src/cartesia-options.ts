@@ -155,12 +155,29 @@ export function cartesiaTtsLanguageSupported(
   return true;
 }
 
+export function cartesiaLanguagesMatch(left: string, right: string): boolean {
+  const leftParts = parseCartesiaLanguage(left);
+  const rightParts = parseCartesiaLanguage(right);
+  return (
+    leftParts !== undefined &&
+    rightParts !== undefined &&
+    leftParts.language === rightParts.language &&
+    leftParts.locale === rightParts.locale
+  );
+}
+
 export function cartesiaRequestLanguage(
   value: string,
   model: string,
   configuredLocale?: string,
+  allowUnmappedModel = false,
 ): CartesiaLanguageParts {
-  if (!cartesiaTtsLanguageSupported(value, model, configuredLocale)) {
+  const mappedModel = cartesiaHasLanguageMappingForModel(model);
+  if (
+    mappedModel
+      ? !cartesiaTtsLanguageSupported(value, model, configuredLocale)
+      : !allowUnmappedModel
+  ) {
     throw TvicThrowableError.from(
       validationError(
         TVIC_ERROR_CODES.ttsLanguageUnsupported,
@@ -211,7 +228,8 @@ function parseCartesiaLanguage(value: string): CartesiaLanguageParts | undefined
   // Intl canonicalizes Filipino's legacy `tl` subtag to `fil`; Cartesia's
   // synthesis API still names the supported language `tl`.
   const canonicalLanguage = match[1].toLowerCase();
-  const language = canonicalLanguage === "fil" ? "tl" : canonicalLanguage;
+  const language =
+    canonicalLanguage === "fil" ? "tl" : canonicalLanguage === "nb" ? "no" : canonicalLanguage;
   const region = match[2]?.toUpperCase();
   return {
     language,

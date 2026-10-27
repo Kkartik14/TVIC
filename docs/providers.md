@@ -29,6 +29,10 @@ The machine-readable values are exported as `PROVIDER_STABILITY`; the ordered
 levels are exported as `PROVIDER_STABILITY_LEVELS`. These values describe TVIC's
 support claim, not the vendor's marketing or service-level guarantee.
 
+Hosts implementing custom text-to-speech adapters can follow the
+[provider author guide](./provider-author-guide.md) for selection hooks and
+preflight behavior.
+
 ### Evidence and test ladder
 
 The repository has multiple kinds of confidence. They must not be collapsed into
@@ -85,10 +89,10 @@ before choosing a model for a production or purchasing decision.
 | Provider          | Stability    | Environment variable | Catalog models                                                                   | Catalog verified |
 | ----------------- | ------------ | -------------------- | -------------------------------------------------------------------------------- | ---------------- |
 | Deepgram          | Experimental | `DEEPGRAM_API_KEY`   | `nova-3`, `nova-2`                                                               | 2026-09-15       |
-| Cartesia Ink      | Experimental | `CARTESIA_API_KEY`   | realtime: `ink-2`, `ink-preview`, `ink-whisper-2025-06-04`; batch: `ink-whisper` | 2026-09-27       |
-| Sarvam            | Experimental | `SARVAM_API_KEY`     | `saaras:v3`, `saaras:v4`                                                         | 2026-09-15       |
-| ElevenLabs Scribe | Experimental | `ELEVENLABS_API_KEY` | `scribe_v2`, `scribe_v2_realtime`, `scribe_v2_medical`                           | 2026-09-24       |
-| AssemblyAI        | Experimental | `ASSEMBLYAI_API_KEY` | Realtime: U3.6/U3.5/English/Multilingual; pre-recorded: U3.5/U2; Sync: U3.5      | 2026-09-27       |
+| Cartesia Ink      | Experimental | `CARTESIA_API_KEY`   | realtime: `ink-2`, `ink-preview`, `ink-whisper-2025-06-04`; batch: `ink-whisper` | 2026-10-27       |
+| Sarvam            | Experimental | `SARVAM_API_KEY`     | `saaras:v3`, `saaras:v4`                                                         | 2026-10-27       |
+| ElevenLabs Scribe | Experimental | `ELEVENLABS_API_KEY` | `scribe_v2`, `scribe_v2_realtime`, `scribe_v2_medical`                           | 2026-10-27       |
+| AssemblyAI        | Experimental | `ASSEMBLYAI_API_KEY` | Realtime: U3.6/U3.5/English/Multilingual; pre-recorded: U3.5/U2; Sync: U3.5      | 2026-10-24       |
 | Soniox            | Experimental | `SONIOX_API_KEY`     | `stt-rt-v5`                                                                      | 2026-08-20       |
 
 ### Language models
@@ -100,11 +104,11 @@ before choosing a model for a production or purchasing decision.
 
 ### Text to speech
 
-| Provider   | Stability    | Environment variable | Required voice variable    | Catalog models                                                                                                             | Catalog verified |
-| ---------- | ------------ | -------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ---------------- |
-| Cartesia   | Experimental | `CARTESIA_API_KEY`   | `CARTESIA_VOICE_ID`        | `sonic-3.6`, `sonic-3.6-2026-08-27`, `sonic-preview`, `sonic-3.5`, `sonic-3.5-2026-05-04`, `sonic-3`, `sonic-3-2026-01-12` | 2026-09-25       |
-| ElevenLabs | Experimental | `ELEVENLABS_API_KEY` | `ELEVENLABS_VOICE_ID`      | v3, v3 Conversational, Multilingual v2, Flash v2/2.5, retained Turbo v2/2.5                                                | 2026-09-25       |
-| Sarvam     | Experimental | `SARVAM_API_KEY`     | Optional (`shubh` default) | `bulbul:v3` (WebSocket, REST, HTTP stream; 37 built-in voices, 11 languages)                                               | 2026-09-25       |
+| Provider   | Stability    | Environment variable | Required voice variable    | Catalog models                                                                                                                               | Catalog verified |
+| ---------- | ------------ | -------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| Cartesia   | Experimental | `CARTESIA_API_KEY`   | `CARTESIA_VOICE_ID`        | `sonic-3.6`, `sonic-3.6-2026-08-27`, `sonic-preview`, `sonic-3.5`, `sonic-3.5-2026-05-04`, `sonic-3`, `sonic-3-2026-01-12`                   | 2026-10-27       |
+| ElevenLabs | Experimental | `ELEVENLABS_API_KEY` | `ELEVENLABS_VOICE_ID`      | v3, v3 Conversational, v4 (REST and WebSocket dialogue), v4 Turbo (WebSocket dialogue), Multilingual v2, Flash v2/2.5, retained Turbo v2/2.5 | 2026-10-27       |
+| Sarvam     | Experimental | `SARVAM_API_KEY`     | Optional (`shubh` default) | `bulbul:v3` and `bulbul:v4-flash` (WebSocket, REST, HTTP stream; classic and persona voice catalogs)                                         | 2026-10-27       |
 
 The dates above come from the current provider catalog in
 `packages/providers/src/catalog.ts`. They are evidence dates, not promises that
@@ -334,17 +338,29 @@ available.
 
 ## Provider-specific notes
 
-The runtime forwards the legacy `sttLanguage` string to the adapter without
-BCP-47 normalization or policy preflight. Host-written providers may continue to
-use values such as `hi_IN`, `multi`, or an empty string. The explicit
-`sttLanguagePolicy` path is normalized and checked against the configured
-adapter's declared support.
+The managed API forwards a non-empty legacy `sttLanguage` string to the adapter
+without BCP-47 normalization or policy preflight. Host-written providers may
+continue to use values such as `hi_IN` or `multi`; the managed API rejects an
+empty string. The explicit `sttLanguagePolicy` path is normalized and checked
+against the configured adapter's declared support.
+`strictness: "best_effort"` is provider-specific: Soniox maps it to
+`language_hints_strict: false`; adapters without that wire behavior reject it.
+
+STT vocabulary is included in provider requests. Deepgram, Cartesia, ElevenLabs,
+AssemblyAI, and Sarvam send it in WebSocket URL query parameters; proxy or
+provider logs may therefore expose the terms. Soniox sends vocabulary in its
+WebSocket context payload. Avoid secrets and personal data in vocabulary terms.
 
 ### Deepgram
 
 The adapter uses a WebSocket stream with PCM16 audio, interim results, endpointing,
 VAD events, and optional language and vocabulary settings. The default model is
 `nova-3` and the default endpointing value is 300 milliseconds.
+The normalized `sttLanguagePolicy` accepts model-specific fixed language tags
+from Deepgram's model matrix. Hint policies are available on multilingual
+`nova-3`; they reduce regional tags to the primary language. The canonical BCP-47
+tag `fil` is mapped to Deepgram's `tl`. The legacy `sttLanguage` field continues
+to pass raw provider values through.
 
 Official model information: <https://developers.deepgram.com/docs/models-languages-overview>
 
@@ -372,6 +388,9 @@ detection, and entity detection. Realtime keyterms are capped at 50 entries and
 adapter waits for the delayed committed metadata event before emitting the
 final segment. When entity detection is enabled, it likewise waits for and
 attaches bounded entity records under `metadata.elevenlabs.entities`.
+For `languagePolicy.mode: "hints"`, the first language is sent as the primary
+`language_code`; remaining languages are sent as `secondary_languages` in the
+same order.
 
 Batch `transcribe()` accepts keyterms, audio-event tagging, diarization,
 timestamps, entity detection, and no-verbatim mode for both batch models. The
@@ -400,8 +419,11 @@ Official batch STT information: <https://elevenlabs.io/docs/api-reference/speech
   primes the Sync service.
 
 The realtime adapter accepts 16 kHz PCM16 mono frames. Its `commit()` flushes the
-final buffered audio and sends AssemblyAI's `ForceEndpoint` control message;
-`close()` sends the documented `Terminate` message. Sync accepts 80 ms through
+final buffered audio and sends AssemblyAI's `ForceEndpoint` control message.
+`close()` flushes and waits for pending audio writes within a two-second budget,
+then sends the documented `Terminate` message. If a write stalls past that
+budget, it rejects that write and force-closes the socket while allowing the
+requested close to finish. Sync accepts 80 ms through
 120 seconds of PCM16LE mono or stereo audio; pre-recorded accepts a public URL or
 uploaded bytes and retains the provider's bounded response for fields TVIC has
 not promoted yet. Pre-recorded requests also support speaker diarization,
@@ -437,6 +459,12 @@ policy with `strictness: "best_effort"` sends `language_hints_strict: false`,
 so the provider may still detect speech outside the hints. Omitting
 `strictness` leaves Soniox's default behavior unchanged. The legacy raw
 `sttLanguage` request remains a provider hint and does not set strict mode.
+Custom `webSocketFactory` implementations must forward the supplied
+`Authorization` header. The adapter does not use Soniox's deprecated start-frame
+`api_key` field, which Soniox plans to stop accepting on 15 January 2027; see its
+[authentication migration guide](https://soniox.com/docs/guides/migrate-websocket-authentication).
+For Tagalog, the language policy accepts the canonical `fil` tag and maps it to
+Soniox's `tl` code.
 
 Official protocol information: <https://soniox.com/docs/api-reference/stt/websocket-api>
 
@@ -446,6 +474,9 @@ The Cartesia STT adapter supports the current Ink family: `ink-2` (the default),
 `ink-preview`, and the dated `ink-whisper-2025-06-04` snapshot. It accepts
 16 kHz mono PCM16LE over WebSocket and keeps the provider's model, language,
 keyterms, and transcript metadata bounded at the adapter boundary.
+The Ink Whisper language policy accepts canonical `fil` and sends Cartesia's
+Tagalog code, `tl`. It maps Bokmål (`nb`) to Cartesia's `no` code and preserves
+Nynorsk (`nn`) as its separately supported code.
 
 The default `manual` mode uses Cartesia's `/stt/websocket` endpoint. TVIC maps
 the session commit operation to Cartesia's `finalize` command and maps
@@ -521,17 +552,21 @@ The adapter owns continuation buffering by default (`maxBufferDelayMs: 0`) and
 supports Cartesia's optional `locale`, `accent`, `normalization`, pronunciation
 dictionary, and `generationConfig` controls. It remains Experimental until the
 provider/model/transport path earns TVIC's validated evidence threshold.
+Cartesia requires Sonic 3.6 or newer for `locale`; older models receive the
+base language instead. Unknown models accept a syntactically valid configured
+language when `allowUnknownModel` is enabled; the vendor remains responsible
+for validating that model's actual language support.
 
 `voiceCatalogSnapshot` is optional. With a snapshot, TVIC preflights overrides
 against its active voice records; a 404 is retained as a `missing` record rather
 than failing the entire snapshot. Without a snapshot, syntactically valid
 per-call voice IDs pass through to Cartesia for provider-side resolution. A
-snapshot is checked when the provider instance is created and stays usable for
-that instance's lifetime; create a new provider with refreshed facts to update
-it. Without a snapshot, a configured `generationConfig.speed` needs only
-Cartesia's numeric range; when a snapshot is supplied it must be fresh and
-confirm a compatible voice. Per-call speed overrides require fresh voice
-metadata.
+snapshot is checked when the provider instance is created and again for each
+call. A stale snapshot is treated as absent, so configured voice IDs and
+provider-managed per-call voices keep working after its 24-hour lifetime.
+Without a fresh snapshot, a configured `generationConfig.speed` needs only
+Cartesia's 0.6–1.5 range. Per-call speed overrides require fresh voice metadata
+that confirms a compatible non-professional voice.
 
 `fetchCartesiaVoiceCatalogSnapshot()` accepts an optional `signal` to cancel the
 lookup. Authentication failures retain the provider auth error code.
@@ -553,12 +588,14 @@ TVIC covers the complete ElevenLabs speech-generation transport surface:
 | `createElevenLabsTtsProvider`           | Regular TTS WebSocket and Text-to-Dialogue WebSocket | Incremental agent text, flush/finish lifecycle, alignment, v3 multi-voice turns |
 | `createElevenLabsTtsRestProvider`       | Complete TTS/Dialogue HTTP plus timestamped variants | One-shot generation and request stitching                                       |
 | `createElevenLabsTtsHttpStreamProvider` | Chunked TTS/Dialogue HTTP plus timestamped variants  | Low-buffer server-side piping and HTTP cancellation                             |
-| `createElevenLabsMultiContextProvider`  | TTS or Text-to-Dialogue multi-context WebSocket      | Up to five independent contexts multiplexed on one connection                   |
+| `createElevenLabsMultiContextProvider`  | TTS or v3 Text-to-Dialogue multi-context WebSocket   | Up to five independent contexts multiplexed on one connection                   |
 
 The HTTP adapter exposes `synthesizeSpeech()` for the regular single-voice
 endpoint and `synthesizeDialogue()` for explicit multi-voice requests. Its
-ordinary `synthesize()` route selects Text-to-Dialogue for v3 models and regular
-TTS for other models. Timestamped responses become `tts.alignment` events, and
+ordinary `synthesize()` route selects Text-to-Dialogue for v3 and v4 models and
+regular TTS for other models. v4 Turbo is available on the WebSocket dialogue
+route; TVIC does not expose it through HTTP or HTTP streaming. Timestamped
+responses become `tts.alignment` events, and
 request-stitching fields (`previousText`, `nextText`, `previousRequestIds`, and
 `nextRequestIds`) are passed through with bounded validation.
 
@@ -566,14 +603,20 @@ The provider-specific options expose the documented streaming controls: seed
 (0 is valid for regular TTS; v3 dialogue seeds start at 1),
 text normalization, zero-retention logging, SSML parsing, inactivity timeout,
 regular-WebSocket auto mode and chunk schedule, and up to three pronunciation
-dictionaries. v3 sessions can register multiple voices through `dialogueVoices`
+dictionaries. v3 and v4 single-context dialogue sessions can register voices through `dialogueVoices`
 and send a turn with `sendDialogueTurn({ voiceId, newTurn })`; conversational v3
-accepts one registered voice and v3 accepts up to ten. Dialogue sessions also
-expose `keepAlive()` for the provider's receive timeout.
+and v4 Turbo accept one registered voice, while v3 and v4 accept up to ten.
+HTTP dialogue requests are limited to 2,000 total text characters. The v4
+WebSocket context limit is 10,000 characters; v4 Turbo has no separate TVIC
+character cap. Dialogue sessions also expose `keepAlive()` for the provider's
+receive timeout.
 
 For v3 dialogue, the adapter sends only the supported stability setting; it
 rejects speed and similarity overrides before connecting because ElevenLabs does
 not expose those settings for v3.
+For other catalog models, supported speed is 0.7–1.2. v4 dialogue and v3
+dialogue do not accept speed. With `allowUnknownModel`, TVIC permits that range
+for custom models outside the dialogue protocols.
 
 `knownVoiceIds` and `dialogueVoices` optionally enable strict preflight for
 per-call voices. When the relevant list is omitted, syntactically valid voice
@@ -587,8 +630,15 @@ body, so they do not need that path placeholder.
 TVIC accepts a configured or per-call language for that model and omits it from
 the provider request.
 
-Multi-context dialogue enforces the provider's five-context connection limit and
-the one-voice conversational / ten-voice v3 registration rules.
+TVIC maps BCP-47 language tags to the primary language code in `language_code`
+(for example, `hi-IN` becomes `hi`). Flash and Turbo use their finite language
+tables. The v3/v4 documentation describes 70+ and 90+ languages with
+representative lists, so TVIC accepts syntactically valid BCP-47 tags for those
+model families and leaves vendor language handling to ElevenLabs.
+
+Multi-context dialogue currently supports ElevenLabs v3 models only; v4 and v4
+Turbo are rejected for this route. It enforces the provider's five-context
+connection limit and v3's voice-registration rules.
 
 ElevenLabs also offers MP3, Opus, μ-law, A-law, and WAV output. They are not
 silently mislabeled as TVIC PCM: the provider-neutral media boundary is PCM-only,
@@ -613,18 +663,19 @@ Official TTS best practices: <https://elevenlabs.io/docs/overview/capabilities/t
 
 ### Sarvam TTS
 
-Sarvam TTS uses Bulbul v3 and exposes all 37 documented v3 voices and all 11
-supported languages. Every adapter normalizes successful output to TVIC's
+Sarvam TTS exposes Bulbul v3's classic speaker catalog and Bulbul v4 Flash's
+persona voice catalog. V3 supports 11 language codes; v4 Flash requires a
+caller-selected language and a supported persona voice. Every adapter normalizes successful output to TVIC's
 `linear16`, mono, 16 kHz media boundary and rejects unsupported formats or
 malformed provider audio instead of passing compressed bytes downstream.
 
 TVIC exposes all three Sarvam delivery choices:
 
-| Factory                             | Sarvam endpoint               | Best fit                                                                    | Input/output behavior                                                                             |
-| ----------------------------------- | ----------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `createSarvamTtsProvider`           | WebSocket                     | Voice agents and multi-turn incremental text                                | Persistent bidirectional session; multiple text messages; provider `final` flush acknowledgements |
-| `createSarvamTtsRestProvider`       | `POST /text-to-speech`        | Complete text where a JSON response is convenient                           | One request; base64-encoded WAV in JSON; 2,500-character Bulbul v3 limit                          |
-| `createSarvamTtsHttpStreamProvider` | `POST /text-to-speech/stream` | Server-side piping, proxies, serverless, and one-shot low-buffer generation | One request; binary WAV response streamed as chunks; 3,500-character limit                        |
+| Factory                             | Sarvam endpoint               | Best fit                                                                    | Input/output behavior                                                                                                  |
+| ----------------------------------- | ----------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `createSarvamTtsProvider`           | WebSocket                     | Voice agents and multi-turn incremental text                                | Persistent bidirectional session; v3/v4 models; 2,500-character request limit; provider `final` flush acknowledgements |
+| `createSarvamTtsRestProvider`       | `POST /text-to-speech`        | Complete text where a JSON response is convenient                           | One request; v3/v4 models; base64-encoded WAV in JSON; 2,500-character limit                                           |
+| `createSarvamTtsHttpStreamProvider` | `POST /text-to-speech/stream` | Server-side piping, proxies, serverless, and one-shot low-buffer generation | One request; v3/v4 models; binary WAV response streamed as chunks; 3,500-character limit                               |
 
 The REST adapter decodes the returned base64 WAV. The HTTP stream adapter parses
 the WAV header incrementally, emits PCM chunks as the binary response arrives,
@@ -634,10 +685,27 @@ and optional `dict_id`. The WebSocket adapter remains the path for incremental
 LLM text, repeated turns, and explicit buffering/flush control; HTTP streaming
 does not replace that lifecycle.
 
+Per-call `ttsSpeed` maps to Sarvam's `pace` and must be in the 0.5–2.0 range.
+Bulbul v4 requires a persona voice and language. Sarvam accepts the `ml-IN` and
+`od-IN` language codes, but its current v4 persona catalog does not list
+Malayalam or Odia voices. TVIC validates a voice-language pair only when the
+host supplies the optional `voiceLanguages` map; without that map, Sarvam does
+the final compatibility check. The model guide lists v4 personas for Hindi,
+English, English-Hindi, Bengali, Gujarati, Kannada, Marathi, Punjabi, Tamil, and
+Telugu. TVIC does not hard-code that list as a language restriction for every
+persona.
+
+The optional `voiceLanguages` provider setting is a record from persona voice
+IDs to arrays of language tags, for example
+`{ simran_en_customer: ["en-IN"] }`. It can contain at most 128 voice IDs and
+applies to WebSocket, REST, and HTTP-stream adapters. This is host-supplied
+preflight data; omit the map when Sarvam should be the authority for voice and
+language pairs.
+
 The public config also supports `transport: "websocket" | "rest" |
 "http-stream"` when using the managed runtime. The default remains WebSocket so
-existing agents do not change behavior. The adapter intentionally exposes only
-`bulbul:v3` until the legacy `bulbul:v2` path is separately verified.
+existing agents do not change behavior. TVIC exposes `bulbul:v3` and
+`bulbul:v4-flash`; the legacy `bulbul:v2` path is not exposed.
 
 Official model information: <https://docs.sarvam.ai/api/getting-started/models/bulbul>
 Official TTS overview: <https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/overview>

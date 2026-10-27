@@ -44,8 +44,8 @@ describe("resolveSttCallSelection", () => {
     expect(resolveSttCallSelection(hostWrittenProvider, { sttLanguage: "multi" })).toMatchObject({
       language: "multi",
     });
-    expect(resolveSttCallSelection(hostWrittenProvider, { sttLanguage: "" })).toMatchObject({
-      language: "",
+    expect(resolveSttCallSelection(hostWrittenProvider, { sttLanguage: "" })).toEqual({
+      agentContextUpdates: false,
     });
   });
 
@@ -68,6 +68,31 @@ describe("resolveSttCallSelection", () => {
         vocabulary: [" Acme ", "acme", "Acme"],
       }),
     ).toEqual({ vocabulary: ["Acme", "acme"], agentContextUpdates: false });
+  });
+
+  it("passes the per-call unknown-model opt-in to vocabulary preflight", () => {
+    const requestAwareProvider = {
+      ...provider,
+      supportsSttVocabulary: (
+        vocabulary: readonly string[],
+        model?: string,
+        allowUnknownModel?: boolean,
+      ) => model === "host-model-vNext" && allowUnknownModel === true && vocabulary.length > 0,
+    } satisfies SpeechToTextProvider;
+
+    expect(() =>
+      resolveSttCallSelection(requestAwareProvider, {
+        model: "host-model-vNext",
+        vocabulary: ["Acme"],
+        allowUnknownModel: true,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      resolveSttCallSelection(requestAwareProvider, {
+        model: "host-model-vNext",
+        vocabulary: ["Acme"],
+      }),
+    ).toThrow(/does not support STT vocabulary/u);
   });
 
   it("rejects context updates without an explicit provider capability", () => {

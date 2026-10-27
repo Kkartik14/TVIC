@@ -1,3 +1,5 @@
+import { inspect } from "node:util";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -20,11 +22,11 @@ import {
   SarvamTtsHttpStream,
   SarvamTtsHttpStreamProvider,
   SarvamTtsRestProvider,
+  SarvamTtsProvider,
   createSarvamTtsHttpStreamProvider,
   createSarvamTtsRestProvider,
 } from "../src/index.js";
 import { SarvamWavStreamDecoder } from "../src/sarvam-tts-wav.js";
-import { toSarvamTtsLanguageCode } from "../src/sarvam-tts-model.js";
 import { decodeSarvamTtsAudioWithFormat } from "../src/sarvam-tts-audio.js";
 import {
   assertSarvamTtsJsonStructureBounded,
@@ -44,6 +46,25 @@ const fixedClock = {
     return "2026-09-25T00:00:00.000Z" as Timestamp;
   },
 };
+
+describe("Sarvam TTS provider configuration", () => {
+  it("keeps API keys out of serialized and enumerable provider data", () => {
+    const apiKey = "sarvam-secret-test-key";
+    const providers = [
+      new SarvamTtsProvider({ apiKey }),
+      new SarvamTtsRestProvider({ apiKey }),
+      new SarvamTtsHttpStreamProvider({ apiKey }),
+    ];
+
+    for (const provider of providers) {
+      expect(JSON.stringify(provider)).not.toContain(apiKey);
+      expect(inspect(provider)).not.toContain(apiKey);
+      expect({ ...provider }).not.toHaveProperty("apiKey");
+      expect({ ...provider }).not.toHaveProperty("options");
+      expect(Object.prototype.hasOwnProperty.call(provider, "options")).toBe(false);
+    }
+  });
+});
 
 async function settleWithin<T>(
   promise: Promise<T>,
@@ -932,6 +953,56 @@ describe("Sarvam Bulbul v3 REST TTS adapter", () => {
 });
 
 describe("Sarvam Bulbul v4 Flash HTTP adapters", () => {
+  it("keeps od-IN available through the REST and HTTP-stream adapters", () => {
+    const rest = new SarvamTtsRestProvider({
+      apiKey: "sarvam-secret",
+      language: "od-IN",
+    });
+    const stream = new SarvamTtsHttpStreamProvider({
+      apiKey: "sarvam-secret",
+      language: "od-IN",
+    });
+
+    expect(rest.supportsLanguage("od-IN")).toBe(true);
+    expect(stream.supportsLanguage("od-IN")).toBe(true);
+    expect(rest.capabilities.languages).toEqual(["or-IN", "od-IN"]);
+    expect(stream.capabilities.languages).toEqual(["or-IN", "od-IN"]);
+  });
+
+  it.each([
+    [
+      "REST",
+      (voiceLanguages: unknown) =>
+        new SarvamTtsRestProvider({
+          apiKey: "sarvam-secret",
+          modelId: SARVAM_TTS_V4_FLASH_MODEL,
+          voiceLanguages: voiceLanguages as never,
+        }),
+    ],
+    [
+      "HTTP stream",
+      (voiceLanguages: unknown) =>
+        new SarvamTtsHttpStreamProvider({
+          apiKey: "sarvam-secret",
+          modelId: SARVAM_TTS_V4_FLASH_MODEL,
+          voiceLanguages: voiceLanguages as never,
+        }),
+    ],
+  ] as const)("rejects malformed voiceLanguages in the %s adapter", (_name, create) => {
+    let failure: unknown;
+    try {
+      create({ simran_en_customer: "hi-IN" });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      code: TVIC_ERROR_CODES.providerInvalidRequest,
+      provider: PROVIDER_NAMES.sarvamTts,
+    });
+    expect(failure).not.toBeInstanceOf(TypeError);
+  });
+
   it.each(["rest", "http-stream"] as const)(
     "%s synthesizes every verified V4 persona with every supported V4 language",
     async (transport) => {
@@ -974,7 +1045,7 @@ describe("Sarvam Bulbul v4 Flash HTTP adapters", () => {
           expect(body).toMatchObject({
             model: SARVAM_TTS_V4_FLASH_MODEL,
             speaker: voice,
-            language_code: toSarvamTtsLanguageCode(language),
+            language_code: language === "or-IN" ? "od-IN" : language,
           });
           pairs += 1;
         }
@@ -1907,7 +1978,7 @@ describe("Sarvam Bulbul v3 HTTP catalog matrix", () => {
               init?: Parameters<typeof fetch>[1],
             ) => {
               const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-              expect(body.language_code).toBe(toSarvamTtsLanguageCode(language));
+              expect(body.language_code).toBe(language === "or-IN" ? "od-IN" : language);
               expect(body.speaker).toBe(voice);
               const wav = makeWav(pcm);
               return transport === "rest"

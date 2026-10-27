@@ -22,6 +22,8 @@ export interface TtsSessionOpenRequest {
 export interface TtsSynthesisRequest extends TtsSessionOpenRequest {
   readonly text: string;
   readonly stream: boolean;
+  /** Internal provenance used by wrappers such as provider failover. */
+  readonly selectionContext?: TtsProviderSelectionContext;
 }
 
 export interface TtsProviderSelection {
@@ -29,6 +31,11 @@ export interface TtsProviderSelection {
   readonly voice?: string;
   readonly language?: string;
   readonly speed?: number;
+}
+
+/** Provenance for selection hooks; configured defaults are not caller choices. */
+export interface TtsProviderSelectionContext {
+  readonly languageWasCallerSelected: boolean;
 }
 
 export type TtsAlignmentUnit = "character" | "word" | "phoneme";
@@ -87,8 +94,30 @@ export interface TextToSpeechProvider extends Provider {
   readonly kind: "tts";
   readonly configuredModelSource?: "configured" | "not_reported";
   readonly usageAccounting?: TtsUsageAccounting;
-  readonly supportsTtsSelection?: (selection: TtsProviderSelection) => boolean;
-  readonly supportsTtsVoiceOverride?: (voice: string, model?: string, language?: string) => boolean;
+  /** Preflights the complete per-call selection when the adapter can do so. */
+  readonly supportsTtsSelection?: (
+    selection: TtsProviderSelection,
+    context?: TtsProviderSelectionContext,
+  ) => boolean;
+  /** Reports whether a model requires callers to select an output language. */
+  readonly requiresTtsLanguageForModel?: (model?: string) => boolean;
+  /** Reports whether a model requires callers to select a voice. */
+  readonly requiresTtsVoiceForModel?: (model?: string) => boolean;
+  /** Reports support for a language with optional model and voice context. */
+  readonly supportsTtsLanguage?: (
+    language: string,
+    model?: string,
+    voice?: string,
+    context?: TtsProviderSelectionContext,
+  ) => boolean;
+  /** Reports support for a speed with optional model and voice context. */
+  readonly supportsTtsSpeed?: (speed: number, model?: string, voice?: string) => boolean;
+  readonly supportsTtsVoiceOverride?: (
+    voice: string,
+    model?: string,
+    language?: string,
+    context?: TtsProviderSelectionContext,
+  ) => boolean;
   synthesize(request: TtsSynthesisRequest): Promise<TtsStream>;
 }
 

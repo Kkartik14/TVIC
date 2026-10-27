@@ -36,18 +36,20 @@ LLM, and TTS providers.
 
 Important options:
 
-| Option               | Purpose                                                                  |
-| -------------------- | ------------------------------------------------------------------------ |
-| `prompt`             | Agent instructions used as the base system prompt                        |
-| `providers`          | Telephony, STT, LLM, and TTS provider instances or configuration objects |
-| `models`             | Optional model and TTS voice overrides                                   |
-| `tools`              | Application tool definitions                                             |
-| `audio`              | Input and output audio formats, defaulting to PCM16 16 kHz mono          |
-| `memoryPolicy`       | Memory scopes, loading, retention, and LLM memory writes                 |
-| `contextPolicy`      | Bounds for prompt history and pre-call context                           |
-| `interruptionPolicy` | Caller interruption behavior                                             |
-| `audioTap`           | Optional bounded asynchronous callback for caller and agent PCM frames   |
-| `runtime`            | Durable state, memory, hooks, health, metrics, and shutdown options      |
+| Option                | Purpose                                                                  |
+| --------------------- | ------------------------------------------------------------------------ |
+| `prompt`              | Agent instructions used as the base system prompt                        |
+| `providers`           | Telephony, STT, LLM, and TTS provider instances or configuration objects |
+| `models`              | Optional model and TTS voice overrides                                   |
+| `tools`               | Application tool definitions                                             |
+| `audio`               | Input and output audio formats, defaulting to PCM16 16 kHz mono          |
+| `memoryPolicy`        | Memory scopes, loading, retention, and LLM memory writes                 |
+| `contextPolicy`       | Bounds for prompt history and pre-call context                           |
+| `interruptionPolicy`  | Caller interruption behavior                                             |
+| `audioTap`            | Optional bounded asynchronous callback for caller and agent PCM frames   |
+| `runtime`             | Durable state, memory, hooks, health, metrics, and shutdown options      |
+| `sttVocabulary`       | Default STT vocabulary terms merged into each call's terms               |
+| `ttsVoicesByLanguage` | Default language-to-voice map used when a call does not choose a voice   |
 
 ### `agent.start(options)`
 
@@ -89,6 +91,21 @@ host-provided `AbortSignal` also cancels the session; it records
 Start `session.run`—typically by beginning to consume its event stream—before
 calling `complete()`. Calling `complete()` before the run starts rejects with
 `voice_runtime.session_not_running`.
+
+Speech options can be set per call. Call-level values take precedence over
+agent defaults, and the provider's configured value remains the final default.
+
+| Option                            | Purpose / limit                                                                                                         |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `sttLanguage`                     | Legacy raw provider language string; empty values are rejected.                                                         |
+| `sttLanguagePolicy`               | Normalized `fixed`, `auto`, or `hints` policy; hints accept up to 16 languages.                                         |
+| `sttVocabulary`                   | Terms merged with agent defaults; the 256-term cap applies before de-duplication, and each term allows 256 code points. |
+| `includeToolNamesInSttVocabulary` | Adds tool names to the merged vocabulary; off by default.                                                               |
+| `sttConversationContext`          | Enables supported context updates from confirmed agent speech.                                                          |
+| `ttsModel`, `ttsVoice`            | Per-call model and voice overrides.                                                                                     |
+| `ttsLanguage`                     | Per-call BCP-47 language override.                                                                                      |
+| `ttsSpeed`                        | Per-call positive speed; the selected provider may enforce a narrower range.                                            |
+| `ttsVoicesByLanguage`             | Per-call language-to-voice map; at most 128 entries.                                                                    |
 
 ### `agent.run(options)`
 
@@ -245,6 +262,9 @@ Source: [`packages/runtime/src/index.ts`](../packages/runtime/src/index.ts)
 | `matchPath`                         | Match media-plane route parameters                            |
 | `health` and lifecycle types        | Describe health, cleanup, recovery, and terminal events       |
 
+`SttReconnectOptions.contextUpdateTimeoutMs` sets the deadline for provider
+agent-context writes. It defaults to 2 seconds, matching the serial STT path.
+
 ## Providers
 
 Source: [`packages/providers/src/index.ts`](../packages/providers/src/index.ts)
@@ -273,7 +293,40 @@ createSarvamTtsProvider(options);
 createSarvamTtsRestProvider(options);
 createSarvamTtsHttpStreamProvider(options);
 createTtsFailoverProvider(options);
+fetchCartesiaVoiceCatalogSnapshot(options);
+normalizeCartesiaVoiceCatalogSnapshot(snapshot);
 ```
+
+Sarvam TTS factories accept an optional `voiceLanguages` map for host-owned
+Bulbul v4 pair validation. Its keys are persona voice IDs and each value is an
+array of supported language tags:
+
+```ts
+createSarvamTtsProvider({
+  apiKey,
+  modelId: "bulbul:v4-flash",
+  voiceLanguages: {
+    simran_en_customer: ["en-IN"],
+    simran_hi_assistant: ["hi-IN"],
+  },
+});
+```
+
+The map can contain up to 128 voice IDs. It is optional; without it, TVIC checks
+that the voice and language are individually valid and Sarvam decides whether
+that pair is available. The same option is supported by the Sarvam REST and
+HTTP-stream factories.
+
+The package root also exports `CartesiaVoiceCatalogEntry`,
+`CartesiaVoiceCatalogSnapshot`, `FetchCartesiaVoiceCatalogSnapshotOptions`,
+`TtsFailoverRequestVariant`, `resolveTtsCallSelection`, and
+`resolveSttCallSelection`. The `PipelineVoiceLoopOptions.sttSelection` and
+`.ttsSelection` fields use the exported `SttCallSelection`,
+`SttCallSelectionInput`, `TtsCallSelection`, and `TtsCallSelectionInput` types.
+`MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES` is the 128-entry language-to-voice map
+limit. `canonicalizeLanguageTag`, `normalizeStrictLanguageTag`,
+`primaryLanguageSubtag`, and `normalizeLanguageStringMap` are shared language
+helpers exported from the package root.
 
 AssemblyAI's provider instance also exposes its non-streaming STT surfaces:
 
@@ -317,11 +370,22 @@ case, compatibility checks preflight the primary provider and TVIC validates
 the mapped fallback request only when failover is needed. Supplying
 `fallbackRequestVariants` lets TVIC preflight the declared fallback settings as
 well. If mapped settings fail validation, the error keeps the primary provider's
-code and includes a `fallbackValidationFailure` metadata entry; `onFallback`
-observes the fallback mapping attempt. The callback receives the mapped request
-when mapping succeeds; if the mapper throws, it receives the primary request
-copy that was supplied to the mapper. Its `error` field remains the primary
-provider failure.
+code and includes a `fallbackValidationFailure` metadata entry. `onFallback` is
+called only after mapping and fallback validation succeed, immediately before
+dispatch. Mapping, validation, or cancellation failures do not call it. The
+callback receives the validated mapped request, and its `error` field remains
+the primary provider failure.
+
+Each variant may include `when` to match the primary call's effective model,
+voice, language, or speed. Language matching is exact by default; set
+`languageMatch: "base-language"` to match tags such as `en` and `en-IN`. For
+preflight, omitted model and voice fields use the fallback provider's configured
+defaults. An omitted language carries the caller-selected language, and speed
+is preserved from the call. The mapper's actual output is still validated
+before dispatch. A fallback model that requires a caller-selected language
+needs that language in the request or variant; a provider's implicit configured
+language does not satisfy this requirement. Once variants are declared, the
+mapper must produce a request that matches their declared fields.
 
 Cartesia STT exposes both realtime `open()` streams and an optional complete-file
 `transcribe()` operation. The latter uses the provider's batch model and returns

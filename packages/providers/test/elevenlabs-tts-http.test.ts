@@ -108,7 +108,23 @@ describe("ElevenLabs complete HTTP TTS", () => {
     });
 
     expect(provider.supportsVoice("dialogue-only")).toBe(true);
-    expect(provider.supportsVoice("dialogue-only", "eleven_flash_v2_5")).toBe(false);
+    expect(provider.supportsVoice("dialogue-only", "eleven_flash_v2_5")).toBe(true);
+    expect(provider.supportsVoice("regular-provider-managed", "eleven_flash_v2_5")).toBe(true);
+    expect(provider.supportsTtsSelection({ model: "eleven_flash_v2_5" })).toBe(false);
+    expect(provider.supportsTtsSelection({ model: "eleven_v3" })).toBe(true);
+  });
+
+  it("rejects whitespace-only REST voice IDs consistently with supportsVoice", async () => {
+    const provider = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-rest",
+      modelId: "eleven_flash_v2_5",
+    });
+
+    expect(provider.supportsVoice("  ")).toBe(false);
+    await expect(provider.synthesize({ ...request, voice: "  " })).rejects.toMatchObject({
+      code: TVIC_ERROR_CODES.providerVoiceUnsupported,
+    });
   });
 
   it("allows unknown HTTP models only when the provider opts into them", () => {
@@ -369,6 +385,24 @@ describe("ElevenLabs complete HTTP TTS", () => {
     expect(fixedEndpointCalls).toBe(0);
   });
 
+  it("replaces each voice placeholder in a custom REST endpoint", async () => {
+    let path = "";
+    const provider = createElevenLabsTtsRestProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-configured",
+      knownVoiceIds: ["voice-per-call"],
+      url: "https://proxy.example/:voice_id/text-to-speech/:voice_id",
+      fetchImpl: async (input) => {
+        path = new URL(String(input)).pathname;
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      },
+    });
+
+    await collectEvents(await provider.synthesize({ ...request, voice: "voice-per-call" }));
+
+    expect(path).toBe("/voice-per-call/text-to-speech/voice-per-call");
+  });
+
   it("reports the provider character-cost header for standard HTTP Convert", async () => {
     const observations: Array<{ field: string; status: string; value?: number; reason?: string }> =
       [];
@@ -559,6 +593,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
       apiKey: "eleven-secret",
       voiceId: "voice-rest",
       modelId: "eleven_v4",
+      similarityBoost: 0.73,
       fetchImpl: async (input, init) => {
         const url = new URL(String(input));
         path = url.pathname;
@@ -567,13 +602,47 @@ describe("ElevenLabs complete HTTP TTS", () => {
       },
     });
 
-    await provider.synthesize({ ...request, model: "eleven_v4", text: "Hello." });
+    await provider.synthesize({
+      sessionId: request.sessionId,
+      turnId: request.turnId,
+      format: request.format,
+      text: "Hello.",
+      stream: true,
+    });
 
     expect(path).toBe("/v1/text-to-dialogue");
     expect(body).toMatchObject({
       inputs: [{ text: "Hello.", voice_id: "voice-rest" }],
       model_id: "eleven_v4",
-      settings: { stability: 0.5, similarity_boost: 0.8 },
+      settings: { stability: 0.5, similarity: 0.73 },
+    });
+  });
+
+  it("uses its configured dialogue model on HTTP-stream when the request omits one", async () => {
+    let path = "";
+    let body: Record<string, unknown> | undefined;
+    const provider = createElevenLabsTtsHttpStreamProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-stream",
+      modelId: "eleven_v3_conversational",
+      dialogueVoices: ["voice-stream"],
+      fetchImpl: async (input, init) => {
+        const url = new URL(String(input));
+        path = url.pathname;
+        body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(new Uint8Array([1, 2]), { status: 200 });
+      },
+    });
+    const { model: _model, ...requestWithoutModel } = request;
+    void _model;
+
+    const stream = await provider.synthesize(requestWithoutModel);
+    await stream.cancel();
+
+    expect(path).toBe("/v1/text-to-dialogue/stream");
+    expect(body).toMatchObject({
+      inputs: [{ text: request.text, voice_id: "voice-stream" }],
+      model_id: "eleven_v3_conversational",
     });
   });
 
@@ -589,9 +658,12 @@ describe("ElevenLabs complete HTTP TTS", () => {
       },
     });
 
-    await expect(provider.synthesize({ ...request, model: "eleven_v4_turbo" })).rejects.toThrow(
-      /not supported by the REST transport/,
-    );
+    await expect(
+      provider.synthesize({ ...request, model: "eleven_v4_turbo" }),
+    ).rejects.toMatchObject({
+      provider: "elevenlabs",
+      message: expect.stringMatching(/not supported by the REST transport/u),
+    });
     expect(fetchCalls).toBe(0);
   });
 
@@ -609,9 +681,10 @@ describe("ElevenLabs complete HTTP TTS", () => {
         },
       });
 
-      await expect(provider.synthesize({ ...request, model })).rejects.toThrow(
-        /not supported by the HTTP-stream transport/,
-      );
+      await expect(provider.synthesize({ ...request, model })).rejects.toMatchObject({
+        provider: "elevenlabs",
+        message: expect.stringMatching(/not supported by the HTTP-stream transport/u),
+      });
       expect(fetchCalls).toBe(0);
     },
   );

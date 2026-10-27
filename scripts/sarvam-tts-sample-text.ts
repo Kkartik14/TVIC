@@ -10,5 +10,6 @@ export const SARVAM_TTS_SAMPLE_TEXT = Object.freeze({
   "mr-IN": "नमस्कार! ही TVIC ची थेट व्हॉइस स्ट्रीमिंग चाचणी आहे.",
   "pa-IN": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ! ਇਹ TVIC ਦੀ ਲਾਈਵ ਵੌਇਸ ਸਟ੍ਰੀਮਿੰਗ ਜਾਂਚ ਹੈ।",
   "or-IN": "ନମସ୍କାର! ଏହା TVIC ଲାଇଭ୍ ଭଏସ୍ ଷ୍ଟ୍ରିମିଂ ପରୀକ୍ଷଣ।",
+  "od-IN": "ନମସ୍କାର! ଏହା TVIC ଲାଇଭ୍ ଭଏସ୍ ଷ୍ଟ୍ରିମିଂ ପରୀକ୍ଷଣ।",
   "en-IN": "Hello! This is a live TVIC voice streaming test.",
 } as const);

@@ -1,4 +1,10 @@
-import { PCM16_16K_MONO, PROVIDER_NAMES, TvicThrowableError, validationError } from "@tvic/core";
+import {
+  evaluateTtsSelectionCompatibility,
+  PCM16_16K_MONO,
+  PROVIDER_NAMES,
+  TvicThrowableError,
+  validationError,
+} from "@tvic/core";
 import type {
   ProviderCapabilities,
   TextToSpeechProvider,
@@ -188,11 +194,11 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
   }
 
   supportsTtsLanguage(language: string, model = this.#modelId): boolean {
-    return supportsElevenLabsTtsLanguage(language, model);
+    return supportsElevenLabsTtsLanguage(language, model, this.#allowUnknownModel);
   }
 
   supportsTtsSpeed(speed: number, model = this.#modelId): boolean {
-    return supportsElevenLabsTtsSpeed(speed, model);
+    return supportsElevenLabsTtsSpeed(speed, model, this.#allowUnknownModel);
   }
 
   supportsTtsSelection(selection: TtsProviderSelection): boolean {
@@ -201,16 +207,20 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     const transport =
       this.capabilities.metadata?.transport === "http-stream" ? "http-stream" : "rest";
     if (
-      (!this.#allowUnknownModel && !this.capabilities.models?.includes(model)) ||
-      !supportsElevenLabsHttpModelRoute(model, transport, protocol)
+      !supportsElevenLabsHttpModelRoute(model, transport, protocol) ||
+      (this.#options.dialogueVoices !== undefined && protocol !== "dialogue")
     )
       return false;
-    if (!this.supportsVoice(selection.voice ?? this.#options.voiceId, model)) return false;
-    if (selection.language && !this.supportsTtsLanguage(selection.language, model)) return false;
-    if (selection.speed !== undefined && !this.supportsTtsSpeed(selection.speed, model)) {
-      return false;
-    }
-    return true;
+    return (
+      evaluateTtsSelectionCompatibility(this, selection, {
+        checkModel: true,
+        checkVoice: true,
+        voiceOverride: selection.voice !== undefined,
+        checkLanguage: selection.language !== undefined,
+        checkSpeed: selection.speed !== undefined,
+        checkProviderSelection: false,
+      }).length === 0
+    );
   }
 
   get _httpOptions(): ElevenLabsHttpTtsProviderOptions {
@@ -274,9 +284,14 @@ export class ElevenLabsTtsRestProvider implements ElevenLabsDialogueProvider {
     request: ElevenLabsDialogueSynthesisRequest,
     transport: HttpTransport,
   ): Promise<TtsStream> {
+    const configuredDialogueModel = defaultDialogueModel(
+      this.#modelId,
+      this.#allowUnknownModel,
+      this.#options.modelId !== undefined,
+    );
     const model = resolveModel(
       this.#modelId,
-      request.model ?? "eleven_v3",
+      request.model ?? configuredDialogueModel,
       this.#allowUnknownModel,
     );
     assertElevenLabsHttpModelRoute(model, transport, "dialogue");
@@ -321,6 +336,7 @@ function assertElevenLabsHttpModelRoute(
       validationError(
         "provider.invalid_request",
         `ElevenLabs ${model} is not supported by the ${transportName} transport`,
+        { provider: PROVIDER_NAMES.elevenlabs },
       ),
     );
   }
@@ -329,6 +345,7 @@ function assertElevenLabsHttpModelRoute(
       validationError(
         "provider.invalid_request",
         `ElevenLabs ${model} is not supported by the ${transportName} transport on the ${protocol} route`,
+        { provider: PROVIDER_NAMES.elevenlabs },
       ),
     );
   }
@@ -405,7 +422,14 @@ async function executeElevenLabsHttpRequest(
   const options = provider._httpOptions;
   const model = resolveModel(
     provider._httpModelId,
-    protocol === "dialogue" ? (request.model ?? "eleven_v3") : request.model,
+    protocol === "dialogue"
+      ? (request.model ??
+          defaultDialogueModel(
+            provider._httpModelId,
+            provider._httpAllowUnknownModel,
+            options.modelId !== undefined,
+          ))
+      : request.model,
     provider._httpAllowUnknownModel,
   );
   const voice =
@@ -437,6 +461,19 @@ async function executeElevenLabsHttpRequest(
     voice,
     body,
   );
+}
+
+function defaultDialogueModel(
+  modelId: string,
+  allowUnknownModel: boolean,
+  modelWasConfigured: boolean,
+): string {
+  return modelId.startsWith("eleven_v3") ||
+    modelId === "eleven_v4" ||
+    modelId === "eleven_v4_turbo" ||
+    (allowUnknownModel && modelWasConfigured)
+    ? modelId
+    : "eleven_v3";
 }
 
 async function executeWithFetch(

@@ -55,7 +55,6 @@ export {
   type TtsCallSelectionInput,
 } from "./tts-selection.js";
 export {
-  normalizeSttVocabulary,
   resolveSttCallSelection,
   type SttCallSelection,
   type SttCallSelectionInput,

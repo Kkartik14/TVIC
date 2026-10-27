@@ -104,7 +104,6 @@ import {
   boundedAssemblyWords,
   assemblyAiLanguageCode,
   bytesForMs,
-  delay,
   validSilenceOption,
   type AssemblyAiBeginMessage,
   type AssemblyAiMessage,
@@ -115,6 +114,25 @@ import { assertSupportedLanguagePolicy, requestLanguagePolicy } from "./stt-lang
 
 const ASSEMBLYAI_LANGUAGE_POLICY_MODELS = new Set(["universal-3-6-pro", "universal-3-5-pro"]);
 export { assemblyAiCloseError, assemblyAiProtocolError };
+
+function completesBeforeDeadline(promise: Promise<unknown>, deadline: number): Promise<boolean> {
+  const completed = promise.then(
+    () => true,
+    () => true,
+  );
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) return Promise.resolve(false);
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    completed,
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), remainingMs);
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
 
 const ASSEMBLYAI_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
@@ -271,7 +289,11 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
       languagePolicy?.mode === "fixed"
         ? [assemblyAiLanguageCode(model, languagePolicy.language)]
         : languagePolicy?.mode === "hints"
-          ? languagePolicy.languages.map((language) => assemblyAiLanguageCode(model, language))
+          ? [
+              ...new Set(
+                languagePolicy.languages.map((language) => assemblyAiLanguageCode(model, language)),
+              ),
+            ]
           : undefined;
     if (model === "universal-3-6-pro" && this.#formatTurns === false) {
       throw TvicThrowableError.from(
@@ -386,7 +408,10 @@ export class AssemblyAiSttProvider implements SpeechToTextProvider {
     if (languageCodes !== undefined) {
       url.searchParams.set("language_codes", JSON.stringify(languageCodes));
     }
-    const prompt = buildPrompt(this.#prompt, request.language);
+    const prompt = buildPrompt(
+      this.#prompt,
+      request.language === "" ? undefined : request.language,
+    );
     if (prompt) {
       url.searchParams.set("prompt", prompt);
     }
@@ -486,6 +511,8 @@ export class AssemblyAiSttStream implements SttStream {
   #closePromise: Promise<void> | undefined;
   #lastError: unknown;
   #audioBuffer: Uint8Array<ArrayBufferLike> = new Uint8Array();
+  readonly #pendingAudioWrites = new Set<Promise<void>>();
+  readonly #pendingAudioWriteCancellers = new Set<() => void>();
   #finalizedTurns = new Set<number>();
   readonly #pendingUnformattedTurns = new Map<number, number>();
   #pendingUnformattedBytes = 0;
@@ -637,12 +664,12 @@ export class AssemblyAiSttStream implements SttStream {
       );
     }
     assertAgentContextUpdateNotAborted(options.signal);
-    await this.#flushAudioBuffer();
+    await this.#flushAudioBuffer(false);
     // A timed-out runtime command may continue awaiting an already-sent audio
     // frame callback. Do not let that late completion write stale context
     // after the controller has moved on to newer audio.
     assertAgentContextUpdateNotAborted(options.signal);
-    if (this.#closed || this.#lastError !== undefined) {
+    if (this.#closed || this.#closing || this.#lastError !== undefined) {
       throw (
         this.#lastError ?? providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE)
       );
@@ -655,10 +682,12 @@ export class AssemblyAiSttStream implements SttStream {
           (error) => {
             if (error) {
               reject(
-                providerError(
-                  STT_ERROR_CODES.contextUpdateFailed,
-                  "AssemblyAI agent context update could not be accepted by the local transport",
-                  { provider: ASSEMBLYAI_PROVIDER, retriable: true },
+                TvicThrowableError.from(
+                  providerError(
+                    STT_ERROR_CODES.contextUpdateFailed,
+                    "AssemblyAI agent context update could not be accepted by the local transport",
+                    { provider: ASSEMBLYAI_PROVIDER, retriable: true },
+                  ),
                 ),
               );
               return;
@@ -668,10 +697,12 @@ export class AssemblyAiSttStream implements SttStream {
         );
       } catch {
         reject(
-          providerError(
-            STT_ERROR_CODES.contextUpdateFailed,
-            "AssemblyAI agent context update could not be accepted by the local transport",
-            { provider: ASSEMBLYAI_PROVIDER, retriable: true },
+          TvicThrowableError.from(
+            providerError(
+              STT_ERROR_CODES.contextUpdateFailed,
+              "AssemblyAI agent context update could not be accepted by the local transport",
+              { provider: ASSEMBLYAI_PROVIDER, retriable: true },
+            ),
           ),
         );
       }
@@ -708,20 +739,36 @@ export class AssemblyAiSttStream implements SttStream {
 
   async #close(): Promise<void> {
     this.#closing = true;
-    void this.#flushAudioBuffer().catch((error: unknown) => this.#fail(error));
+    const deadline = Date.now() + ASSEMBLYAI_CLOSE_TIMEOUT_MS;
+    let forceTerminate = false;
+    try {
+      const audioDrain = (async () => {
+        await this.#flushAudioBuffer();
+        await this.#awaitPendingAudioWrites();
+      })();
+      const audioDrained = await completesBeforeDeadline(audioDrain, deadline);
 
-    if (!this.#closed && !this.#terminated && this.#socket.readyState === WebSocket.OPEN) {
-      safeSend(this.#socket, JSON.stringify({ type: "Terminate" }));
-      await Promise.race([this.#terminationPromise, delay(ASSEMBLYAI_CLOSE_TIMEOUT_MS)]);
-    }
+      if (!audioDrained) {
+        forceTerminate = true;
+      } else if (!this.#closed && !this.#terminated && this.#socket.readyState === WebSocket.OPEN) {
+        if (!safeSend(this.#socket, JSON.stringify({ type: "Terminate" }))) {
+          forceTerminate = true;
+        } else if (!(await completesBeforeDeadline(this.#terminationPromise, deadline))) {
+          forceTerminate = true;
+        }
+      }
 
-    if (!this.#closed && this.#pendingUnformattedTurns.size > 0) {
-      this.#fail(assemblyAiProtocolFailure("AssemblyAI closed before formatted turns arrived"));
-      return;
+      if (!this.#closed && this.#pendingUnformattedTurns.size > 0) {
+        this.#fail(assemblyAiProtocolFailure("AssemblyAI closed before formatted turns arrived"));
+      }
+    } finally {
+      this.#closed = true;
+      forceTerminate ||= this.#pendingAudioWrites.size > 0;
+      this.#cancelPendingAudioWrites();
+      if (forceTerminate) this.#terminateSocket();
+      else safeClose(this.#socket);
+      if (this.#lastError === undefined) this.#events.close();
     }
-    this.#closed = true;
-    safeClose(this.#socket);
-    this.#events.close();
   }
 
   #handleMessage(body: string): void {
@@ -988,7 +1035,8 @@ export class AssemblyAiSttStream implements SttStream {
       this.#rejectBegin(throwable);
     }
     this.#events.fail(throwable);
-    safeClose(this.#socket);
+    this.#cancelPendingAudioWrites();
+    this.#terminateSocket();
   }
 
   #pushEvent(event: TranscriptEvent): boolean {
@@ -997,25 +1045,72 @@ export class AssemblyAiSttStream implements SttStream {
     return false;
   }
 
-  async #sendAudioFrame(frame: Uint8Array): Promise<void> {
+  #sendAudioFrame(frame: Uint8Array): Promise<void> {
     const usageWrite = this.#request.usageReporter?.beginAudioWrite({
       byteLength: frame.byteLength,
       format: this.#request.format,
     });
+    let settled = false;
+    const providerWrite = writeProviderAudioFrame(this.#socket, Buffer.from(frame), {
+      code: ASSEMBLYAI_ERROR_CODE,
+      provider: PROVIDER_NAMES.assemblyaiStt,
+    }).then(
+      () => {
+        if (settled) return;
+        settled = true;
+        usageWrite?.succeeded();
+      },
+      (error: unknown) => {
+        if (settled) throw error;
+        settled = true;
+        usageWrite?.failed();
+        if (!this.#closing) this.#fail(error);
+        throw error;
+      },
+    );
+    let cancel!: () => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      cancel = () => {
+        if (settled) return;
+        settled = true;
+        usageWrite?.failed();
+        reject(providerStreamEnded(PROVIDER_NAMES.assemblyaiStt, ASSEMBLYAI_ERROR_CODE));
+      };
+    });
+    const write = Promise.race([providerWrite, cancelled]);
+    this.#pendingAudioWriteCancellers.add(cancel);
+    this.#pendingAudioWrites.add(write);
+    void write.then(
+      () => {
+        this.#pendingAudioWrites.delete(write);
+        this.#pendingAudioWriteCancellers.delete(cancel);
+      },
+      () => {
+        this.#pendingAudioWrites.delete(write);
+        this.#pendingAudioWriteCancellers.delete(cancel);
+      },
+    );
+    return write;
+  }
+
+  #cancelPendingAudioWrites(): void {
+    for (const cancel of this.#pendingAudioWriteCancellers) cancel();
+  }
+
+  #terminateSocket(): void {
     try {
-      await writeProviderAudioFrame(this.#socket, Buffer.from(frame), {
-        code: ASSEMBLYAI_ERROR_CODE,
-        provider: PROVIDER_NAMES.assemblyaiStt,
-      });
-      usageWrite?.succeeded();
-    } catch (error) {
-      usageWrite?.failed();
-      this.#fail(error);
-      throw error;
+      if (this.#socket.readyState !== WebSocket.CLOSED) this.#socket.terminate();
+    } catch {
+      safeClose(this.#socket);
     }
   }
 
-  #flushAudioBuffer(): Promise<void> {
+  async #awaitPendingAudioWrites(): Promise<void> {
+    const pending = [...this.#pendingAudioWrites];
+    await Promise.all(pending);
+  }
+
+  #flushAudioBuffer(padSubminimumFrame = true): Promise<void> {
     const frameBytes = bytesForMs(PCM16_16K_MONO.sampleRateHz, ASSEMBLYAI_TARGET_FRAME_MS);
     const writes: Promise<void>[] = [];
     while (this.#audioBuffer.byteLength >= frameBytes && !this.#closed) {
@@ -1033,6 +1128,8 @@ export class AssemblyAiSttStream implements SttStream {
       this.#audioBuffer = new Uint8Array();
       return Promise.all(writes).then(() => undefined);
     }
+
+    if (!padSubminimumFrame) return Promise.all(writes).then(() => undefined);
 
     const padded = new Uint8Array(minimumBytes);
     padded.set(this.#audioBuffer);

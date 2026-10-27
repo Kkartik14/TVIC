@@ -4,16 +4,16 @@ import type { TtsEvent, TtsFlushResult, TtsSession, TtsStream } from "@tvic/core
 import { abortPromise, cancelWithTimeout, withTimeout } from "./async-control.js";
 import {
   CANCELLATION_TIMEOUT_MS,
+  MAX_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS,
+  MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES,
   STARTUP_TIMEOUT_MS,
   TTS_FINISH_TIMEOUT_MS,
   TTS_FLUSH_TIMEOUT_MS,
   TTS_SEND_TIMEOUT_MS,
 } from "./pipeline-constants.js";
-import { MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES } from "./pipeline-constants.js";
 import {
   runtimeResourceLimitError,
   utf8ByteLengthWithinLimit,
-  utf8CodePointByteLength,
 } from "./pipeline-resource-limits.js";
 import { closeAsyncIterator } from "./pipeline-helpers.js";
 
@@ -42,7 +42,6 @@ export class IncrementalTtsInput implements TtsStream {
   #session: Promise<TtsSession | null> | null = null;
   #sessionCancelPromise: Promise<void> | undefined;
   #buffer = "";
-  #bufferBytes = 0;
   #finishing = false;
   #cancelled = false;
   #cancelPromise: Promise<void> | undefined;
@@ -80,21 +79,20 @@ export class IncrementalTtsInput implements TtsStream {
       if (this.#finishing) {
         throw new Error("Cannot add TTS text after finishing input");
       }
-      const textBytes = utf8ByteLengthWithinLimit(
-        text,
-        MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES - this.#bufferBytes,
+      const nextBuffer = this.#buffer + text;
+      const nextBufferBytes = utf8ByteLengthWithinLimit(
+        nextBuffer,
+        MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES,
       );
-      if (textBytes === undefined) {
+      if (nextBufferBytes === undefined) {
         this.#buffer = "";
-        this.#bufferBytes = 0;
         throw runtimeResourceLimitError(
           "incremental TTS input buffer",
           "bytes",
           MAX_RUNTIME_INCREMENTAL_TTS_BUFFER_BYTES,
         );
       }
-      this.#buffer += text;
-      this.#bufferBytes += textBytes;
+      this.#buffer = nextBuffer;
       const batches = SENTENCE_TERMINAL.test(text) ? this.#takeCompleteSentences() : [];
       for (const batch of batches) {
         const opened = await session;
@@ -299,7 +297,6 @@ export class IncrementalTtsInput implements TtsStream {
   #takeBuffer(): string {
     const text = this.#buffer;
     this.#buffer = "";
-    this.#bufferBytes = 0;
     return text;
   }
 
@@ -308,7 +305,6 @@ export class IncrementalTtsInput implements TtsStream {
     let batch: string[] = [];
     let batchCharacters = 0;
     let consumed = 0;
-    let consumedBytes = 0;
     let sentenceCount = 0;
     const flushBatch = (): void => {
       if (batchCharacters === 0) return;
@@ -323,19 +319,25 @@ export class IncrementalTtsInput implements TtsStream {
       }
       sentenceCount += 1;
       for (const character of segment.segment) {
-        if (batchCharacters + character.length > MAX_INCREMENTAL_TTS_BATCH_CHARACTERS) {
-          flushBatch();
+        if (batchCharacters + character.length > MAX_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS) {
+          const text = batch.join("");
+          const boundary = findBatchBoundary(text, MAX_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS);
+          if (boundary > 0 && boundary < text.length) {
+            batches.push(text.slice(0, boundary));
+            batch = [...text.slice(boundary)];
+            batchCharacters = text.length - boundary;
+          } else {
+            flushBatch();
+          }
         }
         batch.push(character);
         batchCharacters += character.length;
-        consumedBytes += utf8CodePointByteLength(character.codePointAt(0) ?? 0);
       }
       if (sentenceCount <= INDIVIDUAL_TTS_SENTENCES_PER_PUSH) flushBatch();
       consumed = end;
     }
     flushBatch();
     this.#buffer = this.#buffer.slice(consumed);
-    this.#bufferBytes -= consumedBytes;
     return batches;
   }
 }
@@ -360,24 +362,36 @@ function invalidTimeoutError(
 const sentenceSegmenter = new Intl.Segmenter(undefined, { granularity: "sentence" });
 const SENTENCE_TERMINAL = /(?:\p{Sentence_Terminal}|…)/u;
 const ENDS_SENTENCE = /(?:\p{Sentence_Terminal}|…)[\s\p{Pe}\p{Pf}"'’”]*$/u;
-const MAX_INCREMENTAL_TTS_BATCH_CHARACTERS = 2_500;
 const INDIVIDUAL_TTS_SENTENCES_PER_PUSH = 32;
 
 function splitTextIntoBatches(text: string): readonly string[] {
   const batches: string[] = [];
-  let batch: string[] = [];
-  let batchCharacters = 0;
-  for (const character of text) {
-    if (batchCharacters + character.length > MAX_INCREMENTAL_TTS_BATCH_CHARACTERS) {
-      batches.push(batch.join(""));
-      batch = [];
-      batchCharacters = 0;
-    }
-    batch.push(character);
-    batchCharacters += character.length;
+  let remaining = text;
+  while (remaining.length > MAX_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS) {
+    const boundary = findBatchBoundary(remaining, MAX_RUNTIME_INCREMENTAL_TTS_BATCH_CHARACTERS);
+    batches.push(remaining.slice(0, boundary));
+    remaining = remaining.slice(boundary);
   }
-  if (batch.length > 0) batches.push(batch.join(""));
+  if (remaining.length > 0) batches.push(remaining);
   return batches;
+}
+
+function findBatchBoundary(text: string, maximumCharacters: number): number {
+  let characters = 0;
+  let lastWordBoundary = 0;
+  let firstNonWhitespace = false;
+  let safeBoundary = 0;
+  for (const character of text) {
+    if (characters + character.length > maximumCharacters) break;
+    characters += character.length;
+    safeBoundary = characters;
+    if (/\s/u.test(character)) {
+      if (firstNonWhitespace) lastWordBoundary = characters;
+    } else {
+      firstNonWhitespace = true;
+    }
+  }
+  return lastWordBoundary > 0 ? lastWordBoundary : safeBoundary;
 }
 
 function deferred<T>(): {

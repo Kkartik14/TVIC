@@ -9,6 +9,7 @@ import {
   isNormalizedError,
   STT_ERROR_CODES,
   STT_STREAM_ENDED_REASON,
+  TVIC_ERROR_NAMES,
   TVIC_ERROR_CODE_ALIASES,
   TVIC_ERROR_CODES,
   timeoutError,
@@ -534,12 +535,9 @@ export function normalizeSttConnectionError(
   }
   const message = unknownErrorMessage(error);
   const status = message.match(/\b(400|401|402|403|410|422|429|5\d\d)\b/)?.[1];
-  const connectFailure = error as {
-    readonly wsCloseCode?: unknown;
-    readonly wsCloseReason?: unknown;
-  };
-  const wsCloseCode =
-    typeof connectFailure.wsCloseCode === "number" ? connectFailure.wsCloseCode : undefined;
+  const wsCloseCode = readUnknownProperty(error, "wsCloseCode");
+  const wsCloseReason = readUnknownProperty(error, "wsCloseReason");
+  const numericWsCloseCode = typeof wsCloseCode === "number" ? wsCloseCode : undefined;
   const code =
     status === "401" || status === "403"
       ? STT_ERROR_CODES.authFailed
@@ -551,7 +549,7 @@ export function normalizeSttConnectionError(
             ? STT_ERROR_CODES.invalidRequest
             : status?.startsWith("5")
               ? STT_ERROR_CODES.serviceUnavailable
-              : wsCloseCode !== undefined && wsCloseCode !== 1006
+              : numericWsCloseCode !== undefined && numericWsCloseCode !== 1006
                 ? STT_ERROR_CODES.protocolError
                 : STT_ERROR_CODES.connectFailed;
   return providerError(code, message, {
@@ -561,22 +559,45 @@ export function normalizeSttConnectionError(
     metadata: {
       providerCode: options.providerCode,
       ...(status ? { httpStatus: Number(status) } : {}),
-      ...(wsCloseCode !== undefined ? { wsCloseCode } : {}),
-      ...(typeof connectFailure.wsCloseReason === "string"
-        ? { wsCloseReason: connectFailure.wsCloseReason }
-        : {}),
+      ...(numericWsCloseCode !== undefined ? { wsCloseCode: numericWsCloseCode } : {}),
+      ...(typeof wsCloseReason === "string" ? { wsCloseReason } : {}),
     },
     cause: error,
   });
 }
 
+function readUnknownProperty(value: unknown, key: string): unknown {
+  if ((typeof value !== "object" || value === null) && typeof value !== "function") {
+    return undefined;
+  }
+  try {
+    return Reflect.get(value, key);
+  } catch {
+    return undefined;
+  }
+}
+
 const PROVIDER_CONNECTION_URL_PATTERN = /\b(?:wss?|https?):\/\/[^\s"'<>]+/gi;
+const UNSEGMENTED_LANGUAGE_SCRIPT_PATTERN =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}\p{Script=Bopomofo}]/u;
+
+const UNREDACTED_PROVIDER_METADATA_KEYS = new Set([
+  "model",
+  "provider",
+  "providerCode",
+  "providerModel",
+  "httpStatus",
+  "status",
+  "requestId",
+  "errorCode",
+  "errorType",
+]);
 
 export function redactSttConnectionUrl(
   error: NormalizedError,
   vocabulary: readonly string[] = [],
 ): NormalizedError {
-  return redactSttNormalizedError(error, vocabulary, false);
+  return redactSttNormalizedError(error, vocabulary, true);
 }
 
 export function redactSttThrowableError(
@@ -591,68 +612,230 @@ function redactSttNormalizedError(
   vocabulary: readonly string[],
   includeCause: boolean,
 ): NormalizedError {
-  const redactions = [...new Set(vocabulary.filter((term) => term.length > 0))]
-    .flatMap((term) => [
-      term,
-      encodeURIComponent(term),
-      new URLSearchParams({ value: term }).toString().slice("value=".length),
-    ])
-    .sort((left, right) => right.length - left.length);
-  const state = { redactions, seen: new WeakSet<object>(), nodes: 0 };
-  const cause = includeCause ? error.cause : undefined;
-  return {
-    ...error,
-    message: redactSttValue(error.message, state) as string,
-    ...(error.metadata !== undefined
-      ? { metadata: redactSttValue(error.metadata, state) as Readonly<Record<string, unknown>> }
-      : {}),
-    ...(cause !== undefined ? { cause: redactSttValue(cause, state) } : { cause: undefined }),
-  };
+  try {
+    const redactions = [
+      ...new Set((Array.isArray(vocabulary) ? vocabulary : []).filter(isRedactableVocabularyTerm)),
+    ]
+      .flatMap((term) => {
+        try {
+          return [
+            term,
+            encodeURIComponent(term),
+            new URLSearchParams({ value: term }).toString().slice("value=".length),
+          ];
+        } catch {
+          return [term];
+        }
+      })
+      .sort((left, right) => right.length - left.length);
+    const state = {
+      redactions,
+      active: new WeakSet<object>(),
+      clones: new WeakMap<object, object>(),
+      nodes: 0,
+    };
+    const cause = includeCause ? error.cause : undefined;
+    return {
+      ...error,
+      message: redactSttValue(error.message, state) as string,
+      ...(error.metadata !== undefined
+        ? { metadata: redactSttValue(error.metadata, state) as Readonly<Record<string, unknown>> }
+        : {}),
+      ...(cause !== undefined ? { cause: redactSttValue(cause, state) } : { cause: undefined }),
+    };
+  } catch {
+    const provider = safelyReadErrorField(() => error.provider, undefined);
+    return {
+      name: safelyReadErrorField(() => error.name, TVIC_ERROR_NAMES.ProviderError),
+      code: safelyReadErrorField(() => error.code, STT_ERROR_CODES.connectFailed),
+      category: safelyReadErrorField(() => error.category, "provider"),
+      message: "STT provider failure; details were redacted",
+      retriable: safelyReadErrorField(() => error.retriable, true),
+      ...(provider !== undefined ? { provider } : {}),
+      cause: undefined,
+    };
+  }
+}
+
+function safelyReadErrorField<T>(read: () => T, fallback: T): T {
+  try {
+    return read();
+  } catch {
+    return fallback;
+  }
+}
+
+function isRedactableVocabularyTerm(term: string): boolean {
+  if (typeof term !== "string") return false;
+  const codePointLength = Array.from(term).length;
+  return (
+    codePointLength >= 3 || (codePointLength >= 2 && UNSEGMENTED_LANGUAGE_SCRIPT_PATTERN.test(term))
+  );
 }
 
 function redactSttValue(
   value: unknown,
   state: {
     readonly redactions: readonly string[];
-    readonly seen: WeakSet<object>;
+    readonly active: WeakSet<object>;
+    readonly clones: WeakMap<object, object>;
     nodes: number;
   },
+  key?: string,
   depth = 0,
 ): unknown {
   if (typeof value === "string") {
     const withoutUrls = value.replace(PROVIDER_CONNECTION_URL_PATTERN, "[redacted URL]");
-    return state.redactions.reduce(
-      (result, term) => result.split(term).join("[REDACTED]"),
-      withoutUrls,
-    );
+    return key !== undefined && UNREDACTED_PROVIDER_METADATA_KEYS.has(key)
+      ? withoutUrls
+      : redactVocabularyTerms(withoutUrls, state.redactions);
   }
+  if (typeof value === "function" || typeof value === "symbol") return "[redacted]";
   if (typeof value !== "object" || value === null) return value;
   if (depth >= 64 || state.nodes >= 4_096) return "[redacted]";
-  if (state.seen.has(value)) return "[circular]";
-  state.seen.add(value);
+  if (state.active.has(value)) return "[circular]";
+  const existingClone = state.clones.get(value);
+  if (existingClone !== undefined) return existingClone;
   state.nodes += 1;
+
+  if (Buffer.isBuffer(value)) {
+    const clone = Buffer.from(value);
+    state.clones.set(value, clone);
+    return clone;
+  }
+  if (value instanceof Date) {
+    const clone = new Date(value.getTime());
+    state.clones.set(value, clone);
+    return clone;
+  }
+  if (value instanceof ArrayBuffer) {
+    const clone = value.slice(0);
+    state.clones.set(value, clone);
+    return clone;
+  }
+  if (ArrayBuffer.isView(value)) {
+    // Typed-array and DataView contents are binary, not text fields to redact.
+    const clone = structuredClone(value);
+    state.clones.set(value, clone);
+    return clone;
+  }
+
+  state.active.add(value);
   if (value instanceof Error) {
     const errorValue: Record<string, unknown> = {
       name: value.name,
-      message: redactSttValue(value.message, state, depth + 1),
+      message: redactSttValue(value.message, state, "message", depth + 1),
     };
+    state.clones.set(value, errorValue);
     if (value.stack !== undefined) {
-      errorValue.stack = redactSttValue(value.stack, state, depth + 1);
+      errorValue.stack = redactSttValue(value.stack, state, "stack", depth + 1);
     }
     if ("cause" in value) {
-      errorValue.cause = redactSttValue(value.cause, state, depth + 1);
+      errorValue.cause = redactSttValue(value.cause, state, "cause", depth + 1);
     }
     for (const [key, entry] of Object.entries(value)) {
-      errorValue[key] = redactSttValue(entry, state, depth + 1);
+      errorValue[key] = redactSttValue(entry, state, key, depth + 1);
     }
+    state.active.delete(value);
     return errorValue;
   }
   if (Array.isArray(value)) {
-    return value.map((entry) => redactSttValue(entry, state, depth + 1));
+    const clone: unknown[] = [];
+    state.clones.set(value, clone);
+    for (const entry of value) clone.push(redactSttValue(entry, state, undefined, depth + 1));
+    state.active.delete(value);
+    return clone;
   }
-  return Object.fromEntries(
-    Object.entries(value).map(([key, entry]) => [key, redactSttValue(entry, state, depth + 1)]),
-  );
+  if (value instanceof Map) {
+    const clone = new Map<unknown, unknown>();
+    state.clones.set(value, clone);
+    for (const [entryKey, entryValue] of value) {
+      clone.set(
+        redactSttValue(entryKey, state, undefined, depth + 1),
+        redactSttValue(entryValue, state, undefined, depth + 1),
+      );
+    }
+    state.active.delete(value);
+    return clone;
+  }
+  if (value instanceof Set) {
+    const clone = new Set<unknown>();
+    state.clones.set(value, clone);
+    for (const entry of value) clone.add(redactSttValue(entry, state, undefined, depth + 1));
+    state.active.delete(value);
+    return clone;
+  }
+  const clone: Record<string, unknown> = {};
+  state.clones.set(value, clone);
+  for (const [entryKey, entryValue] of Object.entries(value)) {
+    clone[entryKey] = redactSttValue(entryValue, state, entryKey, depth + 1);
+  }
+  state.active.delete(value);
+  return clone;
+}
+
+function redactVocabularyTerms(value: string, terms: readonly string[]): string {
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (const term of terms) {
+    const allowEmbeddedMatch = UNSEGMENTED_LANGUAGE_SCRIPT_PATTERN.test(term);
+    let offset = 0;
+    while (offset < value.length) {
+      const start = value.indexOf(term, offset);
+      if (start < 0) break;
+      const end = start + term.length;
+      const first = codePointAt(value, start);
+      const last = codePointBefore(value, end);
+      const previous = codePointBefore(value, start);
+      const next = codePointAt(value, end);
+      const hasLeftWordBoundary = !isWordCharacter(first) || !isWordCharacter(previous);
+      const hasRightWordBoundary = !isWordCharacter(last) || !isWordCharacter(next);
+      if (allowEmbeddedMatch || (hasLeftWordBoundary && hasRightWordBoundary)) {
+        ranges.push({ start, end });
+      }
+      offset = start + 1;
+    }
+  }
+  if (ranges.length === 0) return value;
+
+  ranges.sort((left, right) => left.start - right.start || right.end - left.end);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const range of ranges) {
+    const previous = merged.at(-1);
+    if (previous && range.start <= previous.end) {
+      previous.end = Math.max(previous.end, range.end);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  let result = "";
+  let offset = 0;
+  for (const { start, end } of merged) {
+    result += value.slice(offset, start) + "[REDACTED]";
+    offset = end;
+  }
+  return result + value.slice(offset);
+}
+
+function codePointAt(value: string, index: number): string | undefined {
+  if (index >= value.length) return undefined;
+  const codePoint = value.codePointAt(index);
+  return codePoint === undefined ? undefined : String.fromCodePoint(codePoint);
+}
+
+function codePointBefore(value: string, index: number): string | undefined {
+  if (index <= 0) return undefined;
+  const lastCodeUnit = value.charCodeAt(index - 1);
+  if (lastCodeUnit >= 0xdc00 && lastCodeUnit <= 0xdfff && index > 1) {
+    const previousCodeUnit = value.charCodeAt(index - 2);
+    if (previousCodeUnit >= 0xd800 && previousCodeUnit <= 0xdbff) {
+      return value.slice(index - 2, index);
+    }
+  }
+  return value.slice(index - 1, index);
+}
+
+function isWordCharacter(value: string | undefined): boolean {
+  return value !== undefined && /[\p{L}\p{N}_]/u.test(value);
 }
 
 export function normalizeSttSocketError(

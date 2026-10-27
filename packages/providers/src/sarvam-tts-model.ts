@@ -2,8 +2,11 @@ import { PROVIDER_NAMES, TVIC_ERROR_CODES, TvicThrowableError, validationError }
 
 import { ADAPTER_DEFAULTS, PROVIDER_CATALOG } from "./catalog.js";
 import { SARVAM_TTS_V4_FLASH_MODEL, SARVAM_TTS_V4_FLASH_VOICES } from "./sarvam-tts-v4-voices.js";
+import { sarvamTtsValidationError } from "./sarvam-tts-validation.js";
 
 export { SARVAM_TTS_V4_FLASH_MODEL } from "./sarvam-tts-v4-voices.js";
+
+export const SARVAM_TTS_MODELS = PROVIDER_CATALOG.sarvamTts.models;
 
 export const SARVAM_TTS_LANGUAGES = Object.freeze([
   "hi-IN",
@@ -15,12 +18,15 @@ export const SARVAM_TTS_LANGUAGES = Object.freeze([
   "ml-IN",
   "mr-IN",
   "pa-IN",
+  "od-IN",
   "or-IN",
   "en-IN",
 ] as const);
 
 export type SarvamTtsLanguage = (typeof SARVAM_TTS_LANGUAGES)[number];
 export type SarvamTtsVoiceLanguages = Readonly<Record<string, readonly SarvamTtsLanguage[]>>;
+
+const MAX_SARVAM_TTS_VOICE_LANGUAGE_ENTRIES = 128;
 
 export const SARVAM_TTS_VOICES = Object.freeze([
   "shubh",
@@ -81,6 +87,116 @@ const SARVAM_TTS_V4_LANGUAGE_SET = new Set([
   "te-IN",
 ]);
 
+export interface SarvamTtsSelectionOptions {
+  readonly modelId?: string;
+  readonly language?: string;
+  readonly voiceId?: string;
+  readonly voiceLanguages?: SarvamTtsVoiceLanguages;
+}
+
+/** Shared configuration and selection hooks for Sarvam's transport adapters. */
+export abstract class SarvamTtsSelectionProvider<Options extends SarvamTtsSelectionOptions> {
+  readonly #options: Readonly<Options>;
+  readonly #modelId: string;
+  readonly #language: SarvamTtsLanguage;
+  readonly #languageWasExplicitlyConfigured: boolean;
+
+  protected constructor(options: Options) {
+    const voiceLanguages = normalizeSarvamTtsVoiceLanguages(options.voiceLanguages);
+    this.#options = Object.freeze({
+      ...options,
+      ...(voiceLanguages !== undefined ? { voiceLanguages } : {}),
+    }) as Readonly<Options>;
+    this.#modelId = this.#options.modelId ?? PROVIDER_CATALOG.sarvamTts.defaultModel;
+    this.#language = resolveSarvamTtsLanguage(
+      this.#options.language ?? ADAPTER_DEFAULTS.sarvamTts.language,
+      this.#modelId,
+    );
+    this.#languageWasExplicitlyConfigured = this.#options.language !== undefined;
+  }
+
+  protected get providerOptions(): Readonly<Options> {
+    return this.#options;
+  }
+
+  get configuredModel(): string {
+    return this.#modelId;
+  }
+
+  get configuredModelSource(): "configured" | "not_reported" {
+    return this.#options.modelId === undefined ? "not_reported" : "configured";
+  }
+
+  get configuredLanguage(): string {
+    return this.#language;
+  }
+
+  get languageWasExplicitlyConfigured(): boolean {
+    return this.#languageWasExplicitlyConfigured;
+  }
+
+  get configuredVoice(): string | undefined {
+    return (
+      this.#options.voiceId ??
+      (isSarvamTtsV4FlashModel(this.#modelId) ? undefined : ADAPTER_DEFAULTS.sarvamTts.voice)
+    );
+  }
+
+  supportsVoice(voice: string, model = this.#modelId): boolean {
+    return isSarvamTtsVoiceSupported(voice, model);
+  }
+
+  supportsLanguage(language: string, model = this.#modelId): boolean {
+    return sarvamTtsConfiguredLanguageSupported(
+      language,
+      this.#language,
+      model,
+      this.#languageWasExplicitlyConfigured,
+    );
+  }
+
+  supportsTtsLanguage(
+    language: string,
+    model = this.#modelId,
+    voice = this.configuredVoice,
+  ): boolean {
+    return sarvamTtsVoiceSupportsLanguage(language, model, voice, this.#options.voiceLanguages);
+  }
+
+  requiresTtsLanguageForModel(model = this.#modelId): boolean {
+    return isSarvamTtsV4FlashModel(model);
+  }
+
+  requiresTtsVoiceForModel(model = this.#modelId): boolean {
+    return isSarvamTtsV4FlashModel(model);
+  }
+
+  supportsTtsSpeed(speed: number, model = this.#modelId, voice = this.configuredVoice): boolean {
+    return sarvamTtsSpeedSupported(speed, model, voice);
+  }
+}
+
+export function isSarvamTtsV4FlashModel(model: string): boolean {
+  return model === SARVAM_TTS_V4_FLASH_MODEL;
+}
+
+export function isSarvamTtsModelSupported(value: unknown): value is string {
+  return typeof value === "string" && SARVAM_TTS_MODELS.some((model) => model === value);
+}
+
+export function sarvamTtsConfiguredLanguageSupported(
+  value: string,
+  configuredLanguage: string,
+  model: string,
+  languageWasExplicitlyConfigured: boolean,
+): boolean {
+  const language = normalizeSarvamTtsLanguage(value);
+  return (
+    language === configuredLanguage &&
+    isSarvamTtsLanguageCompatible(language, model, languageWasExplicitlyConfigured)
+  );
+}
+
 export function normalizeSarvamTtsLanguage(value: unknown): SarvamTtsLanguage | undefined {
   if (typeof value !== "string" || value.trim() !== value) return undefined;
   const match = /^([a-z]{2})-([a-z]{2})$/i.exec(value);
@@ -88,6 +204,60 @@ export function normalizeSarvamTtsLanguage(value: unknown): SarvamTtsLanguage | 
   const languageCode = match[1].toLowerCase();
   const language = `${languageCode === "od" ? "or" : languageCode}-${match[2].toUpperCase()}`;
   return SARVAM_TTS_LANGUAGE_SET.has(language) ? (language as SarvamTtsLanguage) : undefined;
+}
+
+export function sarvamTtsLanguageAliases(value: string): readonly string[] {
+  const language = normalizeSarvamTtsLanguage(value);
+  if (!language) return [];
+  return language === "or-IN" ? ["or-IN", "od-IN"] : [language];
+}
+
+export function normalizeSarvamTtsVoiceLanguages(
+  value: unknown,
+): SarvamTtsVoiceLanguages | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw sarvamTtsValidationError("Sarvam voiceLanguages must be an object of language arrays");
+  }
+  const entries = Object.entries(value);
+  if (entries.length > MAX_SARVAM_TTS_VOICE_LANGUAGE_ENTRIES) {
+    throw sarvamTtsValidationError(
+      `Sarvam voiceLanguages must contain at most ${MAX_SARVAM_TTS_VOICE_LANGUAGE_ENTRIES} voices`,
+    );
+  }
+  const result: Record<string, readonly SarvamTtsLanguage[]> = {};
+  for (const [voice, values] of entries) {
+    if (
+      voice.trim().length === 0 ||
+      voice.length > 255 ||
+      voice.trim() !== voice ||
+      /\s/u.test(voice)
+    ) {
+      throw sarvamTtsValidationError("Sarvam voiceLanguages contains an invalid voice id");
+    }
+    if (!Array.isArray(values)) {
+      throw sarvamTtsValidationError(
+        `Sarvam voiceLanguages.${voice} must be an array of supported language tags`,
+      );
+    }
+    const languages: SarvamTtsLanguage[] = [];
+    for (const item of values) {
+      const language = normalizeSarvamTtsLanguage(item);
+      if (!language) {
+        throw sarvamTtsValidationError(
+          `Sarvam voiceLanguages.${voice} contains an unsupported language tag`,
+        );
+      }
+      if (!languages.includes(language)) languages.push(language);
+    }
+    Object.defineProperty(result, voice, {
+      configurable: false,
+      enumerable: true,
+      value: Object.freeze(languages),
+      writable: false,
+    });
+  }
+  return Object.freeze(result);
 }
 
 export function toSarvamTtsLanguageCode(value: string): string {
@@ -115,14 +285,17 @@ export function sarvamTtsVoiceSupportsLanguage(
 ): boolean {
   const language = normalizeSarvamTtsLanguage(value);
   if (!language || !isSarvamTtsLanguageSupported(language, model)) return false;
-  if (model !== SARVAM_TTS_V4_FLASH_MODEL) return true;
+  if (!isSarvamTtsV4FlashModel(model)) return true;
   if (!voice || !isSarvamTtsVoiceSupported(voice, model)) return false;
   // V4 uses the persona for voice/style and language_code for pronunciation
   // conventions. The model guide recommends cross-language auditioning and
   // documents Hindi-tagged personas for English requests, so persona IDs do
   // not restrict requests to the language embedded in the ID. Explicit host
   // metadata still narrows a known voice when present.
-  const declaredLanguages = voiceLanguages?.[voice];
+  const declaredLanguages =
+    voiceLanguages && Object.prototype.hasOwnProperty.call(voiceLanguages, voice)
+      ? voiceLanguages[voice]
+      : undefined;
   return (
     declaredLanguages === undefined ||
     declaredLanguages.some(
@@ -140,13 +313,13 @@ export function sarvamTtsSpeedSupported(
     Number.isFinite(speed) &&
     speed >= 0.5 &&
     speed <= 2.0 &&
-    PROVIDER_CATALOG.sarvamTts.models.some((supportedModel) => supportedModel === model) &&
-    (model !== SARVAM_TTS_V4_FLASH_MODEL || isSarvamTtsVoiceSupported(voice, model))
+    isSarvamTtsModelSupported(model) &&
+    (!isSarvamTtsV4FlashModel(model) || isSarvamTtsVoiceSupported(voice, model))
   );
 }
 
 export function resolveSarvamTtsVoice(model: string, requestedVoice?: string): string {
-  if (model === SARVAM_TTS_V4_FLASH_MODEL && requestedVoice === undefined) {
+  if (isSarvamTtsV4FlashModel(model) && requestedVoice === undefined) {
     throw TvicThrowableError.from(
       validationError(
         TVIC_ERROR_CODES.providerVoiceUnsupported,
@@ -173,7 +346,7 @@ export function isSarvamTtsVoiceSupported(value: unknown, model: string): value 
   ) {
     return false;
   }
-  return model === SARVAM_TTS_V4_FLASH_MODEL
+  return isSarvamTtsV4FlashModel(model)
     ? SARVAM_TTS_V4_FLASH_VOICE_SET.has(value)
     : SARVAM_TTS_VOICE_SET.has(value);
 }
@@ -188,7 +361,7 @@ function assertSarvamTtsVoice(value: unknown, model: string): asserts value is s
           provider: PROVIDER_NAMES.sarvamTts,
           metadata: {
             voice: typeof value === "string" ? value : undefined,
-            ...(model === SARVAM_TTS_V4_FLASH_MODEL ? {} : { supportedVoices: SARVAM_TTS_VOICES }),
+            ...(!isSarvamTtsV4FlashModel(model) ? { supportedVoices: SARVAM_TTS_VOICES } : {}),
           },
         },
       ),
@@ -200,7 +373,7 @@ export function isSarvamTtsLanguageSupported(value: unknown, model: string): val
   const language = normalizeSarvamTtsLanguage(value);
   return (
     language !== undefined &&
-    (model !== SARVAM_TTS_V4_FLASH_MODEL || SARVAM_TTS_V4_LANGUAGE_SET.has(language))
+    (!isSarvamTtsV4FlashModel(model) || SARVAM_TTS_V4_LANGUAGE_SET.has(language))
   );
 }
 
@@ -218,13 +391,13 @@ export function isSarvamTtsLanguageCompatible(
   languageWasExplicitlyConfigured: boolean,
 ): value is string {
   return (
-    (model !== SARVAM_TTS_V4_FLASH_MODEL || languageWasExplicitlyConfigured) &&
+    (!isSarvamTtsV4FlashModel(model) || languageWasExplicitlyConfigured) &&
     isSarvamTtsLanguageSupported(value, model)
   );
 }
 
 export function assertSarvamTtsLanguageExplicit(model: string, language: string | undefined): void {
-  if (model === SARVAM_TTS_V4_FLASH_MODEL && language === undefined) {
+  if (isSarvamTtsV4FlashModel(model) && language === undefined) {
     throw TvicThrowableError.from(
       validationError(
         TVIC_ERROR_CODES.providerInvalidRequest,
@@ -235,17 +408,10 @@ export function assertSarvamTtsLanguageExplicit(model: string, language: string 
   }
 }
 
-export function assertSarvamTtsLanguage(value: unknown, model: string): asserts value is string {
-  if (!isSarvamTtsLanguageSupported(value, model)) {
-    throw sarvamTtsLanguageError(value, model);
-  }
-}
-
 function sarvamTtsLanguageError(value: unknown, model: string): TvicThrowableError {
-  const supportedLanguages =
-    model === SARVAM_TTS_V4_FLASH_MODEL
-      ? SARVAM_TTS_LANGUAGES.filter((language) => SARVAM_TTS_V4_LANGUAGE_SET.has(language))
-      : SARVAM_TTS_LANGUAGES;
+  const supportedLanguages = isSarvamTtsV4FlashModel(model)
+    ? SARVAM_TTS_LANGUAGES.filter((language) => SARVAM_TTS_V4_LANGUAGE_SET.has(language))
+    : SARVAM_TTS_LANGUAGES;
   return sarvamTtsLanguageUnsupportedError(value, model, undefined, supportedLanguages);
 }
 

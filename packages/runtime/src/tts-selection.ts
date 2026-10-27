@@ -1,7 +1,19 @@
-import { TVIC_ERROR_CODES, TvicThrowableError, validationError } from "@tvic/core";
-import type { TextToSpeechProvider, UsageModelOrigin } from "@tvic/core";
+import {
+  canonicalizeLanguageTag,
+  evaluateTtsSelectionCompatibility,
+  normalizeLanguageStringMap,
+  TVIC_ERROR_CODES,
+  TvicThrowableError,
+  validationError,
+} from "@tvic/core";
+import type { TextToSpeechProvider, TtsProviderSelection, UsageModelOrigin } from "@tvic/core";
 
 export const MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES = 128;
+
+declare const TTS_CALL_SELECTION_BRAND: unique symbol;
+const resolvedTtsCallSelections = new WeakSet<object>();
+const selectionProviders = new WeakMap<object, TextToSpeechProvider | undefined>();
+const selectionLanguageProvenance = new WeakMap<object, boolean>();
 
 export interface TtsCallSelectionInput {
   readonly model?: string;
@@ -12,11 +24,14 @@ export interface TtsCallSelectionInput {
   readonly voicesByLanguage?: Readonly<Record<string, string>>;
 }
 
+/** Immutable selection produced by resolveTtsCallSelection for one provider call. */
 export interface TtsCallSelection {
+  readonly [TTS_CALL_SELECTION_BRAND]: true;
   readonly model?: string;
   readonly modelSource: UsageModelOrigin;
   readonly voice?: string;
   readonly language?: string;
+  readonly languageWasCallerSelected: boolean;
   readonly speed?: number;
 }
 
@@ -26,25 +41,51 @@ export function resolveTtsCallSelection(
   defaults: TtsCallSelectionInput = {},
 ): TtsCallSelection {
   if (!provider) {
-    return Object.freeze({
-      modelSource: overrides.modelSource ?? defaults.modelSource ?? "not_reported",
-    });
+    return createResolvedTtsCallSelection(
+      {
+        modelSource: overrides.modelSource ?? defaults.modelSource ?? "not_reported",
+        languageWasCallerSelected:
+          nonEmptyOverride(overrides.language) !== undefined ||
+          selectionLanguageProvenance.get(defaults) === true,
+      },
+      undefined,
+    );
   }
-  const model = selectValue(overrides.model, defaults.model, provider.configuredModel);
+  const requestedModel = nonEmptyOverride(overrides.model);
+  const requestedVoice = nonEmptyOverride(overrides.voice);
+  const model = selectValue(requestedModel, defaults.model, provider.configuredModel);
   const modelSource = resolveModelSource(provider, model, overrides, defaults);
-  if (overrides.model !== undefined) validateModelOverride(provider, overrides.model);
   const requiresLanguage = provider.requiresTtsLanguageForModel?.(model) === true;
   const voiceLanguageMap = selectValue(
     overrides.voicesByLanguage,
     defaults.voicesByLanguage,
     undefined,
   );
-  const speed = overrides.speed;
-  const requestedLanguage = selectValue(overrides.language, defaults.language, undefined);
+  const speed = selectValue(overrides.speed, defaults.speed, undefined);
+  const callerLanguage = nonEmptyOverride(overrides.language);
+  const requestedLanguage = selectValue(callerLanguage, defaults.language, undefined);
+  const languageWasCallerSelected =
+    callerLanguage !== undefined ||
+    (callerLanguage === undefined && selectionLanguageProvenance.get(defaults) === true);
   const normalizedRequestedLanguage = normalizeOptionalLanguage(requestedLanguage, provider.name);
+  const shouldNormalizeConfiguredLanguage =
+    normalizedRequestedLanguage === undefined &&
+    provider.configuredLanguage !== undefined &&
+    requiresLanguage;
+  const hasCombinedSelectionOverride =
+    typeof provider.supportsTtsSelection === "function" &&
+    (requestedModel !== undefined || requestedVoice !== undefined);
+  const shouldCanonicalizeConfiguredLanguage =
+    normalizedRequestedLanguage === undefined &&
+    provider.configuredLanguage !== undefined &&
+    (voiceLanguageMap !== undefined || hasCombinedSelectionOverride);
   const configuredLanguage =
     normalizedRequestedLanguage === undefined
-      ? normalizeOptionalLanguage(provider.configuredLanguage, provider.name)
+      ? shouldNormalizeConfiguredLanguage
+        ? normalizeOptionalLanguage(provider.configuredLanguage, provider.name)
+        : shouldCanonicalizeConfiguredLanguage
+          ? canonicalizeConfiguredLanguage(provider.configuredLanguage)
+          : provider.configuredLanguage
       : undefined;
   const configuredRequiredLanguage =
     requiresLanguage && provider.languageWasExplicitlyConfigured === true
@@ -52,100 +93,111 @@ export function resolveTtsCallSelection(
       : undefined;
   const language = normalizedRequestedLanguage ?? configuredRequiredLanguage;
   const validationLanguage = normalizedRequestedLanguage ?? configuredLanguage;
-  const hasLanguageCompatibilityDeclaration =
-    typeof provider.supportsTtsLanguage === "function" ||
-    typeof provider.supportsTtsSelection === "function";
+  const voiceLanguage = language ?? configuredLanguage;
+  const voicesByLanguage = normalizeVoiceLanguageMap(voiceLanguageMap, provider.name);
+  const mappedVoiceLanguage =
+    voiceLanguage && voicesByLanguage
+      ? findMappedVoiceLanguage(voicesByLanguage, voiceLanguage)
+      : undefined;
+  const mappedVoice =
+    mappedVoiceLanguage === undefined ? undefined : voicesByLanguage?.[mappedVoiceLanguage];
+  const voice =
+    requestedVoice ??
+    mappedVoice ??
+    selectValue(undefined, defaults.voice, provider.configuredVoice);
+  const mappedVoiceValidationRequired = mappedVoice !== undefined && requestedVoice === undefined;
+  const inheritedLanguageMayChangeCompatibility =
+    configuredLanguage !== undefined &&
+    normalizedRequestedLanguage === undefined &&
+    hasCombinedSelectionOverride;
   const validateEffectiveLanguage =
     normalizedRequestedLanguage !== undefined ||
     requiresLanguage ||
-    (configuredLanguage !== undefined &&
-      (hasLanguageCompatibilityDeclaration || model !== provider.configuredModel));
-  const voicesByLanguage = normalizeVoiceLanguageMap(voiceLanguageMap, provider, model, speed);
-  const voiceLanguage = language ?? configuredLanguage;
-  const mappedVoice = voiceLanguage ? voicesByLanguage?.[voiceLanguage] : undefined;
-  const voice =
-    overrides.voice ??
-    mappedVoice ??
-    selectValue(undefined, defaults.voice, provider.configuredVoice);
-  if (voice === undefined && provider.requiresTtsVoiceForModel?.(model)) {
-    invalidRequest(
-      provider.name,
-      `Provider ${provider.name} requires a TTS voice for model ${model ?? "default"}`,
-    );
-  }
-  if (
-    voice !== undefined &&
-    (overrides.voice !== undefined || model !== provider.configuredModel)
-  ) {
-    validateVoiceOverride(provider, voice, model, language ?? configuredLanguage);
-  }
-  if (requiresLanguage && language === undefined) {
-    invalidRequest(
-      provider.name,
-      `Provider ${provider.name} requires a TTS language for model ${model ?? "default"}`,
-    );
-  }
-  if (validateEffectiveLanguage) {
-    if (
-      typeof provider.supportsTtsLanguage !== "function" &&
-      typeof provider.supportsTtsSelection !== "function"
-    ) {
-      invalidRequest(
-        provider.name,
-        requestedLanguage !== undefined
+    mappedVoiceValidationRequired ||
+    inheritedLanguageMayChangeCompatibility;
+  const candidateSelection: TtsProviderSelection = {
+    ...(model !== undefined ? { model } : {}),
+    ...(voice !== undefined ? { voice } : {}),
+    ...(language !== undefined ? { language } : {}),
+    ...(speed !== undefined ? { speed } : {}),
+  };
+  const compatibilityIssues = evaluateTtsSelectionCompatibility(provider, candidateSelection, {
+    checkModel: requestedModel !== undefined,
+    checkVoice:
+      voice !== undefined &&
+      (requestedVoice !== undefined ||
+        mappedVoice !== undefined ||
+        model !== provider.configuredModel),
+    voiceOverride: requestedVoice !== undefined || mappedVoice !== undefined,
+    checkLanguage: validateEffectiveLanguage || mappedVoiceValidationRequired,
+    ...(validationLanguage !== undefined ? { languageForValidation: validationLanguage } : {}),
+    ...(validationLanguage !== undefined
+      ? {
+          languageCompatibilityCandidates: languageTagCandidates(validationLanguage),
+        }
+      : {}),
+    languageIsExplicit:
+      normalizedRequestedLanguage !== undefined ||
+      provider.languageWasExplicitlyConfigured !== false,
+    languageWasCallerSelected,
+    requireLanguageDeclaration:
+      normalizedRequestedLanguage !== undefined ||
+      requiresLanguage ||
+      mappedVoiceValidationRequired,
+    checkSpeed: speed !== undefined,
+    requireSpeedDeclaration: speed !== undefined,
+    checkRequiredFields: true,
+    checkProviderSelection: true,
+  });
+  if (compatibilityIssues.length > 0) {
+    const issue = compatibilityIssues[0]!;
+    const message =
+      issue.requirement === "language" &&
+      issue.message === `Provider ${provider.name} does not declare TTS language support`
+        ? requestedLanguage !== undefined
           ? `Provider ${provider.name} does not declare support for request-level TTS language`
           : requiresLanguage
             ? `Provider ${provider.name} does not declare required TTS language compatibility`
-            : `Provider ${provider.name} does not declare configured TTS language compatibility`,
-      );
-    }
-    if (validationLanguage === undefined) {
-      invalidRequest(
-        provider.name,
-        `Provider ${provider.name} requires a TTS language for model ${model ?? "default"}`,
-      );
-    }
-    if (
-      provider.supportsTtsLanguage &&
-      !provider.supportsTtsLanguage(validationLanguage, model, voice)
-    ) {
-      invalidRequest(
-        provider.name,
-        `Provider ${provider.name} does not support TTS language ${validationLanguage} for model ${model ?? "default"} and voice ${voice ?? "default"}`,
-      );
-    }
+            : `Provider ${provider.name} does not declare configured TTS language compatibility`
+        : issue.message;
+    throwTtsSelectionIssue(provider.name, issue.requirement, message);
   }
-  if (overrides.speed !== undefined) {
-    if (!Number.isFinite(overrides.speed) || overrides.speed <= 0) {
-      invalidRequest(provider.name, "TTS speed must be a positive finite number");
-    }
-    if (
-      typeof provider.supportsTtsSpeed !== "function" &&
-      typeof provider.supportsTtsSelection !== "function"
-    ) {
-      invalidRequest(
-        provider.name,
-        `Provider ${provider.name} does not declare support for request-level TTS speed`,
-      );
-    }
-    if (provider.supportsTtsSpeed && !provider.supportsTtsSpeed(overrides.speed, model, voice)) {
-      invalidRequest(
-        provider.name,
-        `Provider ${provider.name} does not support TTS speed ${overrides.speed} for model ${model ?? "default"} and voice ${voice ?? "default"}`,
-      );
-    }
-  }
-  const selection: TtsCallSelection = Object.freeze({
-    ...(model !== undefined ? { model } : {}),
-    modelSource,
-    ...(voice !== undefined ? { voice } : {}),
-    ...(language !== undefined ? { language } : {}),
-    ...(overrides.speed !== undefined ? { speed: overrides.speed } : {}),
-  });
-  if (provider.supportsTtsSelection && !provider.supportsTtsSelection(selection)) {
-    invalidRequest(provider.name, "Provider does not support the selected TTS settings");
-  }
+  const selection = createResolvedTtsCallSelection(
+    {
+      ...candidateSelection,
+      modelSource,
+      languageWasCallerSelected,
+    },
+    provider,
+  );
   return selection;
+}
+
+export function assertResolvedTtsCallSelection(
+  value: unknown,
+  provider?: TextToSpeechProvider,
+): asserts value is TtsCallSelection {
+  if (typeof value !== "object" || value === null || !resolvedTtsCallSelections.has(value)) {
+    throw new TypeError("ttsSelection must be produced by resolveTtsCallSelection");
+  }
+  if (arguments.length > 1 && selectionProviders.get(value) !== provider) {
+    throw new TypeError("ttsSelection was resolved for a different TTS provider");
+  }
+}
+
+function createResolvedTtsCallSelection(
+  value: Omit<TtsCallSelection, typeof TTS_CALL_SELECTION_BRAND>,
+  provider: TextToSpeechProvider | undefined,
+): TtsCallSelection {
+  const selection = Object.freeze(value);
+  resolvedTtsCallSelections.add(selection);
+  selectionProviders.set(selection, provider);
+  selectionLanguageProvenance.set(selection, value.languageWasCallerSelected);
+  return selection as TtsCallSelection;
+}
+
+function nonEmptyOverride(value: string | undefined): string | undefined {
+  return value === "" ? undefined : value;
 }
 
 function normalizeOptionalLanguage(
@@ -155,113 +207,67 @@ function normalizeOptionalLanguage(
   return value === undefined ? undefined : normalizeLanguage(value, provider);
 }
 
+function canonicalizeConfiguredLanguage(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return canonicalizeLanguageTag(value) ?? value;
+}
+
 function normalizeLanguage(value: string, provider: string): string {
-  try {
-    const [language] = Intl.getCanonicalLocales(value);
-    if (language) return language;
-  } catch {
-    invalidRequest(provider, "TTS language must be a valid BCP-47 tag");
-  }
-  return invalidRequest(provider, "TTS language must be a valid BCP-47 tag");
+  return (
+    canonicalizeLanguageTag(value) ??
+    invalidRequest(provider, "TTS language must be a valid BCP-47 tag")
+  );
 }
 
 function normalizeVoiceLanguageMap(
   input: Readonly<Record<string, string>> | undefined,
-  provider: TextToSpeechProvider,
-  model: string | undefined,
-  speed: number | undefined,
+  provider: string,
 ): Readonly<Record<string, string>> | undefined {
   if (input === undefined) return undefined;
-  let entryCount = 0;
-  for (const language in input) {
-    if (
-      Object.prototype.hasOwnProperty.call(input, language) &&
-      ++entryCount > MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES
-    ) {
-      invalidRequest(
-        provider.name,
+  const result = normalizeLanguageStringMap(input, MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES);
+  if (result.ok) return result.value;
+  switch (result.reason) {
+    case "invalid_object":
+      return invalidRequest(provider, "TTS voice map must be an object");
+    case "too_many_entries":
+      return invalidRequest(
+        provider,
         `TTS voice map must contain at most ${MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES} entries`,
       );
-    }
+    case "invalid_language":
+      return invalidRequest(provider, "TTS language must be a valid BCP-47 tag");
+    case "duplicate_language":
+      return invalidRequest(provider, `TTS voice map repeats language ${result.language}`);
+    case "invalid_value":
+      return invalidRequest(
+        provider,
+        `TTS voice map entry for ${result.language} must be a non-empty voice id`,
+      );
   }
-  const normalized: Record<string, string> = {};
-  for (const [rawLanguage, voice] of Object.entries(input)) {
-    const language = normalizeLanguage(rawLanguage, provider.name);
-    if (Object.prototype.hasOwnProperty.call(normalized, language)) {
-      invalidRequest(provider.name, `TTS voice map repeats language ${language}`);
-    }
-    if (typeof voice !== "string" || voice.trim().length === 0) {
-      invalidRequest(
-        provider.name,
-        `TTS voice map entry for ${language} must be a non-empty voice id`,
-      );
-    }
-    validateVoiceOverride(provider, voice, model, language);
-    if (
-      typeof provider.supportsTtsLanguage !== "function" &&
-      typeof provider.supportsTtsSelection !== "function"
-    ) {
-      invalidRequest(
-        provider.name,
-        `Provider ${provider.name} does not declare support for TTS language-to-voice compatibility`,
-      );
-    }
-    if (
-      (provider.supportsTtsLanguage && !provider.supportsTtsLanguage(language, model, voice)) ||
-      (provider.supportsTtsSelection &&
-        !provider.supportsTtsSelection({
-          ...(model !== undefined ? { model } : {}),
-          voice,
-          language,
-          ...(speed !== undefined ? { speed } : {}),
-        }))
-    ) {
-      invalidRequest(
-        provider.name,
-        `Provider ${provider.name} does not support TTS language ${language} for model ${model ?? "default"} and voice ${voice}`,
-      );
-    }
-    normalized[language] = voice;
-  }
-  return Object.freeze(normalized);
 }
 
-function validateModelOverride(provider: TextToSpeechProvider, model: string): void {
-  if (model.trim().length === 0) invalidRequest(provider.name, "TTS model must be non-empty");
-  const supportedModels = provider.capabilities.models;
-  if (
-    supportedModels?.includes(model) ||
-    model === provider.configuredModel ||
-    provider.allowUnknownModel === true
-  ) {
-    return;
+function findMappedVoiceLanguage(
+  voicesByLanguage: Readonly<Record<string, string>>,
+  language: string,
+): string | undefined {
+  let candidate = language;
+  while (true) {
+    if (Object.prototype.hasOwnProperty.call(voicesByLanguage, candidate)) return candidate;
+    const separator = candidate.lastIndexOf("-");
+    if (separator < 0) return undefined;
+    candidate = candidate.slice(0, separator);
   }
-  if (supportedModels === undefined || supportedModels.length === 0) {
-    invalidRequest(provider.name, `Provider ${provider.name} does not declare TTS model support`);
-  }
-  invalidRequest(provider.name, `Provider ${provider.name} does not support model ${model}`);
 }
 
-function validateVoiceOverride(
-  provider: TextToSpeechProvider,
-  voice: string,
-  model: string | undefined,
-  language: string | undefined,
-): void {
-  if (voice.trim().length === 0) invalidRequest(provider.name, "TTS voice must be non-empty");
-  if (provider.supportsTtsVoiceOverride) {
-    if (provider.supportsTtsVoiceOverride.call(provider, voice, model, language)) return;
-    invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
+function languageTagCandidates(language: string): readonly string[] {
+  const candidates: string[] = [];
+  let candidate = language;
+  while (true) {
+    candidates.push(candidate);
+    const separator = candidate.lastIndexOf("-");
+    if (separator < 0) return candidates;
+    candidate = candidate.slice(0, separator);
   }
-  if (provider.supportsVoice) {
-    if (provider.supportsVoice.call(provider, voice, model)) return;
-    invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
-  }
-  if (provider.capabilities.voices?.includes(voice) || voice === provider.configuredVoice) return;
-  if (provider.capabilities.voices === undefined || provider.capabilities.voices.length === 0) {
-    invalidRequest(provider.name, `Provider ${provider.name} does not declare TTS voice support`);
-  }
-  invalidRequest(provider.name, `Provider ${provider.name} does not support voice ${voice}`);
 }
 
 function resolveModelSource(
@@ -271,7 +277,7 @@ function resolveModelSource(
   defaults: TtsCallSelectionInput,
 ): UsageModelOrigin {
   if (overrides.modelSource !== undefined) return overrides.modelSource;
-  if (overrides.model !== undefined) return "request";
+  if (nonEmptyOverride(overrides.model) !== undefined) return "request";
   if (defaults.modelSource !== undefined) return defaults.modelSource;
   if (provider.configuredModelSource !== undefined) return provider.configuredModelSource;
   return model === undefined ? "not_reported" : "configured";
@@ -291,4 +297,31 @@ function invalidRequest(provider: string, message: string): never {
       provider,
     }),
   );
+}
+
+function throwTtsSelectionIssue(
+  provider: string,
+  requirement: "model" | "voice" | "language" | "speed" | "selection",
+  message: string,
+): never {
+  const details = { provider };
+  switch (requirement) {
+    case "model":
+      throw TvicThrowableError.from(
+        validationError(TVIC_ERROR_CODES.providerModelUnsupported, message, details),
+      );
+    case "voice":
+      throw TvicThrowableError.from(
+        validationError(TVIC_ERROR_CODES.providerVoiceUnsupported, message, details),
+      );
+    case "language":
+      throw TvicThrowableError.from(
+        validationError(TVIC_ERROR_CODES.ttsLanguageUnsupported, message, details),
+      );
+    case "speed":
+    case "selection":
+      throw TvicThrowableError.from(
+        validationError(TVIC_ERROR_CODES.providerInvalidRequest, message, details),
+      );
+  }
 }

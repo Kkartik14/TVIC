@@ -1,4 +1,3 @@
-import { TvicThrowableError } from "@tvic/core";
 import type { InputAudioChunk } from "@tvic/core";
 import type { SttAgentContextWaiter } from "./stt-agent-context.js";
 
@@ -41,19 +40,6 @@ export type SttJournalEntry =
 
 export function journalBytes(journal: readonly SttJournalEntry[]): number {
   return journal.reduce((total, entry) => total + (entry.kind === "audio" ? entry.bytes : 0), 0);
-}
-
-export function rejectPendingCommits(journal: readonly SttJournalEntry[], error: unknown): void {
-  const throwable = TvicThrowableError.from(error);
-  for (const entry of journal) {
-    if (entry.kind === "commit" && !entry.settled) {
-      entry.settled = true;
-      entry.reject(throwable);
-    } else if (entry.kind === "agent_context" && !entry.settled) {
-      entry.settled = true;
-      entry.waiter.reject(throwable);
-    }
-  }
 }
 
 export function findReplayStart(
@@ -114,6 +100,9 @@ export function compactJournal(
   }
 
   const keptIndices = journal.flatMap((entry, index) => {
+    if (entry.kind === "agent_context" && entry.settled) {
+      return [];
+    }
     if (index >= cursor || retainAudio[index]) {
       return [index];
     }

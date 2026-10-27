@@ -45,7 +45,7 @@ try {
 
   const esmCheck = [
     'const pkg = await import("voice-runtime");',
-    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
+    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "resolveTtsCallSelection", "resolveSttCallSelection", "fetchCartesiaVoiceCatalogSnapshot", "normalizeCartesiaVoiceCatalogSnapshot", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
     '  if (typeof pkg[name] !== "function") throw new Error(`missing ESM export: ${name}`);',
     "}",
     'if (pkg.MAX_USAGE_OBSERVATION_SAMPLES !== 32) throw new Error("missing usage observation sample limit");',
@@ -61,7 +61,7 @@ try {
 
   const commonJsCheck = [
     'const pkg = require("voice-runtime");',
-    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
+    'for (const name of ["createVoiceAgent", "createRuntime", "defineAgent", "resolveTtsCallSelection", "resolveSttCallSelection", "fetchCartesiaVoiceCatalogSnapshot", "normalizeCartesiaVoiceCatalogSnapshot", "runPostgresMigrations", "runPostgresMemoryMigrations", "toRuntimeSessionTrace"]) {',
     '  if (typeof pkg[name] !== "function") throw new Error(`missing CJS export: ${name}`);',
     "}",
     'if (pkg.MAX_USAGE_OBSERVATION_SAMPLES !== 32) throw new Error("missing usage observation sample limit");',
@@ -107,7 +107,15 @@ import {
   type SttLanguagePolicy,
   type SttOpenRequest,
   type SttStream,
+  type SttCallSelection,
+  type SttCallSelectionInput,
   type TtsProviderSelection,
+  type TtsCallSelection,
+  type TtsCallSelectionInput,
+  type TtsFailoverRequestVariant,
+  type CartesiaVoiceCatalogSnapshot,
+  type CartesiaVoiceCatalogEntry,
+  type FetchCartesiaVoiceCatalogSnapshotOptions,
   type TtsSessionOpenRequest,
   type TtsSynthesisRequest,
   type VoiceAgentRunOptions,
@@ -168,6 +176,24 @@ const ttsSelection: TtsProviderSelection = {
   language: "en-US",
   speed: 1,
 };
+declare const resolvedSttSelection: SttCallSelection;
+declare const sttSelectionInput: SttCallSelectionInput;
+declare const resolvedTtsSelection: TtsCallSelection;
+declare const ttsSelectionInput: TtsCallSelectionInput;
+declare const fallbackVariant: TtsFailoverRequestVariant;
+declare const cartesiaSnapshot: CartesiaVoiceCatalogSnapshot;
+declare const cartesiaCatalogEntry: CartesiaVoiceCatalogEntry;
+declare const cartesiaSnapshotOptions: FetchCartesiaVoiceCatalogSnapshotOptions;
+void [
+  resolvedSttSelection,
+  sttSelectionInput,
+  resolvedTtsSelection,
+  ttsSelectionInput,
+  fallbackVariant,
+  cartesiaSnapshot,
+  cartesiaCatalogEntry,
+  cartesiaSnapshotOptions,
+];
 const ttsSessionRequest: TtsSessionOpenRequest = {
   sessionId,
   turnId,

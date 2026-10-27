@@ -53,12 +53,23 @@ import {
   type VoiceAgentCallHandleContext,
   type VoiceAgentModels,
   type VoiceEvent,
+  fetchCartesiaVoiceCatalogSnapshot,
+  normalizeCartesiaVoiceCatalogSnapshot,
+  MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES,
+  type CartesiaVoiceCatalogEntry,
+  type CartesiaVoiceCatalogSnapshot,
+  type SttCallSelection,
+  type SttCallSelectionInput,
+  type TtsCallSelection,
+  type TtsCallSelectionInput,
+  type TtsFailoverRequestVariant,
   type AudioTapFrame,
   type AudioTapDrainContext,
   type AudioTapOptions,
   type AudioTapSummary,
 } from "../src/index.js";
 import { isTerminalSession } from "@tvic/core";
+import { resolveTtsCallSelection } from "@tvic/runtime";
 
 const CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
@@ -77,7 +88,30 @@ const TEST_RUNTIME_DEFAULTS = {
 } satisfies RuntimeOptions;
 
 describe("managed voice agent", () => {
-  it.each(["", "multi", "hi_IN"])(
+  it("exports documented Cartesia and speech-selection APIs from the package root", () => {
+    const entry: CartesiaVoiceCatalogEntry = { id: "voice", status: "active" };
+    const snapshot: CartesiaVoiceCatalogSnapshot = {
+      fetchedAtMs: 1,
+      expiresAtMs: 2,
+      voices: [entry],
+    };
+    const variant: TtsFailoverRequestVariant = {
+      fallback: { model: "fallback-model", voice: "fallback-voice" },
+    };
+    const sttSelection: SttCallSelection = { agentContextUpdates: false };
+    const sttInput: SttCallSelectionInput = { sttLanguage: "en-US" };
+    const ttsSelection: TtsCallSelection = resolveTtsCallSelection(undefined, {
+      modelSource: "configured",
+    });
+    const ttsInput: TtsCallSelectionInput = { language: "en-US" };
+
+    expect(typeof fetchCartesiaVoiceCatalogSnapshot).toBe("function");
+    expect(normalizeCartesiaVoiceCatalogSnapshot(snapshot)).toEqual(snapshot);
+    expect(MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES).toBe(128);
+    expect([variant, sttSelection, sttInput, ttsSelection, ttsInput]).toHaveLength(5);
+  });
+
+  it.each(["multi", "hi_IN"])(
     "passes raw STT language %j to host-written adapters",
     async (sttLanguage) => {
       let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
@@ -104,6 +138,91 @@ describe("managed voice agent", () => {
       }
     },
   );
+
+  it("rejects an empty managed STT language before accepting the call handle", async () => {
+    const harness = createLifecycleHarness();
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          sttLanguage: "",
+        }),
+      ).rejects.toMatchObject({ code: "voice_runtime.invalid_config" });
+      expect(harness.closeReasons).toEqual([]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("preflights per-call TTS selection before creating a session or closing the handle", async () => {
+    let sttOpenCount = 0;
+    const harness = createLifecycleHarness({
+      onSttOpen() {
+        sttOpenCount += 1;
+      },
+    });
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          ttsLanguage: "fr-FR",
+        }),
+      ).rejects.toMatchObject({ code: "voice_runtime.invalid_config" });
+      expect(sttOpenCount).toBe(0);
+      expect(harness.closeReasons).toEqual([]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("preserves legacy model and voice selection for host TTS providers without catalogs", async () => {
+    const ttsProvider: TextToSpeechProvider = {
+      name: "host-tts-without-catalogs",
+      kind: "tts",
+      version: "0.1.0",
+      capabilities: CAPABILITIES,
+      configuredModel: "host-default-model",
+      configuredVoice: "host-default-voice",
+      async synthesize(): Promise<never> {
+        throw new Error("TTS must not open during selection preflight");
+      },
+    };
+    const harness = createLifecycleHarness({ ttsProvider });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsModel: "host-call-model",
+        ttsVoice: "host-call-voice",
+      });
+      void session.run.catch(() => undefined);
+      expect(session.sessionId).toBeTruthy();
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("preflights per-call STT policy before creating a session or closing the handle", async () => {
+    const harness = createLifecycleHarness();
+
+    try {
+      await expect(
+        harness.agent.start({
+          callHandle: harness.callHandle,
+          channel: "simulated",
+          sttLanguagePolicy: { mode: "hints", languages: ["not a language"] },
+        }),
+      ).rejects.toMatchObject({ code: "voice_runtime.invalid_config" });
+      expect(harness.closeReasons).toEqual([]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
 
   it("lets a call opt tool names into STT vocabulary", async () => {
     let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
@@ -1118,7 +1237,7 @@ describe("managed voice agent", () => {
           callHandle: harness.callHandle,
           channel: "simulated",
         }),
-      ).rejects.toThrow(/requires a TTS language/u);
+      ).rejects.toThrow(/requires an explicitly selected TTS language/u);
       expect(createCalls).toBe(0);
     } finally {
       await harness.agent.stop();
@@ -1783,6 +1902,45 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("rejects invalid and duplicate normalized TTS voice-map language keys at agent creation", () => {
+    expect(() => createLifecycleHarness({ ttsVoicesByLanguage: { hi_IN: "voice-hindi" } })).toThrow(
+      /valid BCP-47 language tag/u,
+    );
+    expect(() =>
+      createLifecycleHarness({
+        ttsVoicesByLanguage: { "hi-in": "voice-a", "hi-IN": "voice-b" },
+      }),
+    ).toThrow(/repeats language hi-IN/u);
+  });
+
+  it("accepts a multi-language base-key map for a Sarvam Bulbul v3 locale", async () => {
+    const ttsProvider = createSarvamTtsProvider({
+      apiKey: "sarvam-explicit",
+      modelId: "bulbul:v3",
+      voiceId: "ishita",
+      language: "hi-IN",
+      webSocketFactory: () => {
+        throw new Error("provider must not open during selection preflight");
+      },
+    });
+    const harness = createLifecycleHarness({
+      ttsProvider,
+      ttsVoicesByLanguage: { hi: "ishita", ta: "gokul" },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        ttsLanguage: "hi-IN",
+      });
+      void session.run.catch(() => undefined);
+      expect(session.sessionId).toBeTruthy();
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("resolves the Groq Chat Completions provider from environment credentials", () => {
     const names = [
       "DEEPGRAM_API_KEY",
@@ -1892,6 +2050,106 @@ describe("managed voice agent", () => {
         },
       }),
     ).not.toThrow();
+  });
+
+  it("preserves allowUnknownModel from a constructed STT provider through vocabulary preflight and open", async () => {
+    const transcripts = new AsyncQueue<TranscriptEvent>();
+    let openedRequest: Parameters<SpeechToTextProvider["open"]>[0] | undefined;
+    let signalOpened!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      signalOpened = resolve;
+    });
+    const vocabularyChecks: Array<{
+      vocabulary: readonly string[];
+      model: string | undefined;
+      allowUnknownModel: boolean | undefined;
+    }> = [];
+    const sttProvider: SpeechToTextProvider = {
+      name: "custom-instance-stt",
+      kind: "stt",
+      version: "1.0.0",
+      capabilities: { ...CAPABILITIES, models: ["known-model"] },
+      configuredModel: "known-model",
+      allowUnknownModel: true,
+      supportsSttVocabulary: (vocabulary, model, allowUnknownModel) => {
+        vocabularyChecks.push({ vocabulary, model, allowUnknownModel });
+        return true;
+      },
+      async open(request) {
+        openedRequest = request;
+        signalOpened();
+        return {
+          events: transcripts,
+          async sendAudio() {},
+          async commit() {},
+          async close() {
+            transcripts.close();
+          },
+        };
+      },
+    };
+    const harness = createLifecycleHarness({
+      sttProvider,
+      models: { stt: "host-model-vNext" },
+      sttVocabulary: ["TVIC"],
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      void session.run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await opened;
+
+      expect(openedRequest).toMatchObject({
+        model: "host-model-vNext",
+        allowUnknownModel: true,
+        vocabulary: ["TVIC"],
+      });
+      expect(vocabularyChecks).toContainEqual({
+        vocabulary: ["TVIC"],
+        model: "host-model-vNext",
+        allowUnknownModel: true,
+      });
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it.each([
+    {
+      modelId: "sonic-preview",
+      language: "en",
+      allowUnknownModel: false,
+    },
+    {
+      modelId: "host-cartesia-model",
+      language: "hi-IN",
+      allowUnknownModel: true,
+    },
+  ])("preflights Cartesia configured language for unmapped model $modelId", async (settings) => {
+    const ttsProvider = createCartesiaTtsProvider({
+      apiKey: "cartesia-explicit",
+      voiceId: "cartesia-voice",
+      ...settings,
+      webSocketFactory: () => {
+        throw new Error("TTS must not open during selection preflight");
+      },
+    });
+    const harness = createLifecycleHarness({ ttsProvider });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      void session.run.catch(() => undefined);
+      expect(session.sessionId).toBeTruthy();
+    } finally {
+      await harness.agent.stop();
+    }
   });
 
   it("allows a constructed TTS provider's explicitly opted-in unknown model", () => {
@@ -2416,7 +2674,11 @@ describe("managed voice agent", () => {
         return createSessionWithLease.apply(baseStore, args);
       },
     };
-    const harness = createLifecycleHarness({ runtime: { durableStore } });
+    const harness = createLifecycleHarness({
+      runtime: { durableStore },
+      ttsCapabilities: { ...CAPABILITIES, models: ["lifecycle-model"] },
+      ttsConfiguredModel: "lifecycle-model",
+    });
 
     try {
       await expect(
@@ -2425,7 +2687,7 @@ describe("managed voice agent", () => {
           channel: "simulated",
           ttsModel: "unlisted-model",
         }),
-      ).rejects.toThrow(/does not declare TTS model support/u);
+      ).rejects.toThrow(/does not support model unlisted-model/u);
       expect(createCalls).toBe(0);
     } finally {
       await harness.agent.stop();
@@ -2724,7 +2986,7 @@ describe("managed voice agent", () => {
     }
   });
 
-  it("requires fresh Cartesia voice facts for models.ttsVoice", () => {
+  it("treats a stale Cartesia snapshot as absent for models.ttsVoice", () => {
     const fetchedAtMs = Date.now() - 120_000;
     const ttsProvider = createCartesiaTtsProvider({
       apiKey: "test",
@@ -2741,7 +3003,7 @@ describe("managed voice agent", () => {
         models: { ttsVoice: "voice-default" },
         ttsProvider,
       }),
-    ).toThrow(/does not support voice voice-default/u);
+    ).not.toThrow();
   });
 
   it("rejects an oversized run-level voice map before creating its durable session", async () => {
@@ -4211,6 +4473,7 @@ interface LifecycleHarnessOptions {
   readonly runtime?: RuntimeOptions;
   readonly models?: VoiceAgentModels;
   readonly sttVocabulary?: readonly string[];
+  readonly sttProvider?: SpeechToTextProvider;
   readonly sttSupportsVocabulary?: boolean;
   readonly sttSupportsAgentContext?: boolean;
   readonly ttsVoicesByLanguage?: Readonly<Record<string, string>>;
@@ -4261,7 +4524,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     },
   };
   const callHandle = options.callHandleFactory?.(baseCallHandle) ?? baseCallHandle;
-  const stt: SpeechToTextProvider = {
+  const stt: SpeechToTextProvider = options.sttProvider ?? {
     name: "lifecycle-stt",
     kind: "stt",
     version: "1.0.0",

@@ -9,6 +9,7 @@ import {
   TVIC_ERROR_CODES,
   counterIdGenerator,
   createMediaEvent,
+  evaluateTtsSelectionCompatibility,
   sameAudioFormat,
   TvicThrowableError,
 } from "@tvic/core";
@@ -23,6 +24,7 @@ import type {
   TtsFlushResult,
   TtsSession,
   TtsSessionOpenRequest,
+  TtsProviderSelection,
   TtsStream,
   TtsSynthesisRequest,
 } from "@tvic/core";
@@ -206,11 +208,27 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
   }
 
   supportsTtsLanguage(language: string, model = this.#modelId): boolean {
-    return supportsElevenLabsTtsLanguage(language, model);
+    return supportsElevenLabsTtsLanguage(language, model, this.#allowUnknownModel);
   }
 
   supportsTtsSpeed(speed: number, model = this.#modelId): boolean {
-    return supportsElevenLabsTtsSpeed(speed, model);
+    return supportsElevenLabsTtsSpeed(speed, model, this.#allowUnknownModel);
+  }
+
+  supportsTtsSelection(selection: TtsProviderSelection): boolean {
+    const model = selection.model ?? this.#modelId;
+    const protocol = elevenLabsWebSocketProtocol(model);
+    if (this.#options.dialogueVoices !== undefined && protocol !== "dialogue") return false;
+    return (
+      evaluateTtsSelectionCompatibility(this, selection, {
+        checkModel: true,
+        checkVoice: true,
+        voiceOverride: selection.voice !== undefined,
+        checkLanguage: selection.language !== undefined,
+        checkSpeed: selection.speed !== undefined,
+        checkProviderSelection: false,
+      }).length === 0
+    );
   }
 
   async synthesize(request: TtsSynthesisRequest): Promise<TtsStream> {
@@ -309,7 +327,10 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
     if (request.timestamps) {
       url.searchParams.set("sync_alignment", "true");
     }
-    const language = request.language ?? this.#options.language;
+    const language =
+      request.language === ""
+        ? this.#options.language
+        : (request.language ?? this.#options.language);
     if (language !== undefined && model !== "eleven_multilingual_v2") {
       const languageCode = toElevenLabsLanguageCode(language);
       if (languageCode) url.searchParams.set("language_code", languageCode);

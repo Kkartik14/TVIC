@@ -204,6 +204,16 @@ const CARTESIA_STT_CAPABILITIES = {
 
 export type CartesiaSttMode = "manual" | "auto";
 
+function cartesiaSttLanguageCode(language: string): string {
+  const primary = primaryLanguage(normalizeLanguageTag(language, CARTESIA_STT_PROVIDER));
+  // Intl canonicalizes the legacy `tl` language subtag to `fil`; Cartesia uses `tl`.
+  if (primary === "fil") return "tl";
+  // Cartesia's Ink Whisper catalog uses `no` for Bokmål but has a separate
+  // `nn` entry for Nynorsk.
+  if (primary === "nb") return "no";
+  return primary;
+}
+
 export interface CartesiaSttProviderOptions {
   readonly apiKey: string;
   readonly url?: string;
@@ -250,23 +260,32 @@ export class CartesiaSttProvider implements SpeechToTextProvider {
   readonly version = "0.1.0";
   readonly capabilities = CARTESIA_STT_CAPABILITIES;
 
+  get allowUnknownModel(): boolean {
+    return this.#allowUnknownModel;
+  }
+
   supportsSttLanguagePolicy(policy: SttLanguagePolicy, model = this.#modelId): boolean {
-    if (policy.mode === "auto") return CARTESIA_STT_LANGUAGE_CODES[model] !== undefined;
+    if (!Object.prototype.hasOwnProperty.call(CARTESIA_STT_LANGUAGE_CODES, model)) return false;
+    if (policy.mode === "auto") return true;
     if (policy.mode !== "fixed") return false;
     try {
       return (
-        CARTESIA_STT_LANGUAGE_CODES[model]?.has(
-          primaryLanguage(normalizeLanguageTag(policy.language, CARTESIA_STT_PROVIDER)),
-        ) ?? false
+        CARTESIA_STT_LANGUAGE_CODES[model]?.has(cartesiaSttLanguageCode(policy.language)) ?? false
       );
     } catch {
       return false;
     }
   }
 
-  supportsSttVocabulary(vocabulary: readonly string[], model = this.#modelId): boolean {
+  supportsSttVocabulary(
+    vocabulary: readonly string[],
+    model = this.#modelId,
+    allowUnknownModel = this.#allowUnknownModel,
+  ): boolean {
     return (
-      CARTESIA_STT_KEYTERM_MODELS.has(model) &&
+      (CARTESIA_STT_KEYTERM_MODELS.has(model) ||
+        (allowUnknownModel &&
+          !PROVIDER_CATALOG.cartesiaStt.models.some((supported) => supported === model))) &&
       vocabulary.length <= CARTESIA_STT_MAX_KEYTERMS &&
       vocabulary.every((term) => typeof term === "string" && term.length > 0) &&
       vocabulary.reduce((total, term) => total + term.length, 0) <= CARTESIA_STT_MAX_KEYTERM_CHARS
@@ -356,7 +375,14 @@ export class CartesiaSttProvider implements SpeechToTextProvider {
       );
     }
     validateKeyterms(request.vocabulary);
-    if ((request.vocabulary?.length ?? 0) > 0 && !CARTESIA_STT_KEYTERM_MODELS.has(model)) {
+    if (
+      (request.vocabulary?.length ?? 0) > 0 &&
+      !CARTESIA_STT_KEYTERM_MODELS.has(model) &&
+      !(
+        allowUnknownModel &&
+        !PROVIDER_CATALOG.cartesiaStt.models.some((supported) => supported === model)
+      )
+    ) {
       throw TvicThrowableError.from(
         validationError(
           STT_ERROR_CODES.vocabularyUnsupported,
@@ -373,9 +399,9 @@ export class CartesiaSttProvider implements SpeechToTextProvider {
     url.searchParams.set("cartesia_version", PROVIDER_API_VERSIONS.cartesiaStt);
     const language =
       languagePolicy === undefined
-        ? (request.language ?? this.#language)
+        ? request.language || this.#language
         : languagePolicy.mode === "fixed"
-          ? primaryLanguage(languagePolicy.language)
+          ? cartesiaSttLanguageCode(languagePolicy.language)
           : undefined;
     if (language) {
       url.searchParams.set("language", language);

@@ -1955,7 +1955,7 @@ const missingDynamic = [...discoveredDynamic].filter((key) => !manifestDynamic.h
 const staleDynamic = [...manifestDynamic].filter((key) => !discoveredDynamic.has(key));
 if (missingDynamic.length > 0 || staleDynamic.length > 0) {
   throw new Error(
-    `dynamic code inventory is stale: missing=${missingDynamic.length}, stale=${staleDynamic.length}`,
+    `dynamic code inventory is stale: missing=[${missingDynamic.join(", ")}], stale=[${staleDynamic.join(", ")}]`,
   );
 }
 const manifestDynamicBySite = new Map(dynamicRules.map((entry) => [dynamicSiteKey(entry), entry]));

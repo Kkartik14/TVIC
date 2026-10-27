@@ -1,12 +1,28 @@
 import type { SttLanguagePolicy, SttOpenRequest } from "@tvic/core";
-import { MAX_STT_LANGUAGE_HINTS, STT_ERROR_CODES, TvicThrowableError } from "@tvic/core";
+import {
+  MAX_STT_LANGUAGE_HINTS,
+  normalizeStrictLanguageTag,
+  primaryLanguageSubtag,
+  STT_ERROR_CODES,
+  TvicThrowableError,
+} from "@tvic/core";
 
 import { validationError } from "./common.js";
+
+export const MAX_STT_RAW_LANGUAGE_LENGTH = 256;
 
 export function requestLanguagePolicy(
   request: SttOpenRequest,
   provider: string,
 ): SttLanguagePolicy | undefined {
+  if (
+    request.language !== undefined &&
+    (typeof request.language !== "string" ||
+      request.language.length > MAX_STT_RAW_LANGUAGE_LENGTH ||
+      /[\u0000-\u001f\u007f]/u.test(request.language))
+  ) {
+    return invalidLanguage(provider);
+  }
   if (request.language !== undefined && request.languagePolicy !== undefined) {
     throw TvicThrowableError.from(
       validationError(
@@ -67,22 +83,16 @@ export function normalizeLanguagePolicy(
 }
 
 export function normalizeLanguageTag(language: string, provider: string): string {
-  if (typeof language !== "string" || language.trim().length === 0)
-    return invalidLanguage(provider);
-  const tag = language.trim();
-  if (tag.toLowerCase() === "multi" || tag.toLowerCase() === "unknown") {
-    return invalidLanguage(provider);
-  }
-  try {
-    const [canonical] = Intl.getCanonicalLocales(tag);
-    return canonical ?? invalidLanguage(provider);
-  } catch {
-    return invalidLanguage(provider);
-  }
+  const normalized = normalizeStrictLanguageTag(language);
+  return normalized.ok ? normalized.value : invalidLanguage(provider);
 }
 
 export function primaryLanguage(language: string): string {
-  return new Intl.Locale(language).language.toLowerCase();
+  return primaryLanguageSubtag(language);
+}
+
+export function primaryLanguages(languages: readonly string[]): readonly string[] {
+  return [...new Set(languages.map(primaryLanguage))];
 }
 
 export function assertSupportedLanguagePolicy(

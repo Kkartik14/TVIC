@@ -52,15 +52,190 @@ import {
 } from "./common.js";
 import {
   assertSupportedLanguagePolicy,
+  normalizeLanguageTag,
   primaryLanguage,
   requestLanguagePolicy,
 } from "./stt-language-policy.js";
+
+// These sets mirror Deepgram's official model language matrix (catalog source).
+// Keep Nova-3 and Nova-2 separate: only Nova-3 currently accepts language_hint.
+const DEEPGRAM_NOVA_3_LANGUAGES = new Set([
+  "af",
+  "ar",
+  "ar-AE",
+  "ar-SA",
+  "ar-QA",
+  "ar-KW",
+  "ar-SY",
+  "ar-LB",
+  "ar-PS",
+  "ar-JO",
+  "ar-EG",
+  "ar-SD",
+  "ar-TD",
+  "ar-MA",
+  "ar-DZ",
+  "ar-TN",
+  "ar-IQ",
+  "ar-IR",
+  "as",
+  "as-IN",
+  "be",
+  "bn",
+  "bs",
+  "bg",
+  "ca",
+  "zh-HK",
+  "zh",
+  "zh-CN",
+  "zh-Hans",
+  "zh-TW",
+  "zh-Hant",
+  "hr",
+  "cs",
+  "cs-CZ",
+  "da",
+  "da-DK",
+  "nl",
+  "nl-BE",
+  "en",
+  "en-US",
+  "en-AU",
+  "en-GB",
+  "en-IN",
+  "en-NZ",
+  "en-CA",
+  "et",
+  "fi",
+  "fr",
+  "fr-CA",
+  "gl",
+  "ka",
+  "ka-GE",
+  "de",
+  "de-CH",
+  "el",
+  "gu",
+  "gu-IN",
+  "he",
+  "hi",
+  "hi-IN",
+  "hu",
+  "id",
+  "it",
+  "ja",
+  "kn",
+  "kk",
+  "kk-KZ",
+  "ko",
+  "ko-KR",
+  "lv",
+  "lt",
+  "mk",
+  "ms",
+  "mr",
+  "mn",
+  "ne",
+  "no",
+  "ps",
+  "ps-AF",
+  "fa",
+  "pl",
+  "pt",
+  "pt-BR",
+  "pt-PT",
+  "pa",
+  "pa-IN",
+  "ro",
+  "ru",
+  "sr",
+  "sk",
+  "sl",
+  "es",
+  "es-419",
+  "sv",
+  "sv-SE",
+  "tl",
+  "ta",
+  "te",
+  "th",
+  "th-TH",
+  "tr",
+  "tr-TR",
+  "uk",
+  "ur",
+  "vi",
+  "xh",
+  "zu",
+]);
+
+const DEEPGRAM_NOVA_2_LANGUAGES = new Set([
+  "bg",
+  "ca",
+  "zh",
+  "zh-CN",
+  "zh-Hans",
+  "zh-TW",
+  "zh-Hant",
+  "zh-HK",
+  "cs",
+  "da",
+  "da-DK",
+  "nl",
+  "nl-BE",
+  "en",
+  "en-US",
+  "en-AU",
+  "en-GB",
+  "en-NZ",
+  "en-IN",
+  "et",
+  "fi",
+  "fr",
+  "fr-CA",
+  "de",
+  "de-CH",
+  "el",
+  "hi",
+  "hi-IN",
+  "hu",
+  "id",
+  "it",
+  "ja",
+  "ko",
+  "ko-KR",
+  "lv",
+  "lt",
+  "ms",
+  "no",
+  "pl",
+  "pt",
+  "pt-BR",
+  "pt-PT",
+  "ro",
+  "ru",
+  "sk",
+  "es",
+  "es-419",
+  "sv",
+  "sv-SE",
+  "th",
+  "th-TH",
+  "tr",
+  "uk",
+  "vi",
+]);
+
+const DEEPGRAM_LANGUAGES_BY_MODEL: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["nova-3", DEEPGRAM_NOVA_3_LANGUAGES],
+  ["nova-2", DEEPGRAM_NOVA_2_LANGUAGES],
+]);
 
 const DEEPGRAM_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
   cancellation: { request: true, output: false, buffer: false, truncation: false },
   transports: ["websocket"],
-  languages: ["en", "en-US", "hi", "hi-IN"],
+  languages: [...new Set([...DEEPGRAM_NOVA_3_LANGUAGES, ...DEEPGRAM_NOVA_2_LANGUAGES, "fil"])],
   audio: { input: [PCM16_16K_MONO] },
   models: PROVIDER_CATALOG.deepgram.models,
   turnDetection: ["stt_endpointing", "vad"],
@@ -107,6 +282,10 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
   readonly version = "0.1.0";
   readonly capabilities = DEEPGRAM_CAPABILITIES;
 
+  get allowUnknownModel(): boolean {
+    return this.#allowUnknownModel;
+  }
+
   supportsSttLanguagePolicy(
     policy: SttLanguagePolicy,
     model: string = PROVIDER_CATALOG.deepgram.defaultModel,
@@ -117,8 +296,14 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
   supportsSttVocabulary(
     vocabulary: readonly string[],
     model: string = PROVIDER_CATALOG.deepgram.defaultModel,
+    allowUnknownModel = this.#allowUnknownModel,
   ): boolean {
-    return deepgramSupportsVocabulary(vocabulary, model);
+    return deepgramSupportsVocabulary(
+      vocabulary,
+      model,
+      allowUnknownModel &&
+        !PROVIDER_CATALOG.deepgram.models.some((supported) => supported === model),
+    );
   }
 
   readonly #apiKey: string;
@@ -153,11 +338,12 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
       PCM16_16K_MONO.sampleRateHz,
     ]);
     const model = request.model ?? PROVIDER_CATALOG.deepgram.defaultModel;
+    const allowUnknownModel = request.allowUnknownModel ?? this.#allowUnknownModel;
     assertSupportedModel(
       PROVIDER_NAMES.deepgram,
       PROVIDER_CATALOG.deepgram.models,
       model,
-      request.allowUnknownModel ?? this.#allowUnknownModel,
+      allowUnknownModel,
     );
     const languagePolicy = requestLanguagePolicy(request, PROVIDER_NAMES.deepgram);
     assertSupportedLanguagePolicy(
@@ -167,6 +353,18 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
       deepgramSupportsLanguagePolicy,
     );
     const vocabulary = request.vocabulary ?? [];
+    if (
+      !Array.isArray(vocabulary) ||
+      vocabulary.some((term) => typeof term !== "string" || term.length === 0)
+    ) {
+      throw TvicThrowableError.from(
+        validationError(
+          STT_ERROR_CODES.invalidRequest,
+          "Deepgram STT vocabulary must contain non-empty strings",
+          { provider: PROVIDER_NAMES.deepgram },
+        ),
+      );
+    }
     if (vocabulary.length > 100) {
       throw TvicThrowableError.from(
         validationError(
@@ -180,12 +378,24 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
       ? "keyterm"
       : model.startsWith("nova-2")
         ? "keywords"
-        : undefined;
+        : allowUnknownModel &&
+            !PROVIDER_CATALOG.deepgram.models.some((supported) => supported === model)
+          ? "keyterm"
+          : undefined;
     if (vocabulary.length > 0 && vocabularyParameter === undefined) {
       throw TvicThrowableError.from(
         validationError(
           STT_ERROR_CODES.vocabularyUnsupported,
           "Deepgram STT vocabulary requires a Nova-2 or Nova-3 model",
+          { provider: PROVIDER_NAMES.deepgram },
+        ),
+      );
+    }
+    if (model.startsWith("nova-2") && vocabulary.some((term) => term.includes(":"))) {
+      throw TvicThrowableError.from(
+        validationError(
+          STT_ERROR_CODES.invalidRequest,
+          "Deepgram Nova-2 keyword terms cannot contain ':'",
           { provider: PROVIDER_NAMES.deepgram },
         ),
       );
@@ -202,13 +412,13 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
     if (request.language) {
       url.searchParams.set("language", request.language);
     } else if (languagePolicy?.mode === "fixed") {
-      url.searchParams.set("language", languagePolicy.language);
+      url.searchParams.set("language", deepgramLanguageCode(languagePolicy.language));
     } else if (languagePolicy?.mode === "auto") {
       url.searchParams.set("language", "multi");
     } else if (languagePolicy?.mode === "hints") {
       url.searchParams.set("language", "multi");
-      for (const language of languagePolicy.languages) {
-        url.searchParams.append("language_hint", primaryLanguage(language));
+      for (const language of new Set(languagePolicy.languages.map(deepgramPrimaryLanguageCode))) {
+        url.searchParams.append("language_hint", language);
       }
     }
     if (vocabularyParameter) {
@@ -260,19 +470,49 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
 }
 
 function deepgramSupportsLanguagePolicy(policy: SttLanguagePolicy, model: string): boolean {
-  if (!PROVIDER_CATALOG.deepgram.models.some((supported) => supported === model)) return false;
+  const supportedLanguages = DEEPGRAM_LANGUAGES_BY_MODEL.get(model);
+  if (!supportedLanguages) return false;
   if (policy.mode === "hints" && policy.strictness !== undefined) return false;
-  if (policy.mode === "fixed") return DEEPGRAM_CAPABILITIES.languages.includes(policy.language);
-  if (model !== "nova-3") return false;
-  if (policy.mode === "auto") return true;
-  return policy.languages.every((language) => DEEPGRAM_CAPABILITIES.languages.includes(language));
+  try {
+    if (policy.mode === "fixed") {
+      return supportedLanguages.has(deepgramLanguageCode(policy.language));
+    }
+    if (policy.mode === "auto") return model === "nova-3";
+    if (model !== "nova-3") return false;
+    return policy.languages.every((language) =>
+      supportedLanguages.has(deepgramLanguageCode(language)),
+    );
+  } catch {
+    return false;
+  }
 }
 
-function deepgramSupportsVocabulary(vocabulary: readonly string[], model: string): boolean {
+function deepgramLanguageCode(language: string): string {
+  const canonical = normalizeLanguageTag(language, PROVIDER_NAMES.deepgram);
+  // Intl canonicalizes the legacy `tl` language subtag to `fil`; Deepgram uses `tl`.
+  return primaryLanguage(canonical) === "fil" ? "tl" : canonical;
+}
+
+function deepgramPrimaryLanguageCode(language: string): string {
+  const primary = primaryLanguage(normalizeLanguageTag(language, PROVIDER_NAMES.deepgram));
+  return primary === "fil" ? "tl" : primary;
+}
+
+function deepgramSupportsVocabulary(
+  vocabulary: readonly string[],
+  model: string,
+  allowUnknownModel = false,
+): boolean {
   return (
-    (model.startsWith("nova-2") || model.startsWith("nova-3")) &&
+    Array.isArray(vocabulary) &&
+    (model.startsWith("nova-2") || model.startsWith("nova-3") || allowUnknownModel) &&
     vocabulary.length <= 100 &&
-    vocabulary.every((term) => typeof term === "string" && term.length > 0)
+    vocabulary.every(
+      (term) =>
+        typeof term === "string" &&
+        term.length > 0 &&
+        !(model.startsWith("nova-2") && term.includes(":")),
+    )
   );
 }
 

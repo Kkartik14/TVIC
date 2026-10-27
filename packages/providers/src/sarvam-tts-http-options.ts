@@ -7,6 +7,7 @@ export interface SarvamTtsHttpProviderOptions {
   readonly voiceId?: string;
   readonly modelId?: string;
   readonly language?: string;
+  /** Optional host-supplied Bulbul v4 persona-to-language allowlist (up to 128 voices). */
   readonly voiceLanguages?: SarvamTtsVoiceLanguages;
   readonly pace?: number;
   readonly temperature?: number;

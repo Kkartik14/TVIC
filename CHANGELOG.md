@@ -7,31 +7,88 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 ### Added
 
-- Added provider-aware per-call TTS model, voice, output-language, and speed
-  selection, plus fixed, automatic, and hinted STT language policies and
-  opt-in vocabulary. Managed calls validate declared provider support before
-  creating a durable session.
+- Added `agent.start()` TTS model, voice, language, and speed overrides, plus
+  per-call STT language-policy, vocabulary, and conversation-context controls.
+  Agents can set default `ttsVoicesByLanguage` and `sttVocabulary` values.
+  Managed calls preflight declared provider support before creating a durable
+  session.
+- Added optional provider hooks for combined TTS selection and model-specific
+  TTS and STT language, vocabulary, voice, speed, and context support.
+- Added public selection helpers and types: `resolveTtsCallSelection()`,
+  `resolveSttCallSelection()`, `evaluateTtsSelectionCompatibility()`, their
+  input/result/context types, `TtsFailoverRequestVariant`, and
+  `MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES`. `@tvic/core` also exports
+  `canonicalizeLanguageTag()`, `normalizeStrictLanguageTag()`, and
+  `normalizeLanguageStringMap()`.
+- Added Cartesia voice-catalog snapshot types and helpers, including a
+  cancellable `fetchCartesiaVoiceCatalogSnapshot()` and
+  `normalizeCartesiaVoiceCatalogSnapshot()`.
+- Added `fallbackRequestVariants` to declare mapped TTS failover settings for
+  preflight; mapped requests are checked against the selected fallback before
+  dispatch. Existing `mapFallbackRequest` configurations remain valid without
+  variants; those mapped settings are validated when failover is dispatched.
 - Added opt-in AssemblyAI Universal-3 Pro conversation-context updates from
-  submitted TTS text, with bounded context, interruption alignment, and
-  reconnect carryover. Context updates do not block caller audio.
+  confirmed TTS playout, with bounded context, interruption alignment, and
+  reconnect carryover. Definite context write failures are reported as
+  `stt.context_update_failed` and do not end the call. An ambiguous timeout or
+  cancellation on a live stream can trigger reconnect. Caller audio replay
+  continues while TVIC attempts to restore the latest accepted context; replay
+  is not held behind the context write. Both paths use an independent 2-second
+  context update deadline by default;
+  `withSttReconnect()` accepts `contextUpdateTimeoutMs` to override it.
+- Added the provider compatibility issue code `tts.selection_unsupported` and
+  the `tts.language_unsupported` and `stt.vocabulary_unsupported` error codes.
 - Documented that STT vocabulary is sent to providers and may appear in URL
   logs for some adapters.
 
 ### Changed
 
-- Keep `sttLanguage` as a legacy raw provider value, including host-specific
-  tags such as `hi_IN`, `multi`, or an empty string. Use `sttLanguagePolicy`
-  when TVIC should normalize and preflight a fixed, automatic, or hinted policy.
+- Keep non-empty `sttLanguage` values as legacy raw provider values, including
+  host-specific tags such as `hi_IN` and `multi`; the managed API rejects an
+  empty string. Use `sttLanguagePolicy` when TVIC should normalize and preflight
+  a fixed, automatic, or hinted policy.
 - Exclude tool names from STT vocabulary by default. Set
-  `includeToolNamesInSttVocabulary: true` to opt back in.
+  `includeToolNamesInSttVocabulary: true` to include them. The 256-term
+  vocabulary limit applies before trimming and de-duplication.
+- Send Soniox authentication in the WebSocket `Authorization` header.
+  Vocabulary is sent in URL query parameters by Deepgram, Cartesia, ElevenLabs,
+  AssemblyAI, and Sarvam; Soniox sends it in the WebSocket context payload.
+- Send Cartesia `locale` only for Sonic 3.6 and newer; older models receive a
+  base-language value. Validate known-model language support locally and
+  enforce the supported 0.6–1.5 speed range. With `allowUnknownModel`, accept
+  syntactically valid language tags and leave model-specific validation to
+  Cartesia.
+- Route ElevenLabs v3 and v4 through their supported Text-to-Dialogue routes;
+  v4 Turbo remains WebSocket-only, and multi-context dialogue supports v3
+  models. Map BCP-47 TTS languages to the provider's language code, reject
+  unsupported Flash/Turbo languages and v3/v4 speed settings, and require
+  `:voice_id` in custom regular-TTS URLs used with per-call voice overrides.
+- Map the ElevenLabs `similarityBoost` option to `settings.similarity` on v4
+  Text-to-Dialogue HTTP requests; regular TTS continues to use
+  `similarity_boost`.
+- Gate built-in STT vocabulary by provider model support. Deepgram sends Nova-2 terms as
+  `keywords` and Nova-3 terms as `keyterm`, with a 100-term cap; Sarvam Saaras
+  v4 sends `keyterms`. Explicit `allowUnknownModel` settings keep vocabulary
+  forwarding enabled for an unlisted model, including per-request settings.
+- Keep each ElevenLabs multi-context WebSocket connection on one model. A
+  per-context model change is rejected before the request is sent.
+- Bound AssemblyAI close while flushing partial audio and waiting for pending
+  writes. If its deadline expires, reject outstanding audio writes and force
+  close the socket without turning a caller-requested close into a failure.
 - Preserve provider-resolved per-call TTS voice IDs when no voice catalog is
   supplied. A Cartesia voice snapshot or ElevenLabs `knownVoiceIds`/
   `dialogueVoices` list enables strict local preflight for the voices it covers.
 - Treat Soniox `best_effort` language hints as non-restrictive hints and send
   `language_hints_strict: false`; fixed-language policies remain strict.
-- Allow mapper-only TTS failover without `fallbackRequestVariants`. TVIC checks
-  the primary during preflight and validates the mapped fallback request before
-  sending it. Declared variants enable preflight of both providers.
+- Map ElevenLabs Bokmål and Nynorsk (`nb` and `nn`) to its `no` language code.
+- Map Cartesia Bokmål (`nb`) to `no` while preserving its distinct Nynorsk
+  (`nn`) code.
+- Report managed speech-selection validation as `voice_runtime.invalid_config`
+  with the previous selection error code in `metadata.selectionErrorCode`.
+- Report configured Sarvam Odia as `or-IN` in provider properties and
+  capabilities, while serializing it as the provider's `od-IN` wire value.
+- Report unsupported cross-field TTS combinations with the public
+  `tts.selection_unsupported` provider compatibility issue code.
 
 ### Fixed
 
@@ -40,17 +97,19 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Apply provider-specific language, model, vocabulary, and speed settings or
   reject unsupported combinations before opening the provider stream.
 - Preserve configured Cartesia generation speed without requiring a catalog
-  snapshot, and keep a fresh provider-creation snapshot usable for that provider
-  instance after its expiry timestamp passes.
+  snapshot. Treat expired voice snapshots as absent so configured voices keep
+  working; per-call speed overrides still require fresh metadata.
 - Preserve the primary TTS failure when a mapped failover request is invalid,
-  and call `onFallback` when the fallback is attempted.
+  and call `onFallback` only after mapping and fallback validation succeed,
+  immediately before dispatch.
 - Reconnect and replay the latest STT context if a caller cancels an in-flight
   context write whose provider-side outcome may be ambiguous.
 - Keep `…` as an incremental TTS sentence boundary, preserve
   `PipelineVoiceLoop`'s legacy `ttsModelSource`, and ignore TTS selection options
   when that loop has no TTS provider.
-- Accept `od-IN` as a Sarvam Odia alias and map Cartesia's canonical `fil` tag
-  back to the provider's `tl` tag.
+- Preserve Sarvam's legacy `od-IN` value and send the provider's Odia wire code;
+  keep `or-IN` as a compatible alias. Map Cartesia's canonical `fil` tag back
+  to the provider's `tl` tag.
 - Preserve the legacy ElevenLabs Multilingual v2 behavior by omitting its
   unsupported `language_code` field.
 - Record Cartesia catalog 404s as missing voices, classify 401/403 responses as
@@ -60,15 +119,20 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Reject route-incompatible ElevenLabs HTTP model overrides during managed-call
   preflight, before creating a durable session.
 - Allow Sarvam Bulbul v4 to receive its required voice at `agent.start()` when
-  the agent has no default, with voice-language validation before session creation
-  and documented cross-language v4 pairings accepted.
+  the agent has no default. Validate voice-language pairs before session
+  creation when the host supplies `voiceLanguages`; otherwise leave pair
+  validation to Sarvam's API.
 - Keep a failed AssemblyAI context update recoverable when reconnect is disabled;
   report the error and continue the call.
+- Close the STT stream cleanly when hangup overlaps a reconnect open, and keep
+  replay audio moving if a replayed context write times out.
 
 ## 2.1.0
 
 ### Added
 
+- Added Sarvam Bulbul v4 Flash TTS across WebSocket, REST, and HTTP-stream
+  transports, with persona voices and a caller-selected language and voice.
 - Added a transient per-session usage summary to managed `finalSession` values
   and the metadata-only session trace. It records runtime-measured STT audio,
   LLM request and token counts, TTS submitted text and received audio, and

@@ -7,23 +7,35 @@ import type {
 import {
   isNormalizedError,
   isTvicError,
-  countUnicodeCodePoints,
   normalizeUnknownError,
   providerError,
   STT_ERROR_CODES,
   timeoutError,
   TvicThrowableError,
-  validationError,
 } from "@tvic/core";
 import { cancelWithTimeout, withTimeout } from "./async-control.js";
-import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
+import {
+  CANCELLATION_TIMEOUT_MS,
+  DEFAULT_STT_MAX_BUFFERED_BYTES,
+  DEFAULT_STT_MAX_BUFFERED_COMMANDS,
+} from "./pipeline-constants.js";
 import { audioWriteTimeoutError } from "./resilient-stt-policy.js";
 import { trackSttAudioWriteOutcome } from "./stt-audio-write-usage.js";
-import { createSttAgentContextWaiter, type SttAgentContextWaiter } from "./stt-agent-context.js";
+import {
+  coalescePendingSttAgentContext,
+  createSttAgentContextWaiter,
+  DEFAULT_STT_AGENT_CONTEXT_TIMEOUT_MS,
+  missingSttAgentContextUpdateError,
+  normalizeSttAgentContextUpdateError,
+  sttAgentContextTimeoutError,
+  updateSttAgentContext,
+  validateSttAgentContext,
+  type SttAgentContextWaiter,
+} from "./stt-agent-context.js";
 
 export const DEFAULT_STT_COMMAND_LIMITS = {
-  maxBufferedBytes: 320_000,
-  maxBufferedCommands: 512,
+  maxBufferedBytes: DEFAULT_STT_MAX_BUFFERED_BYTES,
+  maxBufferedCommands: DEFAULT_STT_MAX_BUFFERED_COMMANDS,
   sendTimeoutMs: 5_000,
   commitTimeoutMs: 5_000,
   audioWriteTimeoutMs: 5_000,
@@ -81,7 +93,9 @@ export class SerialSttCommandController implements SttCommandController {
   readonly #pendingAgentContextCommands = new Set<
     Extract<Command, { readonly kind: "agent_context" }>
   >();
+  readonly #contextWrites = new Set<Promise<void>>();
   readonly #failure: Promise<never>;
+  #contextWriteTail: Promise<void> | undefined;
   #rejectFailure!: (error: unknown) => void;
   readonly #worker: Promise<void>;
   #bufferedBytes = 0;
@@ -120,7 +134,7 @@ export class SerialSttCommandController implements SttCommandController {
       "audioWriteTimeoutMs",
     );
     this.#contextUpdateTimeoutMs = validatePositiveTimeout(
-      options.contextUpdateTimeoutMs ?? 2_000,
+      options.contextUpdateTimeoutMs ?? DEFAULT_STT_AGENT_CONTEXT_TIMEOUT_MS,
       "contextUpdateTimeoutMs",
     );
     this.#audioWriteErrorCode =
@@ -183,34 +197,21 @@ export class SerialSttCommandController implements SttCommandController {
     if (this.#terminal || !this.#accepting) {
       return Promise.reject(TvicThrowableError.from(sessionClosedError()));
     }
-    if (typeof context !== "string" || countUnicodeCodePoints(context) > 1_500) {
-      return Promise.reject(
-        TvicThrowableError.from(
-          validationError(
-            STT_ERROR_CODES.invalidRequest,
-            "STT agent context must not exceed 1500 characters",
-          ),
-        ),
-      );
+    const invalidContext = validateSttAgentContext(context);
+    if (invalidContext) {
+      return Promise.reject(TvicThrowableError.from(invalidContext));
     }
     if (typeof this.#stream.updateAgentContext !== "function") {
-      return Promise.reject(
-        TvicThrowableError.from(
-          providerError(
-            STT_ERROR_CODES.contextUpdateFailed,
-            "The STT stream does not implement agent context updates",
-            { retriable: true },
-          ),
-        ),
-      );
+      return Promise.reject(TvicThrowableError.from(missingSttAgentContextUpdateError()));
     }
 
-    const pending = this.#commands.find(
+    const pending = coalescePendingSttAgentContext(
+      this.#commands,
+      context,
       (command): command is Extract<Command, { kind: "agent_context" }> =>
         command.kind === "agent_context",
     );
     if (pending) {
-      pending.context = context;
       return pending.waiter.promise;
     }
     if (
@@ -237,7 +238,12 @@ export class SerialSttCommandController implements SttCommandController {
     this.#closePromise = (async () => {
       try {
         await withTimeout(
-          this.#worker,
+          (async () => {
+            await this.#worker;
+            while (this.#contextWrites.size > 0) {
+              await Promise.all([...this.#contextWrites]);
+            }
+          })(),
           this.#closeTimeoutMs,
           timeoutError(
             "stt.drain_timeout",
@@ -307,7 +313,28 @@ export class SerialSttCommandController implements SttCommandController {
       }
 
       if (command.kind === "agent_context") {
-        await this.#dispatchAgentContext(command);
+        this.#pendingAgentContextCommands.add(command);
+        const dispatch = (): Promise<void> => {
+          if (!this.#pendingAgentContextCommands.has(command)) return Promise.resolve();
+          if (this.#abortController.signal.aborted) {
+            this.#settleAgentContext(
+              command,
+              this.#abortController.signal.reason ?? sessionClosedError(),
+            );
+            return Promise.resolve();
+          }
+          return this.#dispatchAgentContext(command);
+        };
+        const write = this.#contextWriteTail ? this.#contextWriteTail.then(dispatch) : dispatch();
+        this.#contextWriteTail = write.then(
+          () => undefined,
+          () => undefined,
+        );
+        this.#contextWrites.add(write);
+        void write.then(
+          () => this.#contextWrites.delete(write),
+          () => this.#contextWrites.delete(write),
+        );
         continue;
       }
 
@@ -355,8 +382,11 @@ export class SerialSttCommandController implements SttCommandController {
       if (command.kind === "commit") {
         command.reject(error);
       } else if (command.kind === "agent_context") {
-        command.waiter.reject(error);
+        command.waiter.reject(TvicThrowableError.from(error));
       }
+    }
+    for (const command of [...this.#pendingAgentContextCommands]) {
+      this.#settleAgentContext(command, error);
     }
     this.#resolveWake?.();
     this.#resolveWake = undefined;
@@ -392,51 +422,19 @@ export class SerialSttCommandController implements SttCommandController {
   async #dispatchAgentContext(
     command: Extract<Command, { readonly kind: "agent_context" }>,
   ): Promise<void> {
-    this.#pendingAgentContextCommands.add(command);
     try {
-      if (typeof this.#stream.updateAgentContext !== "function") {
-        throw new Error("STT stream does not implement agent context updates");
-      }
-      const timeout = timeoutError(
-        STT_ERROR_CODES.contextUpdateFailed,
-        `STT agent context update timed out after ${this.#contextUpdateTimeoutMs}ms`,
-        { retriable: true },
-      );
-      const updateAbort = new AbortController();
-      const abortUpdateWithController = (): void => {
-        updateAbort.abort(this.#abortController.signal.reason);
-      };
-      if (this.#abortController.signal.aborted) {
-        abortUpdateWithController();
-      } else {
-        this.#abortController.signal.addEventListener("abort", abortUpdateWithController, {
-          once: true,
-        });
-      }
-      await withTimeout(
-        Promise.resolve().then(() =>
-          this.#stream.updateAgentContext!(command.context, { signal: updateAbort.signal }),
-        ),
-        this.#contextUpdateTimeoutMs,
-        timeout,
-        this.#abortController.signal,
-      )
-        .then(() => this.#settleAgentContext(command))
-        .catch((error: unknown) => {
-          updateAbort.abort(error);
-          throw error;
-        })
-        .finally(() => {
-          this.#abortController.signal.removeEventListener("abort", abortUpdateWithController);
-        });
+      const timeout = sttAgentContextTimeoutError(this.#contextUpdateTimeoutMs);
+      await updateSttAgentContext(this.#stream, command.context, {
+        timeoutMs: this.#contextUpdateTimeoutMs,
+        timeoutError: timeout,
+        lifecycleSignal: this.#abortController.signal,
+        deferProviderCall: true,
+      });
+      this.#settleAgentContext(command);
     } catch (error) {
       const failure = this.#abortController.signal.aborted
         ? TvicThrowableError.from(this.#abortController.signal.reason ?? sessionClosedError())
-        : isNormalizedError(error) && error.category === "timeout"
-          ? error
-          : providerError(STT_ERROR_CODES.contextUpdateFailed, "STT agent context update failed", {
-              retriable: true,
-            });
+        : normalizeSttAgentContextUpdateError(error);
       this.#settleAgentContext(command, failure);
     }
   }

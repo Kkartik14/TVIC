@@ -4,7 +4,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   PCM16_16K_MONO,
+  STT_ERROR_CODES,
   nowTimestamp,
+  providerError,
   type SpeechToTextProvider,
   type SttStream,
 } from "@tvic/core";
@@ -20,6 +22,8 @@ import {
   SarvamSttStream,
   SonioxSttProvider,
 } from "../src/index.js";
+import { redactSttConnectionUrl } from "../src/common.js";
+import { sonioxProtocolError } from "../src/soniox-stt.js";
 
 const secretTerm = "customer_private_891";
 const request = {
@@ -88,6 +92,17 @@ const providers: readonly {
         },
       }),
   },
+  {
+    name: "Soniox",
+    model: "stt-rt-v5",
+    create: () =>
+      new SonioxSttProvider({
+        apiKey: "test",
+        webSocketFactory: (url) => {
+          throw handshakeError(url);
+        },
+      }),
+  },
 ];
 
 describe("STT connection error redaction", () => {
@@ -105,7 +120,10 @@ describe("STT connection error redaction", () => {
       expect(String(failure)).not.toContain(secretTerm);
       const normalized = (failure as { error?: unknown }).error ?? failure;
       expect(JSON.stringify(normalized)).not.toContain(secretTerm);
-      expect((failure as { cause?: unknown }).cause).toBeUndefined();
+      const cause = (normalized as { cause?: unknown }).cause;
+      expect(cause).toBeDefined();
+      expect(JSON.stringify(cause)).toContain("[redacted URL]");
+      expect(JSON.stringify(cause)).not.toContain(secretTerm);
     },
   );
 
@@ -125,7 +143,10 @@ describe("STT connection error redaction", () => {
     expect(String(failure)).not.toContain(secretTerm);
     const normalized = (failure as { error?: unknown }).error ?? failure;
     expect(JSON.stringify(normalized)).not.toContain(secretTerm);
-    expect((failure as { cause?: unknown }).cause).toBeUndefined();
+    const cause = (normalized as { cause?: unknown }).cause;
+    expect(cause).toBeDefined();
+    expect(JSON.stringify(cause)).toContain("[redacted URL]");
+    expect(JSON.stringify(cause)).not.toContain(secretTerm);
   });
 
   it("redacts submitted Soniox terms from provider payload errors", async () => {
@@ -249,6 +270,163 @@ describe("STT connection error redaction", () => {
     const normalized = (failure as { error?: unknown }).error ?? failure;
     expect(JSON.stringify(normalized)).not.toContain(secretTerm);
     expect(JSON.stringify(normalized)).not.toContain("wss://stt.example");
+  });
+
+  it("does not redact short vocabulary or words embedded in unrelated metadata", () => {
+    const redacted = redactSttConnectionUrl(
+      providerError("stt.connect_failed", "a deepgram error mentions deep", {
+        provider: "test",
+        metadata: { providerCode: "deepgram", field: "deep" },
+      }),
+      ["a", "deep"],
+    );
+
+    expect(redacted.message).toBe("a deepgram error mentions [REDACTED]");
+    expect(redacted.metadata).toEqual({
+      providerCode: "deepgram",
+      field: "[REDACTED]",
+    });
+  });
+
+  it("redacts overlapping vocabulary matches against the original string", () => {
+    const redacted = redactSttConnectionUrl(
+      providerError("stt.connect_failed", "Rejected foo-bar-baz by Deepgram", {
+        provider: "test",
+      }),
+      ["foo-bar", "bar-baz"],
+    );
+
+    expect(redacted.message).toBe("Rejected [REDACTED] by Deepgram");
+  });
+
+  it("fails closed when redaction encounters an exotic error object", () => {
+    const exoticCause = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error("uninspectable cause");
+        },
+      },
+    );
+    const redacted = redactSttConnectionUrl(
+      providerError(STT_ERROR_CODES.authFailed, `Rejected ${secretTerm}`, {
+        provider: "test",
+        retriable: false,
+        metadata: { cause: exoticCause },
+        cause: exoticCause,
+      }),
+      [secretTerm],
+    );
+
+    expect(redacted.message).toBe("STT provider failure; details were redacted");
+    expect(redacted.code).toBe(STT_ERROR_CODES.authFailed);
+    expect(redacted.retriable).toBe(false);
+    expect(redacted.provider).toBe("test");
+    expect(redacted.cause).toBeUndefined();
+    expect(redacted.metadata).toBeUndefined();
+  });
+
+  it("does not preserve opaque symbol or function values in redacted metadata", () => {
+    const redacted = redactSttConnectionUrl(
+      providerError("stt.connect_failed", `Rejected ${secretTerm}`, {
+        provider: "test",
+        metadata: {
+          symbolValue: Symbol(secretTerm),
+          functionValue: () => secretTerm,
+        },
+      }),
+      [secretTerm],
+    );
+
+    expect(redacted.message).not.toContain(secretTerm);
+    expect(redacted.metadata).toEqual({
+      symbolValue: "[redacted]",
+      functionValue: "[redacted]",
+    });
+    expect(JSON.stringify(redacted)).not.toContain(secretTerm);
+  });
+
+  it("preserves binary values, Maps and repeated object references", () => {
+    const shared = { customer: secretTerm };
+    const binary = Buffer.from([0, 1, 2, 255]);
+    const map = new Map([[secretTerm, shared]]);
+    const redacted = redactSttConnectionUrl(
+      providerError("stt.connect_failed", `Rejected ${secretTerm}`, {
+        provider: "test",
+        metadata: { first: shared, second: shared, binary, map },
+      }),
+      [secretTerm],
+    );
+    const metadata = redacted.metadata as {
+      readonly first: { readonly customer: string };
+      readonly second: { readonly customer: string };
+      readonly binary: Buffer;
+      readonly map: Map<unknown, { readonly customer: string }>;
+    };
+
+    expect(metadata.first).toBe(metadata.second);
+    expect(metadata.first.customer).toBe("[REDACTED]");
+    expect(Buffer.isBuffer(metadata.binary)).toBe(true);
+    expect(metadata.binary).toEqual(binary);
+    expect(metadata.map).toBeInstanceOf(Map);
+    expect(metadata.map.get("[REDACTED]")).toBe(metadata.first);
+  });
+
+  it("keeps provider model metadata intact while redacting message text", () => {
+    const redacted = redactSttConnectionUrl(
+      providerError("stt.connect_failed", "The nova-3 model rejected nova", {
+        provider: "test",
+        metadata: { model: "nova-3", explanation: "nova-3" },
+      }),
+      ["nova"],
+    );
+
+    expect(redacted.message).toBe("The [REDACTED]-3 model rejected [REDACTED]");
+    expect(redacted.metadata).toEqual({
+      model: "nova-3",
+      explanation: "[REDACTED]-3",
+    });
+  });
+
+  it("redacts short Hangul names inside unspaced text", () => {
+    const redacted = redactSttConnectionUrl(
+      providerError("stt.connect_failed", "고객님 음성을 분석하지 못했습니다", {
+        provider: "test",
+      }),
+      ["고객"],
+    );
+
+    expect(redacted.message).toBe("[REDACTED]님 음성을 분석하지 못했습니다");
+  });
+
+  it("uses shared redaction rules for Soniox payload errors", () => {
+    expect(
+      sonioxProtocolError({ error_type: "invalid_request", error_message: "Invalid request" }, [
+        "a",
+      ]).message,
+    ).toBe("Invalid request");
+  });
+
+  it("redacts short CJK and unspaced Thai vocabulary inside running text", () => {
+    const redacted = redactSttConnectionUrl(
+      providerError(
+        "stt.connect_failed",
+        "deepgram rejected 顧客東京様 and ผู้ใช้ภาษาไทยกำลังพูด",
+        {
+          provider: "test",
+          metadata: { customerName: "顧客東京様", providerCode: "deepgram" },
+        },
+      ),
+      ["東京", "ภาษาไทย", "deep"],
+    );
+
+    expect(redacted.message).toBe(
+      "deepgram rejected 顧客[REDACTED]様 and ผู้ใช้[REDACTED]กำลังพูด",
+    );
+    expect(redacted.metadata).toEqual({
+      customerName: "顧客[REDACTED]様",
+      providerCode: "deepgram",
+    });
   });
 
   it("redacts vocabulary from provider close metadata", async () => {

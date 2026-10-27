@@ -156,6 +156,7 @@ const elevenLabs = createElevenLabsTtsHttpStreamProvider({
   apiKey: process.env.ELEVENLABS_API_KEY!,
   voiceId: process.env.ELEVENLABS_VOICE_ID!,
   modelId: "eleven_flash_v2_5",
+  language: "en-IN",
 });
 
 const tts = createTtsFailoverProvider({
@@ -166,6 +167,14 @@ const tts = createTtsFailoverProvider({
     model: "eleven_flash_v2_5",
     voice: process.env.ELEVENLABS_VOICE_ID!,
   }),
+  fallbackRequestVariants: [
+    {
+      fallback: {
+        model: "eleven_flash_v2_5",
+        voice: process.env.ELEVENLABS_VOICE_ID!,
+      },
+    },
+  ],
   onFallback: ({ phase, error }) => {
     console.warn(`TTS fallback phase=${phase} code=${error.code}`);
   },
@@ -198,6 +207,16 @@ failure instead of replaying the response and risking duplicate speech.
 provider and validates the mapper's actual fallback request only if failover is
 needed. Add variants when the host can declare the allowed fallback model,
 voice, or language in advance; this lets TVIC preflight both providers:
+
+Each variant may include `when` to match the primary call's effective model,
+voice, language, or speed. Language matching is exact unless
+`languageMatch: "base-language"` is set. For preflight, omitted fallback model
+and voice fields use the fallback provider's configured defaults. An omitted
+language carries the caller-selected language, and speed is preserved from the
+call. The mapped request is validated before dispatch, and declared variant
+fields must match its output. A model requiring a caller-selected language
+needs that language in the request or variant; an implicit configured language
+does not satisfy the requirement.
 
 ```ts
 const tts = createTtsFailoverProvider({

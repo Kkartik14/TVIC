@@ -342,20 +342,25 @@ export class PipelineTurnOutput {
     );
   }
 
-  incrementalTtsInput(turn: Turn, control: ActiveTurnControl): IncrementalTtsInput | null {
+  incrementalTtsInput(
+    turn: Turn,
+    control: ActiveTurnControl,
+  ): { readonly input: IncrementalTtsInput; readonly playbackCompleted: () => void } | null {
     const provider = this.#context.providers.tts;
     if (!provider || !isIncrementalTextToSpeechProvider(provider)) {
       return null;
     }
     const { options } = this.#context;
     const model = options.ttsModel ?? provider.configuredModel;
-    return new IncrementalTtsInput({
+    const voiceOverride = perCallVoiceOverride(provider, options.ttsVoice);
+    let submittedText = "";
+    const input = new IncrementalTtsInput({
       openSession: async () => {
         const usageReporter = this.#ttsUsageReporter(provider);
         const session = await provider.openSession({
           sessionId: options.session.id,
           turnId: turn.id,
-          ...(options.ttsVoice ? { voice: options.ttsVoice } : {}),
+          ...(voiceOverride ? { voice: voiceOverride } : {}),
           ...(model ? { model } : {}),
           ...(options.ttsLanguage ? { language: options.ttsLanguage } : {}),
           format: options.agent.audioPolicy.output,
@@ -364,7 +369,6 @@ export class PipelineTurnOutput {
           usageReporter,
           signal: control.abort.signal,
         });
-        let submittedText = "";
         const usage: TtsSession = {
           events: session.events,
           cancel: () => session.cancel(),
@@ -374,17 +378,21 @@ export class PipelineTurnOutput {
             return session.sendText(text);
           },
           flush: () => session.flush(),
-          finish: () => {
-            const finishing = session.finish();
-            if (submittedText.length > 0) {
-              this.#context.submitSttAgentContext(submittedText);
-            }
-            return finishing;
-          },
+          finish: () => session.finish(),
         };
         return usage;
       },
     });
+    return {
+      input,
+      playbackCompleted: () => {
+        // Carry only text whose audio the transport confirmed as played. A
+        // playout confirmation timeout intentionally leaves this turn out.
+        if (control.outputDelivered && submittedText.length > 0) {
+          this.#context.submitSttAgentContext(submittedText);
+        }
+      },
+    };
   }
 
   async speak(
@@ -396,6 +404,7 @@ export class PipelineTurnOutput {
   ): Promise<void> {
     const { options } = this.#context;
     const model = options.ttsModel ?? provider.configuredModel;
+    const voiceOverride = perCallVoiceOverride(provider, options.ttsVoice);
     if (!text) {
       control.outputDelivered = true;
       return;
@@ -416,16 +425,22 @@ export class PipelineTurnOutput {
             sessionId: options.session.id,
             turnId: turn.id,
             text,
-            ...(options.ttsVoice ? { voice: options.ttsVoice } : {}),
+            ...(voiceOverride ? { voice: voiceOverride } : {}),
             ...(model ? { model } : {}),
             ...(options.ttsLanguage ? { language: options.ttsLanguage } : {}),
+            ...(options.ttsSelection !== undefined
+              ? {
+                  selectionContext: {
+                    languageWasCallerSelected: options.ttsSelection.languageWasCallerSelected,
+                  },
+                }
+              : {}),
             format: options.agent.audioPolicy.output,
             stream: true,
             ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
             usageReporter: this.#ttsUsageReporter(provider),
             signal: control.abort.signal,
           });
-          this.#context.submitSttAgentContext(text);
           return stream;
         }),
         control.abort.signal,
@@ -457,6 +472,7 @@ export class PipelineTurnOutput {
     }
 
     await this.playTtsStream(stream, control, latency, audioUsage);
+    if (control.outputDelivered) this.#context.submitSttAgentContext(text);
   }
 
   playTtsStream(
@@ -637,4 +653,11 @@ export class PipelineTurnOutput {
   #durationSince(startedAtMs: number): number {
     return Math.max(0, this.#context.turnTimingNow() - startedAtMs);
   }
+}
+
+function perCallVoiceOverride(
+  provider: TextToSpeechProvider,
+  voice: string | undefined,
+): string | undefined {
+  return voice !== undefined && voice !== provider.configuredVoice ? voice : undefined;
 }

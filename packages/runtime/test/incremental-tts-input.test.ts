@@ -78,6 +78,19 @@ describe("IncrementalTtsInput", () => {
     await input.finish();
   });
 
+  it("keeps long sentence batches on word boundaries", async () => {
+    const fake = makeSession();
+    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+    const text = `${"word ".repeat(1_000)}done.`;
+
+    await input.pushToken(text);
+    await input.finish();
+
+    expect(fake.sent.join("")).toBe(text);
+    expect(fake.sent.every((chunk) => chunk.length <= 2_500)).toBe(true);
+    expect(fake.sent.slice(0, -1).every((chunk) => /\s$/u.test(chunk))).toBe(true);
+  });
+
   it.each(["flushBoundary", "finish"] as const)(
     "sends unfinished text in bounded batches on %s",
     async (boundary) => {
@@ -100,6 +113,20 @@ describe("IncrementalTtsInput", () => {
       await input.finish();
     },
   );
+
+  it("keeps unfinished text batches on word boundaries", async () => {
+    const fake = makeSession();
+    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+    const text = "word ".repeat(1_000);
+
+    await input.pushToken(text);
+    await input.flushBoundary();
+
+    expect(fake.sent.join("")).toBe(text);
+    expect(fake.sent.every((chunk) => chunk.length <= 2_500)).toBe(true);
+    expect(fake.sent.slice(0, -1).every((chunk) => /\s$/u.test(chunk))).toBe(true);
+    await input.finish();
+  });
 
   it("keeps supplementary Unicode within the provider UTF-16 text limit", async () => {
     const fake = makeSession();
@@ -400,6 +427,17 @@ describe("IncrementalTtsInput", () => {
       provider: "tvic-runtime",
     });
     expect(fake.sent).toEqual([]);
+    await input.cancel();
+  });
+
+  it("counts UTF-8 bytes correctly when a surrogate pair arrives across token boundaries", async () => {
+    const fake = makeSession();
+    const input = new IncrementalTtsInput({ openSession: async () => fake.session });
+
+    await input.pushToken("\ud83d".repeat(10_000));
+    await input.pushToken(`${"\ude00".repeat(10_000)}!`);
+    await expect(input.pushToken("x".repeat(1_030_000))).resolves.toBeUndefined();
+
     await input.cancel();
   });
 });

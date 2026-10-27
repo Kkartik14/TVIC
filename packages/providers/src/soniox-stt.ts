@@ -142,6 +142,12 @@ const SONIOX_LANGUAGE_CODES = new Set([
   "cy",
 ]);
 
+function sonioxLanguageCode(language: string): string {
+  const primary = primaryLanguage(normalizeLanguageTag(language, SONIOX_PROVIDER));
+  // Intl canonicalizes the legacy `tl` language subtag to `fil`; Soniox uses `tl`.
+  return primary === "fil" ? "tl" : primary;
+}
+
 const SONIOX_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
   cancellation: { request: true, output: false, buffer: false, truncation: false },
@@ -149,7 +155,7 @@ const SONIOX_CAPABILITIES = {
   audio: { input: SONIOX_AUDIO_FORMATS },
   models: PROVIDER_CATALOG.soniox.models,
   turnDetection: ["stt_endpointing", "manual"],
-  languages: [...SONIOX_LANGUAGE_CODES],
+  languages: [...SONIOX_LANGUAGE_CODES, "fil"],
   metadata: {
     realtimeModel: PROVIDER_CATALOG.soniox.defaultModel,
     partialTranscripts: true,
@@ -218,9 +224,7 @@ export class SonioxSttProvider implements SpeechToTextProvider {
       return false;
     }
     try {
-      return languages.every((language) =>
-        SONIOX_LANGUAGE_CODES.has(primaryLanguage(normalizeLanguageTag(language, SONIOX_PROVIDER))),
-      );
+      return languages.every((language) => SONIOX_LANGUAGE_CODES.has(sonioxLanguageCode(language)));
     } catch {
       return false;
     }
@@ -290,11 +294,12 @@ export class SonioxSttProvider implements SpeechToTextProvider {
       this.#endpointLatencyAdjustmentLevel,
     );
 
-    const socket = this.#webSocketFactory(this.#url, {
-      Authorization: `Bearer ${this.#apiKey}`,
-    });
+    let socket: WebSocket | undefined;
     let stream: SonioxSttStream | undefined;
     try {
+      socket = this.#webSocketFactory(this.#url, {
+        Authorization: `Bearer ${this.#apiKey}`,
+      });
       await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
       stream = new SonioxSttStream(socket, request, this.#clock, {
         modelId: model,
@@ -310,7 +315,7 @@ export class SonioxSttProvider implements SpeechToTextProvider {
       await stream.start(request.signal);
       return stream;
     } catch (error) {
-      safeClose(socket);
+      if (socket) safeClose(socket);
       await stream?.close().catch(() => undefined);
       throw TvicThrowableError.from(
         redactSttConnectionUrl(
@@ -431,13 +436,15 @@ export class SonioxSttStream implements SttStream {
       sample_rate: this.#request.format.sampleRateHz,
       enable_endpoint_detection: this.#options.enableEndpointDetection,
     };
-    if (this.#options.language !== undefined) {
+    if (this.#options.language) {
       config.language_hints = [this.#options.language];
     } else if (this.#options.languagePolicy?.mode === "fixed") {
-      config.language_hints = [primaryLanguage(this.#options.languagePolicy.language)];
+      config.language_hints = [sonioxLanguageCode(this.#options.languagePolicy.language)];
       config.language_hints_strict = true;
     } else if (this.#options.languagePolicy?.mode === "hints") {
-      config.language_hints = this.#options.languagePolicy.languages.map(primaryLanguage);
+      config.language_hints = [
+        ...new Set(this.#options.languagePolicy.languages.map(sonioxLanguageCode)),
+      ];
       if (this.#options.languagePolicy.strictness === "best_effort") {
         config.language_hints_strict = false;
       }
@@ -1004,9 +1011,9 @@ function sonioxProtocolFailure(message: string) {
     retriable: false,
   });
 }
-function errorMessage(message: SonioxMessage, sensitiveTerms: readonly string[]): string {
+function errorMessage(message: SonioxMessage): string {
   if (typeof message.error_message === "string") {
-    return boundedErrorMessage(redactSonioxTerms(message.error_message, sensitiveTerms));
+    return boundedErrorMessage(message.error_message);
   }
   if (typeof message.error_type === "string") {
     return boundedErrorMessage(message.error_type);
@@ -1057,28 +1064,23 @@ export function sonioxProtocolError(
                   : type === "invalid_request" || type === "model_not_available"
                     ? "stt.provider.invalid_request"
                     : "stt.provider.protocol_error";
-  return providerError(code, errorMessage(message, sensitiveTerms), {
-    provider: SONIOX_PROVIDER,
-    retriable: code === "stt.provider.service_unavailable" || code === "stt.provider.internal",
-    metadata: {
-      soniox: {
-        ...(typeof message.error_code === "number" ? { errorCode: message.error_code } : {}),
-        ...(typeof message.error_type === "string" ? { errorType: message.error_type } : {}),
-        ...(typeof message.more_info === "string"
-          ? { moreInfo: boundedErrorMessage(redactSonioxTerms(message.more_info, sensitiveTerms)) }
-          : {}),
-        ...(typeof message.request_id === "string" ? { requestId: message.request_id } : {}),
+  return redactSttConnectionUrl(
+    providerError(code, errorMessage(message), {
+      provider: SONIOX_PROVIDER,
+      retriable: code === "stt.provider.service_unavailable" || code === "stt.provider.internal",
+      metadata: {
+        soniox: {
+          ...(typeof message.error_code === "number" ? { errorCode: message.error_code } : {}),
+          ...(typeof message.error_type === "string" ? { errorType: message.error_type } : {}),
+          ...(typeof message.more_info === "string"
+            ? { moreInfo: boundedErrorMessage(message.more_info) }
+            : {}),
+          ...(typeof message.request_id === "string" ? { requestId: message.request_id } : {}),
+        },
       },
-    },
-  });
-}
-
-function redactSonioxTerms(value: string, terms: readonly string[]): string {
-  const redactions = [...new Set(terms)]
-    .filter((term) => term.length > 0)
-    .flatMap((term) => [term, encodeURIComponent(term)])
-    .sort((left, right) => right.length - left.length);
-  return redactions.reduce((result, term) => result.split(term).join("[REDACTED]"), value);
+    }),
+    sensitiveTerms,
+  );
 }
 
 const delay = (milliseconds: number): Promise<void> =>

@@ -54,7 +54,11 @@ import { assertMemoryPolicySupported } from "./memory-capabilities.js";
 import type { SttCommandController } from "./stt-command-controller.js";
 import { SerialSttCommandController } from "./stt-command-controller.js";
 import { PipelineSttInput } from "./pipeline-stt-input.js";
-import { resolveTtsCallSelection, type TtsCallSelection } from "./tts-selection.js";
+import {
+  assertResolvedTtsCallSelection,
+  resolveTtsCallSelection,
+  type TtsCallSelection,
+} from "./tts-selection.js";
 import { resolveSttCallSelection, type SttCallSelection } from "./stt-selection.js";
 import { boundSttAgentContext } from "./stt-agent-context.js";
 import * as pipelineConstants from "./pipeline-constants.js";
@@ -242,6 +246,7 @@ export class PipelineVoiceLoop {
       options.sttSelection
         ? {
             ...(options.sttModel !== undefined ? { model: options.sttModel } : {}),
+            ...(options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
             ...(options.sttSelection.language !== undefined
               ? { sttLanguage: options.sttSelection.language }
               : {}),
@@ -255,6 +260,7 @@ export class PipelineVoiceLoop {
           }
         : {
             ...(options.sttModel !== undefined ? { model: options.sttModel } : {}),
+            ...(options.sttAllowUnknownModel ? { allowUnknownModel: true } : {}),
             ...(options.sttLanguage !== undefined ? { sttLanguage: options.sttLanguage } : {}),
             ...(options.sttLanguagePolicy !== undefined
               ? { sttLanguagePolicy: options.sttLanguagePolicy }
@@ -273,47 +279,30 @@ export class PipelineVoiceLoop {
             }),
           },
     );
-    const resolvedTtsSelection = resolveTtsCallSelection(
-      options.agent.providers.tts,
-      options.ttsSelection
-        ? {
-            ...(options.ttsSelection.model !== undefined
-              ? { model: options.ttsSelection.model }
-              : {}),
-            ...(options.ttsSelection.voice !== undefined
-              ? { voice: options.ttsSelection.voice }
-              : {}),
-            ...(options.ttsSelection.language !== undefined
-              ? { language: options.ttsSelection.language }
-              : {}),
-            ...(options.ttsSelection.speed !== undefined
-              ? { speed: options.ttsSelection.speed }
-              : {}),
-          }
-        : {
-            ...(options.ttsModel !== undefined ? { model: options.ttsModel } : {}),
-            ...(options.ttsModelSource !== undefined
-              ? { modelSource: options.ttsModelSource }
-              : {}),
-            ...(options.ttsVoice !== undefined ? { voice: options.ttsVoice } : {}),
-            ...(options.ttsLanguage !== undefined ? { language: options.ttsLanguage } : {}),
-            ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
-            ...(options.ttsVoicesByLanguage !== undefined
-              ? { voicesByLanguage: options.ttsVoicesByLanguage }
-              : {}),
-          },
-    );
-    const ttsSelection = options.ttsSelection
-      ? Object.freeze({
-          ...resolvedTtsSelection,
-          modelSource:
-            options.ttsSelection.modelSource ??
-            options.ttsModelSource ??
-            resolvedTtsSelection.modelSource,
-        })
-      : resolvedTtsSelection;
+    if (options.ttsSelection !== undefined) {
+      assertResolvedTtsCallSelection(options.ttsSelection, options.agent.providers.tts);
+    }
+    const ttsSelection =
+      options.ttsSelection ??
+      resolveTtsCallSelection(options.agent.providers.tts, {
+        ...(options.ttsModel !== undefined ? { model: options.ttsModel } : {}),
+        ...(options.ttsModelSource !== undefined ? { modelSource: options.ttsModelSource } : {}),
+        ...(options.ttsVoice !== undefined ? { voice: options.ttsVoice } : {}),
+        ...(options.ttsLanguage !== undefined ? { language: options.ttsLanguage } : {}),
+        ...(options.ttsSpeed !== undefined ? { speed: options.ttsSpeed } : {}),
+        ...(options.ttsVoicesByLanguage !== undefined
+          ? { voicesByLanguage: options.ttsVoicesByLanguage }
+          : {}),
+      });
+    const normalizedLoopOptions = { ...options };
+    delete normalizedLoopOptions.ttsModel;
+    delete normalizedLoopOptions.ttsModelSource;
+    delete normalizedLoopOptions.ttsVoice;
+    delete normalizedLoopOptions.ttsLanguage;
+    delete normalizedLoopOptions.ttsSpeed;
+    delete normalizedLoopOptions.ttsVoicesByLanguage;
     this.#options = {
-      ...options,
+      ...normalizedLoopOptions,
       ...(ttsSelection.model !== undefined ? { ttsModel: ttsSelection.model } : {}),
       ttsModelSource: ttsSelection.modelSource,
       ...(ttsSelection.voice !== undefined ? { ttsVoice: ttsSelection.voice } : {}),
@@ -631,7 +620,10 @@ export class PipelineVoiceLoop {
         provider: this.#providers.stt.name,
         retriable: true,
       });
-      this.#emitSttContextUpdateError(normalized, normalized.retriable);
+      // Context is an optional hint; a rejected update is reported while the
+      // voice call continues, even when the provider classifies the cause as
+      // non-retriable. That classification still controls reconnect behavior.
+      this.#emitSttContextUpdateError(normalized, true);
     });
   }
 
@@ -1326,7 +1318,8 @@ export class PipelineVoiceLoop {
     let incrementalFailure: unknown = null;
     let speakingPersisted = false;
     const toolCallIds: ToolCallId[] = [];
-    const incrementalInput = this.#turnOutput.incrementalTtsInput(turn, control);
+    const incrementalOutput = this.#turnOutput.incrementalTtsInput(turn, control);
+    const incrementalInput = incrementalOutput?.input ?? null;
     const incrementalPlayback = incrementalInput
       ? incrementalInput.opened
           .then(async (opened) => {
@@ -1398,6 +1391,7 @@ export class PipelineVoiceLoop {
             await incrementalInput.finish();
             await incrementalPlayback;
             if (incrementalFailure) throw incrementalFailure;
+            incrementalOutput?.playbackCompleted();
           } else if (this.#providers.tts) {
             await this.#persistTurnStatus(turn.id, "speaking");
             await this.#turnOutput.speak(this.#providers.tts, turn, finalText, control, latency);

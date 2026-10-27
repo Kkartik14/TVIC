@@ -158,6 +158,13 @@ UTF-16 code units per provider, model, or metric identifier. If a bound omits
 usage detail, `usage.truncated` is `true`. Text-to-speech failover usage is
 grouped under the configured wrapper provider and model; primary and fallback
 attempts are not reported as separate entries.
+When using `createTtsFailoverProvider()`, `mapFallbackRequest` describes the
+fallback request. Add `fallbackRequestVariants` to declare its model, voice, and
+language for call-time preflight; without variants, TVIC checks the mapped
+request only if the fallback is needed. The default mapper is identity, so it
+passes the primary's resolved model, voice, language, and speed to the fallback.
+Map those fields explicitly when the fallback should use different settings;
+configured fallback defaults are not catalogs and do not replace mapped values.
 Custom providers should use `usageReporter.report()` only for observations
 available immediately. They must call `usageReporter.beginOperation()` before
 starting asynchronous work that may outlive session finalization so an unfinished
@@ -262,53 +269,74 @@ dated TVIC catalog unless `allowUnknownModel: true` is explicitly set.
 
 Set `ttsModel`, `ttsVoice`, `ttsLanguage`, and `ttsSpeed` on `agent.start()` to
 select TTS behavior for that call. These values stay fixed for the call.
+Per-call values take precedence over agent defaults; when neither is set, the
+provider's configured value is used.
 `ttsVoicesByLanguage` can select a voice from the selected output language; it
 changes the voice only, not the model. Output language is a BCP-47 tag such as
-`hi-IN`.
+`hi-IN`. Set the map in `createVoiceAgent()` for a default, or pass a map to
+`agent.start()` for one call. The call-level map replaces the agent-level map.
+It accepts up to 128 language-to-voice entries. TVIC checks an exact language
+tag first, then progressively shorter tags. For a call using `hi-IN`, a map
+entry keyed by `hi` can match before TVIC uses the configured default voice.
 
 Sarvam Bulbul v4 needs a selected voice and language. You can set them as agent
 defaults or pass them per call; a `ttsVoice` on `agent.start()` can supply a
-voice when the agent has no default. TVIC checks the selected voice-language
-pair before creating the durable call session. V4 voice IDs suggest a persona's
-strongest language; they do not by themselves restrict the selected
-`ttsLanguage`. The model's supported languages and any explicit host voice
-metadata determine which pairs pass preflight.
+voice when the agent has no default. TVIC checks those required settings before
+creating the durable call session. It checks a voice-language pair only when
+the host configures the optional `voiceLanguages` map; otherwise Sarvam makes
+the final pair check. V4 voice IDs suggest a persona's strongest language and
+do not by themselves restrict the selected `ttsLanguage`.
 
 For streaming STT, `sttLanguage` is the legacy raw provider value. TVIC forwards
-it unchanged, so custom adapters can keep using values such as `hi_IN`, `multi`,
-or an empty string. Built-in providers apply their own wire behavior to that
-value. Use `sttLanguagePolicy` with `fixed`, `auto`, or `hints` mode when you
-want TVIC to normalize BCP-47 tags and preflight the selected policy.
+non-empty values unchanged, so custom adapters can keep using host-specific
+values such as `hi_IN` or `multi`. The managed API rejects an empty string.
+Built-in providers apply their own wire behavior to the raw value. Use
+`sttLanguagePolicy` with `fixed`, `auto`, or `hints` mode when you want TVIC to
+normalize BCP-47 tags and preflight the selected policy. A hints policy accepts
+up to 16 languages. `strictness: "best_effort"` is supported by Soniox; other
+built-in adapters reject that setting when they cannot preserve its meaning.
 
 Set `sttVocabulary` on the agent for default terms and on `agent.start()` for
 call-specific additions. TVIC merges and de-duplicates both lists. Tool names
 are excluded from that vocabulary by default; set
 `includeToolNamesInSttVocabulary: true` on `agent.start()` to include them.
+The combined vocabulary input accepts at most 256 terms before trimming and
+de-duplication, with at most 256 Unicode code points per term; a provider can
+enforce a smaller limit.
 You can also opt into `sttConversationContext` on AssemblyAI Universal-3 Pro
 Realtime. Explicit language policies, vocabulary, and context updates require
 the configured adapter to declare support. These controls apply to streaming
 transcription.
 
-Context updates are best effort. With STT reconnect disabled, a failed AssemblyAI
-context update emits a recoverable `stt.context_update_failed` event and the
-call continues; TVIC does not automatically retry that failed update.
+The runtime sends incremental TTS batches of at most 2,500 UTF-16 code units
+and accepts STT conversation context strings of at most 1,500 Unicode code
+points. The shared TTS cap keeps requests within Sarvam's stricter text limit;
+providers with higher limits may receive extra pushes for long sentences. A
+provider may enforce smaller limits.
+
+Context updates are best effort and run alongside caller audio. With STT
+reconnect disabled, a failed AssemblyAI context update emits a recoverable
+`stt.context_update_failed` event and the call continues; TVIC does not
+automatically retry that failed update. With reconnect enabled, an ambiguous
+timeout or cancellation can retire the active stream and start recovery. Caller
+audio replay continues while the latest context is being sent to the replacement
+stream.
 
 ```ts
 const session = await agent.start({
   callHandle,
   channel: "web_audio",
   ttsLanguage: "hi-IN",
-  ttsSpeed: 1,
   sttLanguagePolicy: { mode: "hints", languages: ["hi-IN", "en-IN"] },
   sttVocabulary: ["TVIC"],
-  sttConversationContext: true,
 });
 ```
 
 STT vocabulary is sent to the configured provider. Deepgram, Cartesia,
-ElevenLabs, and AssemblyAI include vocabulary in WebSocket query parameters,
-which may be visible in proxy and provider URL logs. Soniox sends vocabulary
-in its WebSocket context payload. Do not include secrets or personal data in
+ElevenLabs, and AssemblyAI include vocabulary in WebSocket URL query parameters;
+Sarvam Saaras v4 includes it in the `keyterms` URL query parameter. Those values
+may be visible in proxy and provider URL logs. Soniox sends vocabulary in its
+WebSocket context payload. Do not include secrets or personal data in
 vocabulary unless that use is approved for the provider and your organization.
 
 Tools are application-owned functions. Define their schema and executor once,

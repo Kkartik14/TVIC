@@ -50,6 +50,7 @@ import {
   assertElevenLabsRequest,
   elevenLabsWebSocketProtocol,
   resolveDialogueVoices,
+  supportsElevenLabsTtsLanguage,
   toElevenLabsLanguageCode,
   toProviderPronunciationDictionaries,
   type ElevenLabsDialogueTurnOptions,
@@ -180,6 +181,14 @@ export class ElevenLabsMultiContextProvider {
     }
     if (this.#protocol === "dialogue" && !this.#modelId.startsWith("eleven_v3")) {
       throw this.#error("ElevenLabs dialogue multi-context requires an eleven_v3 model");
+    }
+    if (
+      this.#options.language !== undefined &&
+      !supportsElevenLabsTtsLanguage(this.#options.language, this.#modelId, this.#allowUnknownModel)
+    ) {
+      throw this.#error(
+        `ElevenLabs does not support language ${this.#options.language} for model ${this.#modelId}`,
+      );
     }
     const url = this.#buildUrl();
     const socket = this.#webSocketFactory(url, { "xi-api-key": this.#options.apiKey });

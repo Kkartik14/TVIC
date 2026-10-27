@@ -237,10 +237,6 @@ export class PipelineSttInput {
     return this.#policy.flushBufferedTranscript();
   }
 
-  activeNow(): number {
-    return this.#timing.activeNow();
-  }
-
   wallNow(): number {
     return this.#options.now();
   }

@@ -265,7 +265,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   cartesiaStt: {
-    verifiedAt: "2026-09-27",
+    verifiedAt: "2026-10-27",
     source: "https://docs.cartesia.ai/build-with-cartesia/stt/latest",
     defaultModel: "ink-2",
     models: ["ink-2", "ink-preview", "ink-whisper-2025-06-04"],
@@ -302,8 +302,8 @@ export const PROVIDER_CATALOG = {
     },
   },
   sarvam: {
-    verifiedAt: "2026-09-15",
-    source: "https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws",
+    verifiedAt: "2026-10-27",
+    source: "https://docs.sarvam.ai/api/getting-started/models/saaras",
     defaultModel: "saaras:v3",
     models: ["saaras:v3", "saaras:v4"],
     usage: {
@@ -329,7 +329,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   sarvamTts: {
-    verifiedAt: "2026-10-09",
+    verifiedAt: "2026-10-27",
     source: "https://docs.sarvam.ai/api/getting-started/models/bulbul",
     defaultModel: "bulbul:v3",
     models: ["bulbul:v3", "bulbul:v4-flash"],
@@ -354,7 +354,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   cartesia: {
-    verifiedAt: "2026-09-25",
+    verifiedAt: "2026-10-27",
     source: "https://docs.cartesia.ai/build-with-cartesia/tts-models/latest",
     defaultModel: "sonic-3.6",
     models: [
@@ -385,7 +385,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   elevenlabs: {
-    verifiedAt: "2026-10-24",
+    verifiedAt: "2026-10-27",
     source: "https://elevenlabs.io/docs/overview/models",
     defaultModel: "eleven_flash_v2_5",
     models: [
@@ -461,7 +461,7 @@ export const PROVIDER_CATALOG = {
     },
   },
   elevenlabsStt: {
-    verifiedAt: "2026-09-24",
+    verifiedAt: "2026-10-27",
     source: "https://elevenlabs.io/docs/overview/models",
     defaultModel: "scribe_v2_realtime",
     models: ["scribe_v2_realtime", "scribe_v2", "scribe_v2_medical"],

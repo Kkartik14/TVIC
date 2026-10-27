@@ -29,6 +29,8 @@ export interface SttReconnectOptions {
   readonly maxBufferedBytes?: number;
   readonly maxBufferedCommands?: number;
   readonly sendTimeoutMs?: number;
+  /** Deadline for context updates; defaults to 2 seconds independently of sendTimeoutMs. */
+  readonly contextUpdateTimeoutMs?: number;
   readonly commitTimeoutMs?: number;
   readonly audioWriteTimeoutMs?: number;
   readonly closeTimeoutMs?: number;
@@ -104,8 +106,12 @@ class ResilientSttProvider implements SpeechToTextProvider {
     return this.#provider.supportsSttLanguagePolicy?.(policy, model) ?? false;
   }
 
-  supportsSttVocabulary(vocabulary: readonly string[], model?: string): boolean {
-    return this.#provider.supportsSttVocabulary?.(vocabulary, model) ?? false;
+  supportsSttVocabulary(
+    vocabulary: readonly string[],
+    model?: string,
+    allowUnknownModel?: boolean,
+  ): boolean {
+    return this.#provider.supportsSttVocabulary?.(vocabulary, model, allowUnknownModel) ?? false;
   }
 
   supportsSttAgentContext(model?: string): boolean {

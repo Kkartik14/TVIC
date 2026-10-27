@@ -1,6 +1,12 @@
 import type WebSocket from "ws";
 
-import { PROVIDER_ERROR_CODES, PROVIDER_NAMES, TvicThrowableError } from "@tvic/core";
+import {
+  canonicalizeLanguageTag,
+  primaryLanguageSubtag,
+  PROVIDER_ERROR_CODES,
+  PROVIDER_NAMES,
+  TvicThrowableError,
+} from "@tvic/core";
 import type { TtsSessionOpenRequest } from "@tvic/core";
 
 import { PROVIDER_CATALOG } from "./catalog.js";
@@ -58,96 +64,6 @@ const ELEVENLABS_FLASH_V2_5_LANGUAGES = new Set([
   "no",
   "vi",
 ]);
-const ELEVENLABS_V3_V4_LANGUAGES = new Set([
-  "af",
-  "ar",
-  "hy",
-  "as",
-  "ast",
-  "az",
-  "be",
-  "bn",
-  "bs",
-  "bg",
-  "my",
-  "yue",
-  "ca",
-  "ceb",
-  "ny",
-  "hr",
-  "cs",
-  "da",
-  "nl",
-  "en",
-  "et",
-  "fil",
-  "fi",
-  "fr",
-  "gl",
-  "ka",
-  "de",
-  "el",
-  "gu",
-  "ha",
-  "he",
-  "hi",
-  "hu",
-  "is",
-  "id",
-  "ga",
-  "it",
-  "ja",
-  "jv",
-  "kn",
-  "kk",
-  "ky",
-  "ko",
-  "lv",
-  "ln",
-  "lt",
-  "lb",
-  "mk",
-  "ms",
-  "ml",
-  "mt",
-  "zh",
-  "mi",
-  "mr",
-  "mn",
-  "ne",
-  "no",
-  "oc",
-  "or",
-  "ps",
-  "fa",
-  "pl",
-  "pt",
-  "pa",
-  "ro",
-  "ru",
-  "sr",
-  "sd",
-  "sk",
-  "sl",
-  "so",
-  "es",
-  "sw",
-  "sv",
-  "tg",
-  "ta",
-  "te",
-  "th",
-  "tr",
-  "uk",
-  "ur",
-  "uz",
-  "vi",
-  "cy",
-  "yo",
-]);
-const ELEVENLABS_V3_LANGUAGES = new Set([...ELEVENLABS_V3_V4_LANGUAGES, "ny"]);
-const ELEVENLABS_V4_LANGUAGES = ELEVENLABS_V3_V4_LANGUAGES;
-
 export interface ElevenLabsPronunciationDictionaryLocator {
   readonly id: string;
   readonly versionId?: string;
@@ -193,11 +109,12 @@ export function assertElevenLabsRequest(
   voice: string,
 ): void {
   const model = request.model ?? options.modelId;
-  const language = request.language ?? options.language;
+  const language =
+    request.language === "" ? options.language : (request.language ?? options.language);
   if (
     language !== undefined &&
     model !== "eleven_multilingual_v2" &&
-    !supportsElevenLabsTtsLanguage(language, model)
+    !supportsElevenLabsTtsLanguage(language, model, options.allowUnknownModel === true)
   ) {
     throw elevenLabsOptionError(
       `ElevenLabs does not support language ${language} for model ${model ?? "default"}`,
@@ -278,11 +195,16 @@ export function assertElevenLabsRequest(
   }
 }
 
-export function supportsElevenLabsTtsLanguage(language: string, model?: string): boolean {
+export function supportsElevenLabsTtsLanguage(
+  language: string,
+  model?: string,
+  allowUnknownModel = false,
+): boolean {
   const code = toElevenLabsLanguageCode(language);
-  if (!code || !model || !isElevenLabsCatalogModel(model)) {
+  if (!code || !model) {
     return false;
   }
+  if (!isElevenLabsCatalogModel(model)) return allowUnknownModel;
   // This model auto-detects and ignores an explicit language_code. Retain the
   // legacy accepted-call behavior and omit that unsupported wire field.
   if (model === "eleven_multilingual_v2") return true;
@@ -290,21 +212,27 @@ export function supportsElevenLabsTtsLanguage(language: string, model?: string):
     return ELEVENLABS_FLASH_V2_5_LANGUAGES.has(code);
   }
   if (model === "eleven_flash_v2" || model === "eleven_turbo_v2") return code === "en";
-  if (model.startsWith("eleven_v3")) return ELEVENLABS_V3_LANGUAGES.has(code);
-  if (model.startsWith("eleven_v4")) return ELEVENLABS_V4_LANGUAGES.has(code);
+  // Vendor docs describe v3/v4 as supporting 70+/90+ languages and publish
+  // representative lists, not closed catalogs. Keep syntactically valid BCP-47
+  // tags available for these expanding model families.
+  if (model.startsWith("eleven_v3") || model.startsWith("eleven_v4")) return true;
   return false;
 }
 
 export function toElevenLabsLanguageCode(language: string): string | undefined {
-  try {
-    const [canonical] = Intl.getCanonicalLocales(language);
-    return canonical ? new Intl.Locale(canonical).language.toLowerCase() : undefined;
-  } catch {
-    return undefined;
-  }
+  const canonical = canonicalizeLanguageTag(language);
+  if (!canonical) return undefined;
+  const primary = primaryLanguageSubtag(canonical);
+  // The API names Norwegian with its macrolanguage code (`no`); map the
+  // common Bokmål and Nynorsk BCP-47 primary subtags to that code.
+  return primary === "nb" || primary === "nn" ? "no" : primary;
 }
 
-export function supportsElevenLabsTtsSpeed(speed: number, model?: string): boolean {
+export function supportsElevenLabsTtsSpeed(
+  speed: number,
+  model?: string,
+  allowUnknownModel = false,
+): boolean {
   return (
     Number.isFinite(speed) &&
     speed >= 0.7 &&
@@ -312,7 +240,7 @@ export function supportsElevenLabsTtsSpeed(speed: number, model?: string): boole
     model !== undefined &&
     !model.startsWith("eleven_v3") &&
     !model.startsWith("eleven_v4") &&
-    isElevenLabsCatalogModel(model)
+    (allowUnknownModel || isElevenLabsCatalogModel(model))
   );
 }
 
@@ -362,7 +290,12 @@ export function elevenLabsWebSocketProtocol(model: string): ElevenLabsTtsProtoco
 
 export function isValidElevenLabsVoiceId(value: unknown): value is string {
   return (
-    typeof value === "string" && value.trim().length > 0 && !/[\u0000-\u001f\u007f]/u.test(value)
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.length <= 256 &&
+    value !== "." &&
+    value !== ".." &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
   );
 }
 
@@ -375,9 +308,6 @@ export function isKnownElevenLabsVoiceId(
   if (voice === options.voiceId) return true;
   if (protocol === "dialogue") {
     return options.dialogueVoices === undefined || options.dialogueVoices.includes(voice);
-  }
-  if (options.dialogueVoices?.includes(voice) && !options.knownVoiceIds?.includes(voice)) {
-    return false;
   }
   return options.knownVoiceIds === undefined || options.knownVoiceIds.includes(voice);
 }

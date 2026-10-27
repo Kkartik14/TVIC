@@ -1,5 +1,7 @@
 import type { AudioFormat } from "./audio.js";
 import { TVIC_ERROR_CODES } from "./constants.js";
+import type { TextToSpeechProvider } from "./providers/tts.js";
+import { evaluateTtsSelectionCompatibility } from "./providers/tts-selection-compatibility.js";
 
 export type ProviderKind = "telephony" | "stt" | "tts" | "llm" | "storage";
 
@@ -110,21 +112,6 @@ export interface Provider {
   readonly supportsLanguage?: (language: string, model?: string) => boolean;
   /** Reports support for one voice and optional model in this provider instance. */
   readonly supportsVoice?: (voice: string, model?: string) => boolean;
-  /** Preflights the complete per-call TTS selection when the adapter can do so. */
-  readonly supportsTtsSelection?: (selection: {
-    readonly model?: string;
-    readonly voice?: string;
-    readonly language?: string;
-    readonly speed?: number;
-  }) => boolean;
-  /** Reports whether the selected model needs an output language. */
-  readonly requiresTtsLanguageForModel?: (model?: string) => boolean;
-  /** Reports whether the selected model needs a voice. */
-  readonly requiresTtsVoiceForModel?: (model?: string) => boolean;
-  /** Reports support for a TTS language with optional model and voice context. */
-  readonly supportsTtsLanguage?: (language: string, model?: string, voice?: string) => boolean;
-  /** Reports support for a TTS speed with optional model and voice context. */
-  readonly supportsTtsSpeed?: (speed: number, model?: string, voice?: string) => boolean;
   readonly region?: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
@@ -194,6 +181,8 @@ export function evaluateProviderCompatibility(
 ): ProviderCompatibility {
   const issues: ProviderCompatibilityIssue[] = [];
   const capabilities = provider.capabilities;
+  const ttsProvider = provider.kind === "tts" ? (provider as TextToSpeechProvider) : undefined;
+  const isTtsCompatibility = requirements.kind === "tts" && ttsProvider !== undefined;
 
   if (provider.kind !== requirements.kind) {
     issue(
@@ -270,47 +259,65 @@ export function evaluateProviderCompatibility(
     );
   }
 
-  const ttsSelection =
-    requirements.kind === "tts" &&
-    provider.supportsTtsSelection !== undefined &&
+  const ttsSelection = isTtsCompatibility
+    ? {
+        ...(requirements.model !== undefined ? { model: requirements.model } : {}),
+        ...(requirements.voice !== undefined ? { voice: requirements.voice } : {}),
+        ...(requirements.language !== undefined ? { language: requirements.language } : {}),
+      }
+    : undefined;
+  if (
+    isTtsCompatibility &&
     (requirements.model !== undefined ||
       requirements.voice !== undefined ||
       requirements.language !== undefined)
-      ? {
-          ...(requirements.model !== undefined ? { model: requirements.model } : {}),
-          ...(requirements.voice !== undefined ? { voice: requirements.voice } : {}),
-          ...(requirements.language !== undefined ? { language: requirements.language } : {}),
-        }
-      : undefined;
-  const ttsSelectionAccepted =
-    ttsSelection !== undefined
-      ? provider.supportsTtsSelection!.call(provider, ttsSelection)
-      : undefined;
-  const hasTtsModelOrVoice = requirements.model !== undefined || requirements.voice !== undefined;
-  const supportsLanguageWithoutSelection =
-    requirements.kind === "tts" && provider.supportsTtsLanguage !== undefined
-      ? (language: string, model?: string) =>
-          provider.supportsTtsLanguage!.call(provider, language, model, requirements.voice)
-      : provider.supportsLanguage;
-  const supportsRequirementLanguage =
-    ttsSelection !== undefined
-      ? ttsSelectionAccepted !== false
-        ? () => true
-        : hasTtsModelOrVoice
-          ? (supportsLanguageWithoutSelection ?? (() => true))
-          : () => false
-      : supportsLanguageWithoutSelection;
-  checkMember(
-    issues,
-    provider.name,
-    "language",
-    requirements.language,
-    capabilities.languages,
-    supportsRequirementLanguage,
-    requirements.model,
-    provider,
-  );
-  checkMember(issues, provider.name, "model", requirements.model, capabilities.models);
+  ) {
+    const selectionIssues = evaluateTtsSelectionCompatibility(ttsProvider, ttsSelection!, {
+      checkModel: requirements.model !== undefined,
+      checkVoice: requirements.voice !== undefined,
+      voiceOverride: true,
+      checkLanguage: requirements.language !== undefined,
+      requireModelDeclaration: requirements.model !== undefined,
+      requireVoiceDeclaration: requirements.voice !== undefined,
+      requireLanguageDeclaration: requirements.language !== undefined,
+      checkRequiredFields: true,
+      checkProviderSelection: true,
+    });
+    for (const selectionIssue of selectionIssues) {
+      const languageOnlyRequirement =
+        selectionIssue.requirement === "selection" &&
+        requirements.language !== undefined &&
+        requirements.model === undefined &&
+        requirements.voice === undefined;
+      const code = languageOnlyRequirement
+        ? "language.unsupported"
+        : selectionIssue.requirement === "model"
+          ? TVIC_ERROR_CODES.providerModelUnsupported
+          : selectionIssue.requirement === "voice"
+            ? TVIC_ERROR_CODES.providerVoiceUnsupported
+            : selectionIssue.requirement === "language"
+              ? "language.unsupported"
+              : "tts.selection_unsupported";
+      const requirement = languageOnlyRequirement
+        ? "language"
+        : selectionIssue.requirement === "selection"
+          ? "ttsSelection"
+          : selectionIssue.requirement;
+      issue(issues, code, requirement, selectionIssue.message);
+    }
+  } else {
+    checkMember(
+      issues,
+      provider.name,
+      "language",
+      requirements.language,
+      capabilities.languages,
+      provider.supportsLanguage,
+      requirements.model,
+      provider,
+    );
+    checkMember(issues, provider.name, "model", requirements.model, capabilities.models);
+  }
   checkMember(
     issues,
     provider.name,
@@ -318,31 +325,16 @@ export function evaluateProviderCompatibility(
     requirements.batchModel,
     capabilities.batchModels,
   );
-  checkMember(
-    issues,
-    provider.name,
-    "voice",
-    requirements.voice,
-    capabilities.voices,
-    provider.supportsVoice,
-    requirements.model,
-    provider,
-  );
-  if (
-    ttsSelectionAccepted === false &&
-    hasTtsModelOrVoice &&
-    !issues.some(
-      (entry) =>
-        entry.requirement === "model" ||
-        entry.requirement === "voice" ||
-        entry.requirement === "language",
-    )
-  ) {
-    issue(
+  if (!isTtsCompatibility) {
+    checkMember(
       issues,
-      "tts.selection_unsupported",
-      "ttsSelection",
-      `${provider.name} does not support the selected TTS settings`,
+      provider.name,
+      "voice",
+      requirements.voice,
+      capabilities.voices,
+      provider.supportsVoice,
+      requirements.model,
+      provider,
     );
   }
   checkMember(

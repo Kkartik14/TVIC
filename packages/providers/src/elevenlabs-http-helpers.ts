@@ -171,7 +171,8 @@ export function speechBody(
   options: ElevenLabsHttpTtsProviderOptions,
   model: string,
 ): Readonly<Record<string, unknown>> {
-  const language = request.language ?? options.language;
+  const language =
+    request.language === "" ? options.language : (request.language ?? options.language);
   const languageCode =
     language === undefined || model === "eleven_multilingual_v2"
       ? undefined
@@ -216,7 +217,8 @@ export function dialogueBody(
   options: ElevenLabsHttpTtsProviderOptions,
   model: string,
 ): Readonly<Record<string, unknown>> {
-  const language = request.language ?? options.language;
+  const language =
+    request.language === "" ? options.language : (request.language ?? options.language);
   const languageCode =
     language === undefined || model === "eleven_multilingual_v2"
       ? undefined
@@ -227,9 +229,7 @@ export function dialogueBody(
     ...(languageCode !== undefined ? { language_code: languageCode } : {}),
     settings: {
       stability: options.stability ?? 0.5,
-      ...(model.startsWith("eleven_v4")
-        ? { similarity_boost: options.similarityBoost ?? 0.8 }
-        : {}),
+      ...(model.startsWith("eleven_v4") ? { similarity: options.similarityBoost ?? 0.8 } : {}),
     },
     ...(options.pronunciationDictionaryLocators
       ? {
@@ -261,7 +261,7 @@ export function endpointUrl(
   const custom = protocol === "tts" ? options.url : options.dialogueUrl;
   if (custom) {
     if (protocol === "tts" && custom.includes(":voice_id")) {
-      return custom.replace(":voice_id", encodeURIComponent(voiceId));
+      return custom.replaceAll(":voice_id", encodeURIComponent(voiceId));
     }
     if (protocol === "tts" && voiceId !== options.voiceId) {
       throw elevenLabsValidationError(
@@ -402,8 +402,10 @@ export function assertElevenLabsText(value: unknown): asserts value is string {
 export function assertVoice(value: unknown): string {
   if (
     typeof value !== "string" ||
-    value.length === 0 ||
+    value.trim().length === 0 ||
     value.length > 256 ||
+    value === "." ||
+    value === ".." ||
     /[\u0000-\u001f\u007f]/u.test(value)
   ) {
     throw TvicThrowableError.from(

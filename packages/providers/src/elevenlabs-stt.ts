@@ -60,6 +60,7 @@ import {
   assertSupportedLanguagePolicy,
   normalizeLanguageTag,
   primaryLanguage,
+  primaryLanguages,
   requestLanguagePolicy,
 } from "./stt-language-policy.js";
 import {
@@ -88,7 +89,7 @@ const ELEVENLABS_AUDIO_FORMATS = [
 ] as const satisfies readonly AudioFormat[];
 const ELEVENLABS_SAMPLE_RATES = ELEVENLABS_AUDIO_FORMATS.map(({ sampleRateHz }) => sampleRateHz);
 const MAX_ELEVENLABS_PENDING_COMMITS = 64;
-const ELEVENLABS_STT_LANGUAGE_CODES = new Set([
+export const ELEVENLABS_STT_LANGUAGE_CODES = new Set([
   "af",
   "amh",
   "ar",
@@ -237,6 +238,12 @@ const ELEVENLABS_STT_LANGUAGE_CODES = new Set([
   "sw",
   "cy",
 ]);
+// The provider accepts ISO-639-1 and ISO-639-3 codes. Intl.Locale converts many
+// three-letter codes to their two-letter primary language, so keep both forms
+// available to the policy validator after it canonicalizes the input.
+for (const language of [...ELEVENLABS_STT_LANGUAGE_CODES]) {
+  ELEVENLABS_STT_LANGUAGE_CODES.add(primaryLanguage(language));
+}
 
 const ELEVENLABS_CAPABILITIES = {
   streaming: { input: true, output: true, native: true },
@@ -292,6 +299,10 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
   readonly version = "0.1.0";
   readonly capabilities = ELEVENLABS_CAPABILITIES;
 
+  get allowUnknownModel(): boolean {
+    return this.#allowUnknownModel;
+  }
+
   supportsSttLanguagePolicy(policy: SttLanguagePolicy, model = this.#modelId): boolean {
     if (model !== "scribe_v2_realtime") return false;
     if (policy.mode === "hints" && policy.strictness !== undefined) return false;
@@ -308,9 +319,15 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
     });
   }
 
-  supportsSttVocabulary(vocabulary: readonly string[], model = this.#modelId): boolean {
+  supportsSttVocabulary(
+    vocabulary: readonly string[],
+    model = this.#modelId,
+    allowUnknownModel = this.#allowUnknownModel,
+  ): boolean {
     return (
-      model === "scribe_v2_realtime" &&
+      (model === "scribe_v2_realtime" ||
+        (allowUnknownModel &&
+          !PROVIDER_CATALOG.elevenlabsStt.models.some((supported) => supported === model))) &&
       vocabulary.length <= 50 &&
       vocabulary.every((term) => typeof term === "string" && term.length > 0 && term.length <= 20)
     );
@@ -376,15 +393,17 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
       ELEVENLABS_SAMPLE_RATES,
     );
     const model = request.model ?? this.#modelId;
+    const allowUnknownModel = request.allowUnknownModel ?? this.#allowUnknownModel;
     assertElevenLabsSttModel(model);
     assertSupportedModel(
       PROVIDER_NAMES.elevenlabsStt,
       PROVIDER_CATALOG.elevenlabsStt.models,
       model,
-      request.allowUnknownModel ?? this.#allowUnknownModel,
+      allowUnknownModel,
     );
     if (
       request.language !== undefined &&
+      request.language !== "" &&
       (typeof request.language !== "string" ||
         request.language.length === 0 ||
         request.language.length > 64 ||
@@ -487,7 +506,14 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
         ),
       );
     }
-    if (keyterms.length > 0 && !this.supportsSttVocabulary(keyterms, model)) {
+    if (
+      keyterms.length > 0 &&
+      model !== "scribe_v2_realtime" &&
+      !(
+        allowUnknownModel &&
+        !PROVIDER_CATALOG.elevenlabsStt.models.some((supported) => supported === model)
+      )
+    ) {
       throw TvicThrowableError.from(
         validationError(
           STT_ERROR_CODES.vocabularyUnsupported,
@@ -504,7 +530,7 @@ export class ElevenLabsSttProvider implements SpeechToTextProvider {
       languagePolicy?.mode === "fixed"
         ? [primaryLanguage(languagePolicy.language)]
         : languagePolicy?.mode === "hints"
-          ? languagePolicy.languages.map(primaryLanguage)
+          ? primaryLanguages(languagePolicy.languages)
           : languagePolicy?.mode === "auto"
             ? []
             : undefined;

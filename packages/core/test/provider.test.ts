@@ -3,12 +3,15 @@ import { describe, expect, it } from "vitest";
 import {
   PCM16_16K_MONO,
   evaluateProviderCompatibility,
+  evaluateTtsSelectionCompatibility,
   sameAudioFormat,
+  TVIC_ERROR_CODES,
   type CallHandle,
   type CallId,
   type LlmCompletionRequest,
   type Provider,
   type SessionId,
+  type TextToSpeechProvider,
   type TurnId,
 } from "../src/index.js";
 
@@ -33,7 +36,82 @@ const provider = {
   },
 } as const satisfies Provider;
 
+const ttsProvider = {
+  ...provider,
+  async synthesize() {
+    return { events: (async function* () {})(), async cancel() {} };
+  },
+} satisfies TextToSpeechProvider;
+
 describe("provider capability negotiation", () => {
+  it("shares one selection evaluator across declared dimensions and adapter hooks", () => {
+    let calls = 0;
+    const selectedProvider = {
+      ...ttsProvider,
+      supportsTtsSelection: (selection: { readonly language?: string }) => {
+        calls += 1;
+        return selection.language === "hi";
+      },
+    } satisfies TextToSpeechProvider;
+
+    expect(
+      evaluateTtsSelectionCompatibility(
+        selectedProvider,
+        { model: "voice-1", voice: "calm", language: "hi" },
+        { checkModel: true, checkVoice: true, checkLanguage: true },
+      ),
+    ).toEqual([]);
+    expect(calls).toBe(1);
+    expect(
+      evaluateTtsSelectionCompatibility(
+        selectedProvider,
+        { model: "voice-1", voice: "calm", language: "en" },
+        { checkModel: true, checkVoice: true, checkLanguage: true },
+      ),
+    ).toEqual([
+      {
+        requirement: "selection",
+        message: "Provider does not support the selected TTS settings",
+      },
+    ]);
+  });
+
+  it("keeps legacy no-catalog checks permissive unless the caller requests declarations", () => {
+    const hostProvider = {
+      name: "host-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: {
+        streaming: { input: true, output: true, native: true },
+        cancellation: { request: true, output: false, buffer: false, truncation: false },
+        transports: [],
+        audio: { output: [PCM16_16K_MONO] },
+      },
+      async synthesize() {
+        return { events: (async function* () {})(), async cancel() {} };
+      },
+    } satisfies TextToSpeechProvider;
+    const selection = { model: "host-model", voice: "host-voice", language: "en-US" };
+
+    expect(
+      evaluateTtsSelectionCompatibility(hostProvider, selection, {
+        checkModel: true,
+        checkVoice: true,
+        checkLanguage: true,
+      }),
+    ).toEqual([]);
+    expect(
+      evaluateTtsSelectionCompatibility(hostProvider, selection, {
+        checkModel: true,
+        checkVoice: true,
+        checkLanguage: true,
+        requireModelDeclaration: true,
+        requireVoiceDeclaration: true,
+        requireLanguageDeclaration: true,
+      }).map(({ requirement }) => requirement),
+    ).toEqual(["model", "voice", "language"]);
+  });
+
   it("keeps text delivery optional on call handles", () => {
     const handle = {
       callId: "call_optional_text" as CallId,
@@ -167,14 +245,14 @@ describe("provider capability negotiation", () => {
   it("uses TTS voice-language compatibility for a selected voice", () => {
     let receivedVoice: string | undefined;
     const voiceLanguageProvider = {
-      ...provider,
+      ...ttsProvider,
       capabilities: { ...provider.capabilities, voices: ["bilingual-persona"] },
       supportsLanguage: () => false,
       supportsTtsLanguage: (language: string, model?: string, voice?: string) => {
         receivedVoice = voice;
         return language === "en" && model === "voice-1" && voice === "bilingual-persona";
       },
-    } satisfies Provider;
+    } satisfies TextToSpeechProvider;
 
     expect(
       evaluateProviderCompatibility(voiceLanguageProvider, {
@@ -192,7 +270,7 @@ describe("provider capability negotiation", () => {
       | { readonly model?: string; readonly voice?: string; readonly language?: string }
       | undefined;
     const selectionProvider = {
-      ...provider,
+      ...ttsProvider,
       supportsTtsSelection: (selection: {
         readonly model?: string;
         readonly voice?: string;
@@ -201,7 +279,7 @@ describe("provider capability negotiation", () => {
         receivedSelection = selection;
         return true;
       },
-    } satisfies Provider;
+    } satisfies TextToSpeechProvider;
 
     expect(
       evaluateProviderCompatibility(selectionProvider, {
@@ -214,11 +292,90 @@ describe("provider capability negotiation", () => {
     expect(receivedSelection).toEqual({ model: "voice-1", voice: "calm", language: "hi" });
   });
 
+  it("fills configured defaults before calling the complete TTS selection hook", () => {
+    let receivedSelection:
+      | { readonly model?: string; readonly voice?: string; readonly language?: string }
+      | undefined;
+    const selectionProvider = {
+      ...ttsProvider,
+      configuredModel: "voice-1",
+      configuredVoice: "calm",
+      configuredLanguage: "hi",
+      supportsTtsSelection: (selection: {
+        readonly model?: string;
+        readonly voice?: string;
+        readonly language?: string;
+      }) => {
+        receivedSelection = selection;
+        return true;
+      },
+    } satisfies TextToSpeechProvider;
+
+    expect(
+      evaluateProviderCompatibility(selectionProvider, {
+        kind: "tts",
+        model: "voice-1",
+      }),
+    ).toEqual({ compatible: true, issues: [] });
+    expect(receivedSelection).toEqual({ model: "voice-1", voice: "calm", language: "hi" });
+  });
+
+  it("allows a complete selection hook to validate model and voice without catalogs", () => {
+    const hookOnlyProvider = {
+      ...ttsProvider,
+      capabilities: {
+        ...ttsProvider.capabilities,
+        models: [],
+        voices: [],
+      },
+      supportsTtsSelection: (selection: { readonly model?: string; readonly voice?: string }) =>
+        selection.model === "host-model" && selection.voice === "host-voice",
+    } satisfies TextToSpeechProvider;
+
+    expect(
+      evaluateProviderCompatibility(hookOnlyProvider, {
+        kind: "tts",
+        model: "host-model",
+        voice: "host-voice",
+      }),
+    ).toEqual({ compatible: true, issues: [] });
+  });
+
+  it("checks model-required language and voice in core compatibility preflight", () => {
+    const languageRequiredProvider = {
+      ...ttsProvider,
+      requiresTtsLanguageForModel: () => true,
+    } satisfies TextToSpeechProvider;
+    const voiceRequiredProvider = {
+      ...ttsProvider,
+      requiresTtsVoiceForModel: () => true,
+    } satisfies TextToSpeechProvider;
+
+    expect(
+      evaluateProviderCompatibility(languageRequiredProvider, {
+        kind: "tts",
+        model: "voice-1",
+      }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: "language.unsupported", requirement: "language" }],
+    });
+    expect(
+      evaluateProviderCompatibility(voiceRequiredProvider, {
+        kind: "tts",
+        model: "voice-1",
+      }),
+    ).toMatchObject({
+      compatible: false,
+      issues: [{ code: TVIC_ERROR_CODES.providerVoiceUnsupported, requirement: "voice" }],
+    });
+  });
+
   it("reports an adapter-rejected model-and-voice TTS selection generically", () => {
     const selectionProvider = {
-      ...provider,
+      ...ttsProvider,
       supportsTtsSelection: () => false,
-    } satisfies Provider;
+    } satisfies TextToSpeechProvider;
 
     expect(
       evaluateProviderCompatibility(selectionProvider, {
@@ -235,10 +392,10 @@ describe("provider capability negotiation", () => {
 
   it("keeps an independent language rejection alongside a failed complete selection", () => {
     const selectionProvider = {
-      ...provider,
+      ...ttsProvider,
       supportsLanguage: (language: string) => language === "en",
       supportsTtsSelection: () => false,
-    } satisfies Provider;
+    } satisfies TextToSpeechProvider;
 
     expect(
       evaluateProviderCompatibility(selectionProvider, {
@@ -255,9 +412,9 @@ describe("provider capability negotiation", () => {
 
   it("reports a language-only TTS selection rejection as unsupported language", () => {
     const selectionProvider = {
-      ...provider,
+      ...ttsProvider,
       supportsTtsSelection: () => false,
-    } satisfies Provider;
+    } satisfies TextToSpeechProvider;
 
     expect(
       evaluateProviderCompatibility(selectionProvider, {
@@ -275,7 +432,7 @@ describe("provider capability negotiation", () => {
       | { readonly model?: string; readonly voice?: string; readonly language?: string }
       | undefined;
     const selectionProvider = {
-      ...provider,
+      ...ttsProvider,
       supportsTtsSelection: (selection: {
         readonly model?: string;
         readonly voice?: string;
@@ -284,7 +441,7 @@ describe("provider capability negotiation", () => {
         receivedSelection = selection;
         return false;
       },
-    } satisfies Provider;
+    } satisfies TextToSpeechProvider;
 
     expect(
       evaluateProviderCompatibility(selectionProvider, {
@@ -299,12 +456,12 @@ describe("provider capability negotiation", () => {
     expect(receivedSelection).toEqual({ model: "voice-1", voice: "calm" });
   });
 
-  it("reports an incomplete model-only TTS selection without marking the model unsupported", () => {
+  it("reports a missing model-required voice without marking the model unsupported", () => {
     const selectionProvider = {
-      ...provider,
+      ...ttsProvider,
       requiresTtsVoiceForModel: () => true,
       supportsTtsSelection: ({ voice }: { readonly voice?: string }) => voice !== undefined,
-    } satisfies Provider;
+    } satisfies TextToSpeechProvider;
 
     expect(
       evaluateProviderCompatibility(selectionProvider, {
@@ -313,7 +470,7 @@ describe("provider capability negotiation", () => {
       }),
     ).toMatchObject({
       compatible: false,
-      issues: [{ code: "tts.selection_unsupported", requirement: "ttsSelection" }],
+      issues: [{ code: TVIC_ERROR_CODES.providerVoiceUnsupported, requirement: "voice" }],
     });
   });
 

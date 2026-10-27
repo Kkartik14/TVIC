@@ -46,8 +46,8 @@ export function validateRunOptions(options: VoiceAgentRunOptions): void {
   if (options.sttLanguage !== undefined && options.sttLanguagePolicy !== undefined) {
     configurationError("sttLanguage and sttLanguagePolicy cannot be combined");
   }
-  if (options.sttLanguage !== undefined && typeof options.sttLanguage !== "string") {
-    configurationError("sttLanguage must be a string");
+  if (options.sttLanguage !== undefined) {
+    nonEmpty(options.sttLanguage, "sttLanguage");
   }
   if (options.sttLanguagePolicy !== undefined && !isRecord(options.sttLanguagePolicy)) {
     configurationError("sttLanguagePolicy must be an object");

@@ -3,6 +3,18 @@ import { describe, expect, it, vi } from "vitest";
 import { fetchCartesiaVoiceCatalogSnapshot } from "../src/cartesia-voice-catalog.js";
 
 describe("Cartesia voice catalog snapshot", () => {
+  it("rejects dot-segment voice IDs before building a request path", async () => {
+    for (const voiceId of [".", ".."] as const) {
+      await expect(
+        fetchCartesiaVoiceCatalogSnapshot({
+          apiKey: "cartesia-test-key",
+          voiceIds: [voiceId],
+          fetchImpl: vi.fn(),
+        }),
+      ).rejects.toThrow("Cartesia voice snapshot request is invalid");
+    }
+  });
+
   it("loads requested voice facts with an explicit expiry", async () => {
     const requests: Array<{ url: string; headers: Headers }> = [];
     const snapshot = await fetchCartesiaVoiceCatalogSnapshot({
@@ -96,8 +108,22 @@ describe("Cartesia voice catalog snapshot", () => {
     ).rejects.toMatchObject({
       code: "provider.auth_failed",
       provider: "cartesia",
-      metadata: { status: 401 },
+      metadata: { httpStatus: 401, classification: "auth" },
     });
+  });
+
+  it.each([
+    [408, "provider.upstream_failed", true],
+    [429, "provider.rate_limited", true],
+    [503, "provider.upstream_failed", true],
+  ] as const)("classifies Cartesia catalog HTTP %s responses", async (status, code, retriable) => {
+    await expect(
+      fetchCartesiaVoiceCatalogSnapshot({
+        apiKey: "cartesia-test-key",
+        voiceIds: ["voice-one"],
+        fetchImpl: async () => new Response(null, { status }),
+      }),
+    ).rejects.toMatchObject({ code, retriable, metadata: { httpStatus: status } });
   });
 
   it("aborts all catalog requests when the caller signal is aborted", async () => {
@@ -198,7 +224,7 @@ describe("Cartesia voice catalog snapshot", () => {
     });
 
     await expect(pending).rejects.toMatchObject({
-      code: "provider.protocol_invalid",
+      code: "provider.upstream_failed",
       provider: "cartesia",
       retriable: true,
     });

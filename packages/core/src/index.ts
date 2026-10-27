@@ -18,6 +18,13 @@ export type {
 
 export type { Timestamp } from "./timestamp.js";
 export { nowTimestamp, toTimestamp } from "./timestamp.js";
+export {
+  canonicalizeLanguageTag,
+  normalizeLanguageStringMap,
+  normalizeStrictLanguageTag,
+  primaryLanguageSubtag,
+} from "./language.js";
+export type { LanguageStringMapNormalization, StrictLanguageTagNormalization } from "./language.js";
 export type { Clock } from "./clock.js";
 export { createSystemClock, monotonicOffsetMs } from "./clock.js";
 export type { CounterIdGenerator, IdGenerator } from "./id-generator.js";
@@ -288,10 +295,19 @@ export type {
   TtsSession,
   TtsSessionOpenRequest,
   TtsProviderSelection,
+  TtsProviderSelectionContext,
   TtsStream,
   TtsSynthesisRequest,
 } from "./providers/index.js";
 export { isIncrementalTextToSpeechProvider, isTranscriptSegmentEvent } from "./providers/index.js";
+/** @internal Shared implementation helpers for TVIC runtime and adapters. */
+export { evaluateTtsSelectionCompatibility } from "./providers/tts-selection-compatibility.js";
+/** @internal Shared implementation policy for the selection evaluator. */
+export type {
+  TtsSelectionCompatibilityIssue,
+  TtsSelectionCompatibilityOptions,
+  TtsSelectionRequirement,
+} from "./providers/tts-selection-compatibility.js";
 export { MAX_STT_LANGUAGE_HINTS, STT_STREAM_ENDED_REASON } from "./providers/stt.js";
 export {
   countUnicodeCodePoints,

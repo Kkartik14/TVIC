@@ -63,6 +63,7 @@ const SARVAM_LANGUAGES = [
   "ml-IN",
   "mr-IN",
   "or-IN",
+  "od-IN",
   "pa-IN",
   "ta-IN",
   "te-IN",
@@ -88,6 +89,7 @@ const SARVAM_VENDOR_LANGUAGE_CODES: Readonly<Record<string, string>> = {
   "ml-IN": "ml-IN",
   "mr-IN": "mr-IN",
   "or-IN": "od-IN",
+  "od-IN": "od-IN",
   "pa-IN": "pa-IN",
   "ta-IN": "ta-IN",
   "te-IN": "te-IN",
@@ -147,6 +149,10 @@ export class SarvamSttProvider implements SpeechToTextProvider {
   readonly version = "0.1.0";
   readonly capabilities = SARVAM_CAPABILITIES;
 
+  get allowUnknownModel(): boolean {
+    return this.#allowUnknownModel;
+  }
+
   supportsSttLanguagePolicy(
     policy: SttLanguagePolicy,
     model: string = PROVIDER_CATALOG.sarvam.defaultModel,
@@ -167,9 +173,12 @@ export class SarvamSttProvider implements SpeechToTextProvider {
   supportsSttVocabulary(
     vocabulary: readonly string[],
     model: string = PROVIDER_CATALOG.sarvam.defaultModel,
+    allowUnknownModel = this.#allowUnknownModel,
   ): boolean {
     return (
-      model === "saaras:v4" &&
+      (model === "saaras:v4" ||
+        (allowUnknownModel &&
+          !PROVIDER_CATALOG.sarvam.models.some((supported) => supported === model))) &&
       vocabulary.length <= 50 &&
       vocabulary.every(
         (term) => typeof term === "string" && [...term].length > 0 && [...term].length <= 64,
@@ -212,16 +221,21 @@ export class SarvamSttProvider implements SpeechToTextProvider {
     assertSttPcm16leFormat(request.format);
     assertSttSampleRate(PROVIDER_NAMES.sarvam, request.format.sampleRateHz, [8000, 16000]);
     const model = request.model ?? PROVIDER_CATALOG.sarvam.defaultModel;
+    const allowUnknownModel = request.allowUnknownModel ?? this.#allowUnknownModel;
     assertSupportedModel(
       PROVIDER_NAMES.sarvam,
       PROVIDER_CATALOG.sarvam.models,
       model,
-      request.allowUnknownModel ?? this.#allowUnknownModel,
+      allowUnknownModel,
     );
     if (
       request.vocabulary !== undefined &&
       request.vocabulary.length > 0 &&
-      model !== "saaras:v4"
+      model !== "saaras:v4" &&
+      !(
+        allowUnknownModel &&
+        !PROVIDER_CATALOG.sarvam.models.some((supported) => supported === model)
+      )
     ) {
       throw TvicThrowableError.from(
         validationError(
@@ -243,7 +257,7 @@ export class SarvamSttProvider implements SpeechToTextProvider {
     url.searchParams.set("model", model);
     url.searchParams.set("mode", this.#mode);
     const languageCode =
-      request.language ??
+      request.language ||
       (languagePolicy?.mode === "fixed"
         ? SARVAM_VENDOR_LANGUAGE_CODES[languagePolicy.language]
         : "unknown");
@@ -253,7 +267,12 @@ export class SarvamSttProvider implements SpeechToTextProvider {
     url.searchParams.set("high_vad_sensitivity", String(this.#highVadSensitivity));
     url.searchParams.set("vad_signals", String(this.#vadSignals));
     url.searchParams.set("flush_signal", String(this.#flushSignal));
-    if (model === "saaras:v4" && request.vocabulary !== undefined) {
+    if (
+      (model === "saaras:v4" ||
+        (allowUnknownModel &&
+          !PROVIDER_CATALOG.sarvam.models.some((supported) => supported === model))) &&
+      request.vocabulary !== undefined
+    ) {
       validateSarvamKeyterms(request.vocabulary);
       if (request.vocabulary.length > 0) {
         url.searchParams.set("keyterms", JSON.stringify(request.vocabulary));

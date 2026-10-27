@@ -82,7 +82,11 @@ export interface SpeechToTextProvider extends Provider {
   readonly kind: "stt";
   readonly usageAccounting?: SttUsageAccounting;
   readonly supportsSttLanguagePolicy?: (policy: SttLanguagePolicy, model?: string) => boolean;
-  readonly supportsSttVocabulary?: (vocabulary: readonly string[], model?: string) => boolean;
+  readonly supportsSttVocabulary?: (
+    vocabulary: readonly string[],
+    model?: string,
+    allowUnknownModel?: boolean,
+  ) => boolean;
   readonly supportsSttAgentContext?: (model?: string) => boolean;
   open(request: SttOpenRequest): Promise<SttStream>;
   transcribe?(request: SttBatchTranscriptionRequest): Promise<SttBatchTranscription>;

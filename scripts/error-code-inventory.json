@@ -3579,20 +3579,8 @@
           "kind": "factory:timeoutError"
         },
         {
-          "file": "packages/runtime/src/pipeline-loop-tts.ts",
-          "line": 52,
-          "column": 11,
-          "kind": "factory:timeoutError"
-        },
-        {
-          "file": "packages/runtime/src/pipeline-loop-tts.ts",
-          "line": 105,
-          "column": 9,
-          "kind": "factory:timeoutError"
-        },
-        {
           "file": "packages/runtime/src/pipeline-turn-output.ts",
-          "line": 406,
+          "line": 440,
           "column": 11,
           "kind": "factory:timeoutError"
         }

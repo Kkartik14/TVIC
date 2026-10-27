@@ -7,6 +7,7 @@ import {
 } from "@tvic/core";
 
 import { PROVIDER_API_VERSIONS } from "./catalog.js";
+import { classifiedProviderError } from "./provider-error-classifier.js";
 
 export interface CartesiaVoiceCatalogEntry {
   readonly id: string;
@@ -85,29 +86,24 @@ export async function fetchCartesiaVoiceCatalogSnapshot(
         signal: controller.signal,
       });
     } catch {
-      return catalogFailure("Cartesia voice metadata could not be retrieved", true);
+      return catalogFailure("Cartesia voice metadata could not be retrieved", {
+        providerCode: "service_unavailable",
+      });
     }
     if (!response.ok) {
       if (response.status === 404) {
         return Object.freeze({ id: voiceId, status: "missing" });
       }
-      return catalogFailure(
-        "Cartesia voice metadata could not be retrieved",
-        response.status >= 500,
-        {
-          status: response.status,
-        },
-        response.status === 401 || response.status === 403
-          ? TVIC_ERROR_CODES.providerAuthFailed
-          : TVIC_ERROR_CODES.providerProtocolInvalid,
-      );
+      return catalogFailure("Cartesia voice metadata could not be retrieved", {
+        status: response.status,
+      });
     }
 
     let value: unknown;
     try {
       value = await response.json();
     } catch {
-      return catalogFailure("Cartesia returned invalid voice metadata", false);
+      return catalogFailure("Cartesia returned invalid voice metadata", { bodyMalformed: true });
     }
     return parseVoiceEntry(value, voiceId);
   };
@@ -211,7 +207,9 @@ export function isFreshCartesiaVoiceCatalogSnapshot(
 }
 
 function parseVoiceEntry(value: unknown, expectedId?: string): CartesiaVoiceCatalogEntry {
-  if (!isRecord(value)) return catalogFailure("Cartesia returned invalid voice metadata", false);
+  if (!isRecord(value)) {
+    return catalogFailure("Cartesia returned invalid voice metadata", { bodyMalformed: true });
+  }
   const { id, status, is_pro: isPro, accents } = value;
   if (
     !isVoiceId(id) ||
@@ -222,7 +220,7 @@ function parseVoiceEntry(value: unknown, expectedId?: string): CartesiaVoiceCata
       (!Array.isArray(accents) ||
         !accents.every((accent) => isRecord(accent) && isLanguageTag(accent.locale))))
   ) {
-    return catalogFailure("Cartesia returned invalid voice metadata", false);
+    return catalogFailure("Cartesia returned invalid voice metadata", { bodyMalformed: true });
   }
   const locales =
     accents === undefined
@@ -257,7 +255,11 @@ function normalizeVoiceEntry(value: unknown): CartesiaVoiceCatalogEntry {
 
 function isVoiceId(value: unknown): value is string {
   return (
-    typeof value === "string" && value.trim().length > 0 && !/[\u0000-\u001f\u007f]/u.test(value)
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value !== "." &&
+    value !== ".." &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
   );
 }
 
@@ -271,17 +273,9 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
 
 function catalogFailure(
   message: string,
-  retriable: boolean,
-  metadata?: Readonly<Record<string, unknown>>,
-  code: string = TVIC_ERROR_CODES.providerProtocolInvalid,
+  input: Parameters<typeof classifiedProviderError>[2],
 ): never {
-  throw TvicThrowableError.from(
-    providerError(code, message, {
-      provider: PROVIDER_NAMES.cartesia,
-      retriable,
-      ...(metadata !== undefined ? { metadata } : {}),
-    }),
-  );
+  throw TvicThrowableError.from(classifiedProviderError(PROVIDER_NAMES.cartesia, message, input));
 }
 
 function cartesiaCatalogCancelledError(): TvicThrowableError {

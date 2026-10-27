@@ -39,6 +39,23 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(factoryCalls).toBe(0);
   });
 
+  it("rejects a configured language before opening an incompatible multi-context socket", async () => {
+    let factoryCalls = 0;
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "test",
+      voiceId: "voice",
+      modelId: "eleven_flash_v2",
+      language: "hi-IN",
+      webSocketFactory: () => {
+        factoryCalls += 1;
+        return new FakeSocket() as never;
+      },
+    });
+
+    await expect(provider.openConnection()).rejects.toThrow(/does not support language hi-IN/u);
+    expect(factoryCalls).toBe(0);
+  });
+
   it("rejects a context model that differs from its connection model", async () => {
     const socket = new FakeSocket();
     const provider = createElevenLabsTtsMultiContextProvider({
