@@ -18,7 +18,7 @@ import {
 import { AsyncQueue } from "@tvic/media";
 
 import { getSttRecoveryControl, withSttReconnect } from "../src/resilient-stt.js";
-import { resolveOptions } from "../src/resilient-stt-policy.js";
+import { resolveOptions, resolveStreamOptions } from "../src/resilient-stt-policy.js";
 import { DEFAULT_STT_AGENT_CONTEXT_TIMEOUT_MS } from "../src/stt-agent-context.js";
 import { SessionUsageAccumulator } from "../src/session-usage.js";
 
@@ -42,6 +42,28 @@ describe("withSttReconnect", () => {
     expect(
       resolveOptions({ sendTimeoutMs: 30, contextUpdateTimeoutMs: 12 }).contextUpdateTimeoutMs,
     ).toBe(12);
+  });
+
+  it("derives default journal limits from the requested audio format and windows", () => {
+    const defaults = resolveOptions({});
+    const sixteenKhz = resolveStreamOptions(defaults, PCM16_16K_MONO);
+    const eightKhz = resolveStreamOptions(defaults, {
+      ...PCM16_16K_MONO,
+      sampleRateHz: 8_000,
+    });
+    const declaredTwentyMsFrames = resolveStreamOptions(defaults, {
+      ...PCM16_16K_MONO,
+      frameDurationMs: 20,
+    });
+
+    expect(sixteenKhz.maxBufferedBytes).toBe(1_280_640);
+    expect(eightKhz.maxBufferedBytes).toBe(640_320);
+    expect(sixteenKhz.maxBufferedCommands).toBe(4_018);
+    expect(eightKhz.maxBufferedCommands).toBe(4_018);
+    expect(declaredTwentyMsFrames.maxBufferedCommands).toBe(2_017);
+    expect(() =>
+      resolveStreamOptions(resolveOptions({ maxRecoveryDurationMs: 200_000 }), PCM16_16K_MONO),
+    ).toThrow("set maxBufferedCommands explicitly");
   });
 
   it("normalizes arbitrary custom-provider open failures at the public boundary", async () => {
@@ -149,6 +171,82 @@ describe("withSttReconnect", () => {
       await stream.close();
     }
   });
+
+  it("fails visibly when shorter chunks reach the default command bound early", async () => {
+    const fake = makeProvider({ blockReconnectOpen: true });
+    const stream = await withSttReconnect(fake.provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+    }).open(openRequest());
+    const first = fake.streams[0]!;
+
+    try {
+      for (let index = 1; index <= 1_000; index += 1) {
+        await stream.sendAudio(audioChunk(index, 160, 5));
+        await waitFor(() => first.order.length === index);
+      }
+
+      first.events.fail(
+        providerError("stt.transport.write_failed", "generation failed", {
+          provider: fake.provider.name,
+          retriable: true,
+        }),
+      );
+      await waitFor(() => getSttRecoveryControl(stream)?.state() === "recovering");
+      await waitFor(() => fake.openCalls === 2);
+
+      for (let index = 1_001; index <= 4_018; index += 1) {
+        await stream.sendAudio(audioChunk(index, 160, 5));
+      }
+
+      await expect(stream.sendAudio(audioChunk(4_019, 160, 5))).rejects.toMatchObject({
+        code: "stt.reconnect.buffer_overflow",
+      });
+      expect(getSttRecoveryControl(stream)?.state()).toBe("failed");
+    } finally {
+      fake.releaseReconnectOpen();
+      await stream.close();
+    }
+  });
+
+  it.each([
+    { limit: "byte", maxBufferedBytes: 1_280, maxBufferedCommands: 8 },
+    { limit: "command", maxBufferedBytes: 12_800, maxBufferedCommands: 2 },
+  ])(
+    "keeps concurrent audio admission within the $limit limit",
+    async ({ maxBufferedBytes, maxBufferedCommands }) => {
+      const fake = makeProvider({ blockInitialAudio: true });
+      const stream = await withSttReconnect(fake.provider, {
+        jitter: false,
+        initialBackoffMs: 0,
+        maxBackoffMs: 0,
+        maxBufferedBytes,
+        maxBufferedCommands,
+      }).open(openRequest());
+
+      try {
+        const results = await Promise.allSettled(
+          Array.from({ length: 10 }, (_, index) =>
+            stream.sendAudio(audioChunk(index + 1, 640, 20)),
+          ),
+        );
+        const accepted = results.filter((result) => result.status === "fulfilled");
+        const rejected = results.flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
+        );
+
+        expect(accepted).toHaveLength(2);
+        expect(
+          rejected.filter((error) => error?.code === "stt.reconnect.buffer_overflow"),
+        ).toHaveLength(1);
+        expect(rejected.filter((error) => error?.code === "stt.reconnect.closed")).toHaveLength(7);
+      } finally {
+        fake.releaseReconnectAudio();
+        await stream.close();
+      }
+    },
+  );
 
   it("keeps the original turn profile on reconnect opens", async () => {
     const fake = makeProvider({ failInitialAudio: true });
