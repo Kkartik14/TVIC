@@ -129,16 +129,24 @@ jobs:
           curl --fail-with-body --silent --show-error \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "$API_URL/repos/$REPOSITORY/commits/$TAG_SHA/check-runs?per_page=100" > "$CHECKS_JSON"
+            "$API_URL/repos/$REPOSITORY/commits/$TAG_SHA/check-runs?filter=latest&per_page=100" > "$CHECKS_JSON"
           node - "$CHECKS_JSON" "$TAG_SHA" <<'NODE'
           const fs = require("node:fs");
           const [file, sha] = process.argv.slice(2);
           const payload = JSON.parse(fs.readFileSync(file, "utf8"));
-          const verify = (payload.check_runs ?? []).find(
-            (check) => check.name === "Verify" && check.head_sha === sha,
+          const requiredCheckName = "Merge Gate";
+          const requiredGate = (payload.check_runs ?? []).find(
+            (check) =>
+              check.name === requiredCheckName &&
+              check.head_sha === sha &&
+              check.app?.slug === "github-actions",
           );
-          if (!verify || verify.conclusion !== "success") {
-            throw new Error(`Verify has not passed for ${sha}`);
+          if (
+            !requiredGate ||
+            requiredGate.status !== "completed" ||
+            requiredGate.conclusion !== "success"
+          ) {
+            throw new Error(`${requiredCheckName} has not passed for ${sha}`);
           }
           NODE
 
