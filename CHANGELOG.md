@@ -246,6 +246,10 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   report the error and continue the call.
 - Close the STT stream cleanly when hangup overlaps a reconnect open, and keep
   replay audio moving if a replayed context write times out.
+- Size default STT reconnect byte and command journals from the requested audio
+  format and replay/recovery windows. Shorter-than-assumed chunks can still reach
+  the bounded command limit before those time windows expire; explicit limits
+  remain available.
 
 ## 2.1.0
 
