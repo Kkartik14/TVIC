@@ -109,6 +109,47 @@ describe("withSttReconnect", () => {
     await stream.close();
   });
 
+  it("buffers the full replay tail and default recovery window while reconnect opens", async () => {
+    const fake = makeProvider({ blockReconnectOpen: true });
+    const provider = withSttReconnect(fake.provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+    });
+    const stream = await provider.open(openRequest());
+    const first = fake.streams[0]!;
+
+    try {
+      for (let index = 1; index <= 500; index += 1) {
+        await stream.sendAudio(audioChunk(index, 640, 20));
+        await waitFor(() => first.order.length === index);
+      }
+
+      first.events.fail(
+        providerError("stt.transport.write_failed", "generation failed", {
+          provider: fake.provider.name,
+          retriable: true,
+        }),
+      );
+      await waitFor(() => getSttRecoveryControl(stream)?.state() === "recovering");
+      await waitFor(() => fake.openCalls === 2);
+
+      for (let index = 501; index <= 2_000; index += 1) {
+        await stream.sendAudio(audioChunk(index, 640, 20));
+      }
+
+      fake.releaseReconnectOpen();
+      await waitFor(() => fake.streams.length === 2);
+      await waitFor(() => fake.streams[1]?.order.length === 2_000);
+      expect(fake.streams[1]?.order).toEqual(
+        Array.from({ length: 2_000 }, (_, index) => `audio:${(index + 1) % 256}`),
+      );
+    } finally {
+      fake.releaseReconnectOpen();
+      await stream.close();
+    }
+  });
+
   it("keeps the original turn profile on reconnect opens", async () => {
     const fake = makeProvider({ failInitialAudio: true });
     const requests: SttOpenRequest[] = [];
@@ -1157,6 +1198,7 @@ function makeProvider(
     readonly failReconnectOpen?: "auth" | "transient";
     readonly failOpenCalls?: readonly number[];
     readonly failGenerations?: readonly number[];
+    readonly blockReconnectOpen?: boolean;
     readonly blockCommit?: boolean;
     readonly blockInitialAudio?: boolean;
     readonly blockReconnectAudio?: boolean;
@@ -1168,6 +1210,7 @@ function makeProvider(
   let openCalls = 0;
   let releaseReconnectAudio: (() => void) | undefined;
   let rejectReconnectAudio: ((error: unknown) => void) | undefined;
+  let releaseReconnectOpen: (() => void) | undefined;
   let closingStreams = 0;
   let openWhileClosing = false;
   const provider: SpeechToTextProvider = {
@@ -1178,6 +1221,11 @@ function makeProvider(
     async open(): Promise<SttStream> {
       openCalls += 1;
       openWhileClosing ||= closingStreams > 0;
+      if (options.blockReconnectOpen && openCalls > 1) {
+        await new Promise<void>((resolve) => {
+          releaseReconnectOpen = resolve;
+        });
+      }
       if (
         options.failOpenCalls?.includes(openCalls) ||
         (openCalls > 1 && options.failReconnectOpen)
@@ -1274,6 +1322,10 @@ function makeProvider(
       rejectReconnectAudio = undefined;
       releaseReconnectAudio = undefined;
     },
+    releaseReconnectOpen(): void {
+      releaseReconnectOpen?.();
+      releaseReconnectOpen = undefined;
+    },
   };
 }
 
@@ -1285,7 +1337,7 @@ function openRequest(): SttOpenRequest {
   };
 }
 
-function audioChunk(value: number, byteLength = 2): InputAudioChunk {
+function audioChunk(value: number, byteLength = 2, durationMs = 1): InputAudioChunk {
   return createMediaEvent({
     id: `audio_${value}` as never,
     type: "media.audio.chunk",
@@ -1293,10 +1345,10 @@ function audioChunk(value: number, byteLength = 2): InputAudioChunk {
     sequence: value,
     direction: "input",
     timestamp: TS,
-    monotonicOffsetMs: value,
+    monotonicOffsetMs: value * durationMs,
     audio: {
       format: PCM16_16K_MONO,
-      durationMs: 1,
+      durationMs,
       frameCount: byteLength / 2,
       bytes: new Uint8Array(byteLength).fill(value),
     },
