@@ -229,6 +229,8 @@ export class PipelineVoiceLoop {
   #removeRecoveryContextErrorListener: (() => void) | undefined;
   readonly #sttInput: PipelineSttInput;
   #persistenceDegraded = false;
+  #nonCheckpointPersistenceDegraded = false;
+  #checkpointPersistenceDegraded = false;
   #persistenceGate: Promise<boolean> = Promise.resolve(true);
   readonly #memoryUserId: UserId | undefined;
   readonly #organizationId: OrganizationId | undefined;
@@ -1241,12 +1243,31 @@ export class PipelineVoiceLoop {
   }
 
   #markPersistenceDegraded(): void {
-    this.#persistenceDegraded = true;
+    this.#nonCheckpointPersistenceDegraded = true;
+    this.#syncPersistenceHealth();
+  }
+
+  #markCheckpointPersistenceDegraded(): void {
+    this.#checkpointPersistenceDegraded = true;
+    this.#syncPersistenceHealth();
+  }
+
+  #recoverCheckpointPersistence(): void {
+    this.#checkpointPersistenceDegraded = false;
+    this.#syncPersistenceHealth();
+  }
+
+  #syncPersistenceHealth(): void {
+    this.#persistenceDegraded =
+      this.#nonCheckpointPersistenceDegraded || this.#checkpointPersistenceDegraded;
     try {
-      this.#options.runtime.setPersistenceHealth(this.#options.session.id, true);
+      this.#options.runtime.setPersistenceHealth(
+        this.#options.session.id,
+        this.#persistenceDegraded,
+      );
     } catch {
     } finally {
-      this.#active?.abort.abort();
+      if (this.#persistenceDegraded) this.#active?.abort.abort();
     }
   }
 
@@ -1912,7 +1933,8 @@ export class PipelineVoiceLoop {
       sessionId: this.#options.session.id,
       turnId: control.turnId,
       cause,
-      onDegraded: () => this.#markPersistenceDegraded(),
+      onDegraded: () => this.#markCheckpointPersistenceDegraded(),
+      onRecovered: () => this.#recoverCheckpointPersistence(),
     });
     const checkpoint = control.interruptionCheckpoint;
     this.#persistenceGate = this.#persistenceGate
