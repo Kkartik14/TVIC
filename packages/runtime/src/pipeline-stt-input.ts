@@ -3,6 +3,7 @@ import {
   isNormalizedError,
   isTranscriptSegmentEvent,
   normalizeLegacyError,
+  normalizeUnknownError,
   providerError,
   STT_STREAM_ENDED_REASON,
 } from "@tvic/core";
@@ -38,6 +39,7 @@ export interface PipelineSttInputOptions {
   readonly now: () => number;
   readonly getActive: () => ActiveTurnControl | null;
   readonly onAudioChunk?: (chunk: InputAudioChunk) => void;
+  readonly onMediaEnd?: (endReason: string, streamError: NormalizedError | null) => void;
   readonly onTranscript: (transcript: string, timing: UtteranceTiming) => void;
   readonly interrupt: (cause: "barge_in" | "explicit" | "dtmf") => Promise<void>;
   readonly onIteratorTimeout?: () => void;
@@ -156,7 +158,18 @@ export class PipelineSttInput {
           break;
         }
       }
+    } catch (error) {
+      endReason = "media_error";
+      streamError = normalizeUnknownError(error, {
+        code: "media.input_failed",
+        category: "internal",
+        retriable: false,
+      });
+      mediaEnded = true;
+      throw error;
     } finally {
+      // Latch media termination before best-effort iterator cleanup can block.
+      if (mediaEnded) this.#options.onMediaEnd?.(endReason, streamError);
       await returnAsyncIteratorWithTimeout(iterator, CANCELLATION_TIMEOUT_MS, () =>
         this.#options.onIteratorTimeout?.(),
       );
