@@ -5486,6 +5486,91 @@ describe("PipelineVoiceLoop", () => {
     expect(call.deliveredTexts).toEqual([]);
   });
 
+  it("does not complete or memorize text delivery that settles after a remote hangup", async () => {
+    const memory = createInMemoryMemory();
+    const runtime = createRuntime({ memory });
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const assistantTextRecords: AssistantTextRecord[] = [];
+    let announceDeliveryStarted!: () => void;
+    let releaseDelivery!: (delivered: boolean) => void;
+    let sttClosed = false;
+    const deliveryStarted = new Promise<void>((resolve) => {
+      announceDeliveryStarted = resolve;
+    });
+    const callHandle = {
+      ...call.handle,
+      async deliverText(): Promise<boolean> {
+        announceDeliveryStarted();
+        return new Promise<boolean>((resolve) => {
+          releaseDelivery = resolve;
+        });
+      },
+    };
+    const sttProvider: SpeechToTextProvider = {
+      ...stt.provider,
+      async open(request) {
+        const stream = await stt.provider.open(request);
+        return {
+          ...stream,
+          async close() {
+            sttClosed = true;
+            await stream.close();
+          },
+        };
+      },
+    };
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "A late answer.", toolCalls: [] }),
+    ]);
+    const baseTts = agent.providers.tts;
+    if (!baseTts) throw new Error("test requires TTS");
+    const failingTts = {
+      ...baseTts,
+      async synthesize(): Promise<never> {
+        throw new Error("speaker unavailable");
+      },
+    };
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: sttProvider, llm, tts: failingTts }),
+      callHandle,
+      llmModel: "gpt-test",
+      memory,
+      onAssistantText: (record) => assistantTextRecords.push(record),
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "answer before hangup");
+    await deliveryStarted;
+    call.push(streamEnded(session.id, "remote_hangup"));
+    await until(() => sttClosed, "STT input closed after remote hangup");
+    releaseDelivery(true);
+    const result = await running;
+
+    const turn = (await runtime.inspectSession(session.id)).turns[0];
+    expect(result.terminalReason).toBe("remote_hangup");
+    expect(turn?.status).toBe("cancelled");
+    expect(turn?.output.delivery).toEqual({
+      audio: "not_attempted",
+      text: "not_accepted",
+    });
+    expect(assistantTextRecords).toMatchObject([
+      { status: "cancelled", text: "A late answer.", delivered: false },
+    ]);
+    await expect(
+      memory.list(
+        { scope: "session", sessionId: session.id },
+        { prefix: `exchange:${session.id}:`, kind: "raw" },
+      ),
+    ).resolves.toEqual([]);
+  });
+
   it("does not complete a turn whose playout the caller never heard", async () => {
     const memory = createInMemoryMemory();
     const runtime = createRuntime({ memory });
