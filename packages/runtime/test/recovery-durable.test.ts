@@ -727,32 +727,36 @@ describe("R2-06 recovery and durable correctness", () => {
       ) => {
         let interruptionCheckpoint = false;
         let holdCheckpointRecovery = false;
-        const result = await originalRunSessionTransaction(sessionId, lease, async (transaction) => {
-          const instrumented = new Proxy(transaction, {
-            get(target, property, receiver) {
-              if (property === "updateTurn") {
-                return async (...args: Parameters<DurableSessionTransaction["updateTurn"]>) => {
-                  const updated = await target.updateTurn(...args);
-                  if (updated.turn.status === "interrupted") interruptionCheckpoint = true;
-                  return updated;
-                };
+        const result = await originalRunSessionTransaction(
+          sessionId,
+          lease,
+          async (transaction) => {
+            const instrumented = new Proxy(transaction, {
+              get(target, property, receiver) {
+                if (property === "updateTurn") {
+                  return async (...args: Parameters<DurableSessionTransaction["updateTurn"]>) => {
+                    const updated = await target.updateTurn(...args);
+                    if (updated.turn.status === "interrupted") interruptionCheckpoint = true;
+                    return updated;
+                  };
+                }
+                const value = Reflect.get(target, property, receiver) as unknown;
+                return typeof value === "function" ? value.bind(target) : value;
+              },
+            });
+            const value = await operation(instrumented);
+            if (interruptionCheckpoint) {
+              checkpointAttempts += 1;
+              if (checkpointAttempts <= 3) {
+                throw new BackendUnavailableError("transient checkpoint transaction outage");
               }
-              const value = Reflect.get(target, property, receiver) as unknown;
-              return typeof value === "function" ? value.bind(target) : value;
-            },
-          });
-          const value = await operation(instrumented);
-          if (interruptionCheckpoint) {
-            checkpointAttempts += 1;
-            if (checkpointAttempts <= 3) {
-              throw new BackendUnavailableError("transient checkpoint transaction outage");
+              if (checkpointAttempts === 4) {
+                holdCheckpointRecovery = true;
+              }
             }
-            if (checkpointAttempts === 4) {
-              holdCheckpointRecovery = true;
-            }
-          }
-          return value;
-        });
+            return value;
+          },
+        );
         if (holdCheckpointRecovery) {
           // Keep the checkpoint promise pending while releasing the store's
           // per-session transaction queue so the cancelled turn can finish.
