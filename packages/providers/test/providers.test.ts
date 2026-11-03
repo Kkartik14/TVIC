@@ -308,33 +308,38 @@ describe("provider utilities", () => {
     });
   });
 
-  it("rejects a Twilio stream start that does not match the authenticated call", async () => {
-    const socket = new FakeSocket();
-    const handle = new TwilioMediaStreamCallHandle({
-      socket: socket as unknown as TwilioMediaStreamSocket,
-      callId: "call_twilio_identity" as CallId,
-      sessionId: "session_twilio_identity" as SessionId,
-      expectedTwilioCallSid: "CA_expected",
-      expectedAccountSid: "AC_expected",
-    });
-    const next = handle.events[Symbol.asyncIterator]().next();
-    socket.receive(
-      JSON.stringify(
-        twilioStartFrame("MZ_identity", "1", {
-          callSid: "CA_other",
-          accountSid: "AC_expected",
-        }),
-      ),
-    );
-    await expect(next).resolves.toMatchObject({
-      value: { type: "media.error", error: { category: "media" } },
-      done: false,
-    });
-    expect(socket.readyState).toBe(WebSocket.CLOSED);
-  });
+  it.each([
+    ["call", { callSid: "CA_other", accountSid: "AC_expected" }],
+    ["account", { callSid: "CA_expected", accountSid: "AC_other" }],
+  ])(
+    "rejects a Twilio stream start that does not match the authenticated %s",
+    async (_name, identity) => {
+      const socket = new FakeSocket();
+      const handle = new TwilioMediaStreamCallHandle({
+        socket: socket as unknown as TwilioMediaStreamSocket,
+        callId: "call_twilio_identity" as CallId,
+        sessionId: "session_twilio_identity" as SessionId,
+        expectedTwilioCallSid: "CA_expected",
+        expectedAccountSid: "AC_expected",
+      });
+      const next = handle.events[Symbol.asyncIterator]().next();
+      socket.receive(JSON.stringify(twilioStartFrame("MZ_identity", "1", identity)));
+      await expect(next).resolves.toMatchObject({
+        value: { type: "media.error", error: { category: "media" } },
+        done: false,
+      });
+      expect(socket.readyState).toBe(WebSocket.CLOSED);
+    },
+  );
 
   it.each([
     ["missing start metadata", { event: "start", sequenceNumber: "1", streamSid: "MZ_bad" }],
+    ["missing account identity", twilioStartFrame("MZ_bad", "1", { accountSid: undefined })],
+    ["missing call identity", twilioStartFrame("MZ_bad", "1", { callSid: undefined })],
+    [
+      "mismatching nested stream identity",
+      twilioStartFrame("MZ_bad", "1", { streamSid: "MZ_other" }),
+    ],
     ["missing media format", twilioStartFrame("MZ_bad", "1", { mediaFormat: undefined })],
     [
       "unsupported media encoding",
@@ -355,6 +360,12 @@ describe("provider utilities", () => {
       }),
     ],
     ["missing tracks", twilioStartFrame("MZ_bad", "1", { tracks: undefined })],
+    ["invalid track", twilioStartFrame("MZ_bad", "1", { tracks: ["sideways"] })],
+    ["outbound-only track", twilioStartFrame("MZ_bad", "1", { tracks: ["outbound"] })],
+    [
+      "unidirectional multi-track stream",
+      twilioStartFrame("MZ_bad", "1", { tracks: ["inbound", "outbound"] }),
+    ],
   ])("rejects a Twilio start with %s before announcing stream start", async (_name, message) => {
     const socket = new FakeSocket();
     const handle = new TwilioMediaStreamCallHandle({
@@ -447,6 +458,7 @@ describe("provider utilities", () => {
   it.each([
     ["missing stop metadata", undefined],
     ["mismatching call identity", { accountSid: "AC123", callSid: "CA_other" }],
+    ["mismatching account identity", { accountSid: "AC_other", callSid: "CA123" }],
   ])("rejects a Twilio stop with %s instead of ending normally", async (_name, stop) => {
     const socket = new FakeSocket();
     const handle = new TwilioMediaStreamCallHandle({

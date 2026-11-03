@@ -55,21 +55,37 @@ export function validateTwilioMessage(
 
   if (event === "start") {
     const start = optionalRecord(value.start);
-    if (value.start !== undefined && !start) return "start must be an object";
-    const nestedStreamSid = start && nonEmptyString(start.streamSid);
-    if (start && start.streamSid !== undefined && !nestedStreamSid) {
+    if (!start) return "start must be an object";
+    const nestedStreamSid = nonEmptyString(start.streamSid);
+    if (!nestedStreamSid) {
       return "start.streamSid must be a non-empty string";
     }
-    if (nestedStreamSid && nestedStreamSid !== messageStreamSid) {
+    if (nestedStreamSid !== messageStreamSid) {
       return "start.streamSid does not match streamSid";
     }
-    if (start && (start.accountSid !== undefined || start.callSid !== undefined)) {
-      if (start.accountSid !== undefined && !nonEmptyString(start.accountSid)) {
-        return "start.accountSid must be a non-empty string";
-      }
-      if (start.callSid !== undefined && !nonEmptyString(start.callSid)) {
-        return "start.callSid must be a non-empty string";
-      }
+    if (!nonEmptyString(start.accountSid)) {
+      return "start.accountSid must be a non-empty string";
+    }
+    if (!nonEmptyString(start.callSid)) {
+      return "start.callSid must be a non-empty string";
+    }
+    if (
+      !Array.isArray(start.tracks) ||
+      start.tracks.length !== 1 ||
+      start.tracks[0] !== "inbound"
+    ) {
+      return "start.tracks must contain only the inbound track for a bidirectional stream";
+    }
+    const mediaFormat = optionalRecord(start.mediaFormat);
+    if (!mediaFormat) return "start.mediaFormat must be an object";
+    if (mediaFormat.encoding !== "audio/x-mulaw") {
+      return "start.mediaFormat.encoding must be audio/x-mulaw";
+    }
+    if (mediaFormat.sampleRate !== 8000) {
+      return "start.mediaFormat.sampleRate must be 8000";
+    }
+    if (mediaFormat.channels !== 1) {
+      return "start.mediaFormat.channels must be 1";
     }
     if (start?.customParameters !== undefined) {
       const parameters = optionalRecord(start.customParameters);
@@ -96,7 +112,8 @@ export function validateTwilioMessage(
 
   if (event === "dtmf") {
     const dtmf = optionalRecord(value.dtmf);
-    if (!dtmf || !isDtmfDigit(typeof dtmf.digit === "string" ? dtmf.digit : undefined)) {
+    if (!dtmf || dtmf.track !== "inbound") return "dtmf.track must be inbound";
+    if (!isDtmfDigit(typeof dtmf.digit === "string" ? dtmf.digit : undefined)) {
       return "dtmf.digit is invalid";
     }
     return null;
@@ -109,9 +126,12 @@ export function validateTwilioMessage(
   }
 
   const stop = optionalRecord(value.stop);
-  if (value.stop !== undefined && !stop) return "stop must be an object";
-  if (stop?.callSid !== undefined && !nonEmptyString(stop.callSid)) {
+  if (!stop) return "stop must be an object";
+  if (!nonEmptyString(stop.callSid)) {
     return "stop.callSid must be a non-empty string";
+  }
+  if (!nonEmptyString(stop.accountSid)) {
+    return "stop.accountSid must be a non-empty string";
   }
   return null;
 }
