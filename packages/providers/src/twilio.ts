@@ -102,7 +102,7 @@ type TwilioInboundMessage =
       readonly sequenceNumber?: string;
       readonly streamSid: string;
       readonly media?: {
-        readonly track?: "inbound" | "outbound";
+        readonly track?: "inbound";
         readonly chunk?: string;
         readonly timestamp?: string;
         readonly payload?: string;
@@ -183,6 +183,8 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   #twilioCallSid: string | null = null;
   #accountSid: string | null = null;
   #lastSequenceNumber: number | null = null;
+  #lastMediaChunk: number | null = null;
+  #lastMediaTimestamp: number | null = null;
   #closed = false;
   #closeNotified = false;
 
@@ -316,13 +318,24 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
       return;
     }
 
-    const protocolError = validateTwilioMessage(parsed, this.#streamSid, this.#lastSequenceNumber);
+    const protocolError = validateTwilioMessage(
+      parsed,
+      this.#streamSid,
+      this.#lastSequenceNumber,
+      this.#lastMediaChunk,
+      this.#lastMediaTimestamp,
+    );
     if (protocolError) {
       this.#failProtocol(protocolError);
       return;
     }
     if (parsed.event !== "connected") {
       this.#lastSequenceNumber = Number(parsed.sequenceNumber);
+    }
+    if (parsed.event === "media") {
+      const media = parsed.media as Readonly<Record<string, unknown>>;
+      this.#lastMediaChunk = Number(media.chunk);
+      this.#lastMediaTimestamp = Number(media.timestamp);
     }
 
     this.#handleMessage(parsed as TwilioInboundMessage);
