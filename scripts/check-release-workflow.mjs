@@ -6,6 +6,11 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const workflow = await readFile(path.join(repositoryRoot, ".github/workflows/release.yml"), "utf8");
 const ciWorkflow = await readFile(path.join(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
 const compose = await readFile(path.join(repositoryRoot, "docker-compose.integration.yml"), "utf8");
+const packageJson = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8"));
+const selector = await readFile(
+  path.join(repositoryRoot, "scripts/release-check-selector.mjs"),
+  "utf8",
+);
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -81,8 +86,36 @@ assert(
   "release does not compare tag and main SHAs",
 );
 assert(
-  /check-runs\?filter=latest&per_page=100/u.test(sourceVerification),
-  "release does not query the exact required CI check run",
+  /check-runs\?check_name=Merge%20Gate&app_id=15368&filter=all&per_page=100/u.test(
+    sourceVerification,
+  ),
+  "release does not request every Merge Gate run from the expected GitHub Actions app",
+);
+assert(
+  /node scripts\/release-check-selector\.mjs "\$CHECKS_JSON" "\$TAG_SHA"/u.test(sourceVerification),
+  "release does not run the tested release check selector against the tag SHA",
+);
+assert(
+  !/check-runs\?filter=latest/u.test(sourceVerification),
+  "release relies on GitHub's default latest-check filtering",
+);
+assert(
+  /check\?\.name === REQUIRED_CHECK_NAME/u.test(selector) &&
+    /check\?\.head_sha === expectedSha/u.test(selector) &&
+    /check\?\.app\?\.id === REQUIRED_APP_ID/u.test(selector) &&
+    /REQUIRED_APP_ID = 15368/u.test(selector),
+  "release selector does not require the exact check name, SHA, and GitHub Actions app ID",
+);
+assert(
+  /check\.id > latest\.id/u.test(selector) &&
+    /selectedRun\?\.status === "completed"/u.test(selector) &&
+    /selectedRun\.conclusion === "success"/u.test(selector),
+  "release selector does not choose the greatest run ID and require its successful completion",
+);
+assert(
+  /export function runFixture/u.test(selector) &&
+    /newer failure must not be masked by an older successful run/u.test(selector),
+  "release selector is missing the regression fixture for a newer failed run",
 );
 const verifyJobStart = ciWorkflow.search(/^  verify:\s*$/mu);
 assert(verifyJobStart >= 0, "CI workflow is missing the verify job");
@@ -92,26 +125,29 @@ const verifyJobBlock = nextJob < 0 ? verifyJob : verifyJob.slice(0, nextJob + 1)
 const ciCheckNameMatch = /^    name:\s*(.*?)\s*$/mu.exec(verifyJobBlock);
 const ciCheckName = ciCheckNameMatch?.[1]?.replace(/^(?:"([^"]+)"|'([^']+)')$/u, "$1$2");
 assert(ciCheckName, "CI verify job has no static check display name");
-const releaseCheckNameMatch = /const requiredCheckName = ["']([^"']+)["'];/u.exec(
-  sourceVerification,
-);
-assert(releaseCheckNameMatch, "release does not declare its required CI check name");
+const releaseCheckNameMatch = /REQUIRED_CHECK_NAME = ["']([^"']+)["']/u.exec(selector);
+assert(releaseCheckNameMatch, "release selector does not declare its required CI check name");
 assert(
   releaseCheckNameMatch[1] === ciCheckName,
   `release check name ${releaseCheckNameMatch[1]} does not match CI verify job name ${ciCheckName}`,
 );
+const lintJobStart = ciWorkflow.search(/^  lint:\s*$/mu);
+assert(lintJobStart >= 0, "CI workflow is missing the lint job");
+const lintJob = ciWorkflow.slice(lintJobStart);
+const nextLintJob = lintJob.slice(1).search(/^  [a-z0-9_-]+:\s*$/mu);
+const lintJobBlock = nextLintJob < 0 ? lintJob : lintJob.slice(0, nextLintJob + 1);
 assert(
-  /check\.name === requiredCheckName\s*&&\s*check\.head_sha === sha/u.test(sourceVerification),
-  "release does not match the required CI check name and exact head SHA",
+  /pnpm check:release-selector/u.test(lintJobBlock),
+  "CI lint does not run release selector fixtures",
 );
 assert(
-  /check\.app\?\.slug === "github-actions"/u.test(sourceVerification),
-  "release does not require the required check to come from GitHub Actions",
+  /pnpm check:release-workflow/u.test(lintJobBlock),
+  "CI lint does not run release workflow checks",
 );
 assert(
-  /requiredGate\.status !== "completed"/u.test(sourceVerification) &&
-    /requiredGate\.conclusion !== "success"/u.test(sourceVerification),
-  "release does not require the CI check to complete successfully",
+  packageJson.scripts?.["check:release-selector"] ===
+    "node scripts/release-check-selector.mjs --fixture",
+  "release selector fixture command is missing from package scripts",
 );
 assert(
   /path:\s*\$\{\{\s*runner\.temp\s*\}\}\/voice-runtime-artifact/u.test(workflow),

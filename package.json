@@ -27,6 +27,7 @@
     "check:local-integration-targets": "node scripts/check-local-durable-integration-targets.mjs",
     "check:ci-gates": "node scripts/check-ci-gates.mjs --fixture",
     "check:release-workflow": "node scripts/check-release-workflow.mjs",
+    "check:release-selector": "node scripts/release-check-selector.mjs --fixture",
     "check:migrations": "node scripts/generate-migration-bundles.mjs --check",
     "dual-protocol:stress": "node scripts/run-dual-protocol-stress.mjs",
     "stt:smoke": "tsx scripts/stt-provider-smoke.ts",
