@@ -1314,7 +1314,11 @@ export class PipelineVoiceLoop {
   }
 
   async #handleTranscript(transcript: string, timing: UtteranceTiming): Promise<void> {
-    if (this.#persistenceDegraded || !(await this.#persistenceGate)) {
+    if (
+      this.#nonCheckpointPersistenceDegraded ||
+      !(await this.#persistenceGate) ||
+      this.#persistenceDegraded
+    ) {
       const failure = internalError(
         "durable.write.failure",
         "Turn dropped: persistence is degraded or the interruption checkpoint failed",

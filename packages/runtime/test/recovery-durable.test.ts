@@ -5,7 +5,9 @@ import { LeaseLostError } from "@tvic/core";
 import type {
   AgentId,
   Clock,
+  DurableSessionTransaction,
   Runtime,
+  SessionLease,
   SessionId,
   StoredSessionRecord,
   Timestamp,
@@ -703,15 +705,7 @@ describe("R2-06 recovery and durable correctness", () => {
     "recovers transcript admission after checkpoint recovery when $scenario",
     async ({ failIndependentWrite, expectedHealth }) => {
       const health: boolean[] = [];
-      const runtime = createRuntime();
-      await runtime.start();
-      const agent = buildAgent({
-        interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
-      });
-      const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
-      const session = attachment.session;
-      const call = makeCallHandle();
-      const stt = makeStt();
+      const durableStore = createInMemoryDurableRuntimeStore();
       let checkpointAttempts = 0;
       let resolveCheckpointRecoveryStarted!: () => void;
       const checkpointRecoveryStarted = new Promise<void>((resolve) => {
@@ -721,29 +715,67 @@ describe("R2-06 recovery and durable correctness", () => {
       const checkpointRecoveryAllowed = new Promise<void>((resolve) => {
         allowCheckpointRecovery = resolve;
       });
-      let resolveCheckpointRecovery!: () => void;
-      const checkpointRecovered = new Promise<void>((resolve) => {
-        resolveCheckpointRecovery = resolve;
+      let resolveCheckpointRecoveryFinished!: () => void;
+      const checkpointRecoveryFinished = new Promise<void>((resolve) => {
+        resolveCheckpointRecoveryFinished = resolve;
       });
+      const originalRunSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+      durableStore.runSessionTransaction = async <T>(
+        sessionId: SessionId,
+        lease: SessionLease,
+        operation: (transaction: DurableSessionTransaction) => Promise<T>,
+      ) => {
+        let interruptionCheckpoint = false;
+        let holdCheckpointRecovery = false;
+        const result = await originalRunSessionTransaction(sessionId, lease, async (transaction) => {
+          const instrumented = new Proxy(transaction, {
+            get(target, property, receiver) {
+              if (property === "updateTurn") {
+                return async (...args: Parameters<DurableSessionTransaction["updateTurn"]>) => {
+                  const updated = await target.updateTurn(...args);
+                  if (updated.turn.status === "interrupted") interruptionCheckpoint = true;
+                  return updated;
+                };
+              }
+              const value = Reflect.get(target, property, receiver) as unknown;
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+          const value = await operation(instrumented);
+          if (interruptionCheckpoint) {
+            checkpointAttempts += 1;
+            if (checkpointAttempts <= 3) {
+              throw new BackendUnavailableError("transient checkpoint transaction outage");
+            }
+            if (checkpointAttempts === 4) {
+              holdCheckpointRecovery = true;
+            }
+          }
+          return value;
+        });
+        if (holdCheckpointRecovery) {
+          // Keep the checkpoint promise pending while releasing the store's
+          // per-session transaction queue so the cancelled turn can finish.
+          resolveCheckpointRecoveryStarted();
+          await checkpointRecoveryAllowed;
+          resolveCheckpointRecoveryFinished();
+        }
+        return result;
+      };
+      const runtime = createRuntime({ durableStore });
+      await runtime.start();
+      const agent = buildAgent({
+        interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+      });
+      const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+      const session = attachment.session;
+      const call = makeCallHandle();
+      const stt = makeStt();
       const runtimeWithProbe = runtime as Runtime & {
-        checkpointTurnInterruption: Runtime["checkpointTurnInterruption"];
         endTurn: Runtime["endTurn"];
         setPersistenceHealth: Runtime["setPersistenceHealth"];
       };
-      const originalCheckpoint = runtimeWithProbe.checkpointTurnInterruption.bind(runtime);
       const originalSetPersistenceHealth = runtimeWithProbe.setPersistenceHealth.bind(runtime);
-      runtimeWithProbe.checkpointTurnInterruption = async (...args) => {
-        checkpointAttempts += 1;
-        if (checkpointAttempts <= 3)
-          throw new BackendUnavailableError("transient checkpoint outage");
-        if (checkpointAttempts === 4) {
-          resolveCheckpointRecoveryStarted();
-          await checkpointRecoveryAllowed;
-        }
-        const result = await originalCheckpoint(...args);
-        if (checkpointAttempts === 4) resolveCheckpointRecovery();
-        return result;
-      };
       runtimeWithProbe.setPersistenceHealth = (sessionId, degraded) => {
         health.push(degraded);
         originalSetPersistenceHealth(sessionId, degraded);
@@ -840,16 +872,49 @@ describe("R2-06 recovery and durable correctness", () => {
           "first audio",
         );
         stt.pushSpeechStarted(session.id);
-        await Promise.all([checkpointRecoveryStarted, ttsCancellationStarted]);
+        await Promise.all([
+          until(() => checkpointAttempts === 4, "fourth checkpoint transaction"),
+          ttsCancellationStarted,
+        ]);
         releaseTtsCancellation();
         await until(
           () => !failIndependentWrite || independentWriteFailed,
           "independent terminal write failure",
         );
+        await until(
+          () => attachment.health === "persistence_degraded",
+          "checkpoint degradation during recovery grace",
+        );
+        await checkpointRecoveryStarted;
         await interruptedTurnPersisted;
-        allowCheckpointRecovery();
-        await checkpointRecovered;
+        await until(
+          () => seen.some((event) => event.kind === "turn_completed"),
+          "interrupted turn completion event",
+        );
+        const deliveredBeforeSecondFinal = stt.deliveredEvents;
         stt.pushFinal(session.id, "second turn");
+        await until(
+          () => stt.deliveredEvents >= deliveredBeforeSecondFinal + 2,
+          "barge-in final consumed during checkpoint recovery",
+        );
+        if (!failIndependentWrite) {
+          // Let the transcript callback run while the checkpoint promise is
+          // deliberately held. The checkpoint-only failure must wait at the
+          // persistence gate instead of dropping this final.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(
+            seen.some(
+              (event) => event.kind === "error" && event.error.code === "durable.write.failure",
+            ),
+          ).toBe(false);
+        }
+        expect(llmCalls).toBe(1);
+        allowCheckpointRecovery();
+        await checkpointRecoveryFinished;
+        if (!failIndependentWrite) {
+          await until(() => attachment.health === "healthy", "checkpoint health recovery");
+          await until(() => llmCalls === 2, "second turn after checkpoint recovery");
+        }
 
         let timeout: ReturnType<typeof setTimeout> | undefined;
         const resumed = await Promise.race([
