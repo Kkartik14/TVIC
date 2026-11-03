@@ -1528,7 +1528,8 @@ export class PipelineVoiceLoop {
               cancelledByBargeIn,
             })
           : undefined;
-      const acceptedAfterTerminalShutdown = textDelivered === true && this.#hasTerminalShutdown();
+      const acceptedAfterTerminalShutdown =
+        textDelivered === true && !audioDelivered && this.#hasTerminalShutdown();
       control.outputDelivered = audioDelivered || textDelivered === true;
       latency.totalMs = this.#durationSince(startedAtMs);
 
