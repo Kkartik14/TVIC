@@ -5590,6 +5590,75 @@ describe("PipelineVoiceLoop", () => {
     expect(result.terminalReason).toBe("remote_hangup");
   });
 
+  it("does not complete or memorize text delivery that settles after explicit cancellation", async () => {
+    const memory = createInMemoryMemory();
+    const runtime = createRuntime({ memory });
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const cancellation = new AbortController();
+    const assistantTextRecords: AssistantTextRecord[] = [];
+    let announceDeliveryStarted!: () => void;
+    let releaseDelivery!: (delivered: boolean) => void;
+    const deliveryStarted = new Promise<void>((resolve) => {
+      announceDeliveryStarted = resolve;
+    });
+    const callHandle: CallHandle = {
+      ...call.handle,
+      async deliverText(): Promise<boolean> {
+        announceDeliveryStarted();
+        return new Promise<boolean>((resolve) => {
+          releaseDelivery = resolve;
+        });
+      },
+    };
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "A cancelled answer.", toolCalls: [] }),
+    ]);
+    const baseTts = agent.providers.tts;
+    if (!baseTts) throw new Error("test requires TTS");
+    const failingTts = {
+      ...baseTts,
+      async synthesize(): Promise<never> {
+        throw new Error("speaker unavailable");
+      },
+    };
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: failingTts }),
+      callHandle,
+      llmModel: "gpt-test",
+      memory,
+      onAssistantText: (record) => assistantTextRecords.push(record),
+    });
+
+    const running = loop.run({ overrideSignal: cancellation.signal });
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "answer before explicit cancellation");
+    await deliveryStarted;
+    cancellation.abort();
+    releaseDelivery(true);
+    await expect(running).rejects.toMatchObject({ code: "call.cancelled", category: "cancelled" });
+
+    const snapshot = await runtime.inspectSession(session.id);
+    const stored = await memory.list(
+      { scope: "session", sessionId: session.id },
+      { prefix: `exchange:${session.id}:`, kind: "raw" },
+    );
+    expect(snapshot.turns[0]?.status).toBe("cancelled");
+    expect(snapshot.turns[0]?.output.delivery).toEqual({
+      audio: "not_attempted",
+      text: "transport_accepted",
+    });
+    expect(assistantTextRecords).toMatchObject([
+      { status: "cancelled", text: "A cancelled answer.", delivered: true },
+    ]);
+    expect(stored).toEqual([]);
+  });
+
   it("preserves remote terminal precedence when STT fails during input iterator cleanup", async () => {
     const runtime = createRuntime();
     await runtime.start();
