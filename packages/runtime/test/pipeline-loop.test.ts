@@ -5875,6 +5875,38 @@ describe("PipelineVoiceLoop", () => {
     expect(memoryDuringIteratorCleanup).toEqual([]);
   });
 
+  it("reports unexpected STT EOF as failure rather than remote hangup", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const result = loop.start();
+    let endedReason: string | undefined;
+    const collectingEvents = (async () => {
+      try {
+        for await (const event of result) {
+          if (event.kind === "call_ended") endedReason = event.reason;
+        }
+      } catch {}
+    })();
+
+    call.push(streamStarted(session.id));
+    stt.endStream();
+    await expect(result).rejects.toMatchObject({ code: "stt.closed_unexpectedly" });
+    await collectingEvents;
+
+    expect(endedReason).toBe("failed");
+  });
+
   it("keeps text fallback eligible after graceful completion with an ended STT stream", async () => {
     const runtime = createRuntime();
     await runtime.start();
