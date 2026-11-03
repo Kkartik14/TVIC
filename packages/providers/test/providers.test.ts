@@ -755,6 +755,44 @@ describe("provider utilities", () => {
     expect(socket.readyState).toBe(WebSocket.CLOSED);
   });
 
+  it("rejects outbound media on the inbound-only bidirectional Twilio stream", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_outbound_media" as CallId,
+      sessionId: "session_twilio_outbound_media" as SessionId,
+    });
+    const iterator = handle.events[Symbol.asyncIterator]();
+    socket.receive(JSON.stringify(twilioStartFrame("MZoutbound-media")));
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.stream.started" },
+      done: false,
+    });
+    socket.receive(
+      JSON.stringify({
+        ...twilioMediaFrame("MZoutbound-media", "2", "1", "20"),
+        media: {
+          track: "outbound",
+          chunk: "1",
+          timestamp: "20",
+          payload: bytesToBase64(new Uint8Array(160)),
+        },
+      }),
+    );
+
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    const events = [];
+    while (true) {
+      const next = await iterator.next();
+      if (next.done) break;
+      events.push(next.value);
+    }
+    expect(events.some((event) => event.type === "media.error")).toBe(true);
+    expect(
+      events.filter((event) => event.type === "media.audio.chunk").map((event) => event.sequence),
+    ).not.toContain(2);
+  });
+
   it("rejects Twilio sequence numbers with trailing line terminators", () => {
     const socket = new FakeSocket();
     new TwilioMediaStreamCallHandle({
