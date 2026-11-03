@@ -5682,6 +5682,98 @@ describe("PipelineVoiceLoop", () => {
     expect(endedReason).toBe("remote_hangup");
   });
 
+  it("keeps an audio-completed turn completed when supplemental text settles after hangup", async () => {
+    const memory = createInMemoryMemory();
+    const runtime = createRuntime({ memory });
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle({ playout: "heard" });
+    const stt = makeStt();
+    const tts = makeTts((request) => [audioChunk(request, 1), committed(request)], {
+      endStream: true,
+    });
+    let announceDeliveryStarted!: () => void;
+    let releaseDelivery!: (delivered: boolean) => void;
+    let announceInputIteratorReturn!: () => void;
+    let releaseInputIteratorReturn!: () => void;
+    const deliveryStarted = new Promise<void>((resolve) => {
+      announceDeliveryStarted = resolve;
+    });
+    const inputIteratorReturning = new Promise<void>((resolve) => {
+      announceInputIteratorReturn = resolve;
+    });
+    const inputIteratorReturnGate = new Promise<void>((resolve) => {
+      releaseInputIteratorReturn = resolve;
+    });
+    const callHandle: CallHandle = {
+      ...call.handle,
+      events: {
+        [Symbol.asyncIterator]() {
+          const iterator = call.handle.events[Symbol.asyncIterator]();
+          return {
+            next: () => iterator.next(),
+            async return() {
+              announceInputIteratorReturn();
+              await inputIteratorReturnGate;
+              if (iterator.return) return iterator.return();
+              return { done: true, value: undefined as never };
+            },
+          };
+        },
+      },
+      async deliverText(): Promise<boolean> {
+        announceDeliveryStarted();
+        return new Promise<boolean>((resolve) => {
+          releaseDelivery = resolve;
+        });
+      },
+    };
+    const llm = makeLlm((request) => [
+      llmEvent(request, 1, { type: "llm.completed", text: "An audio answer.", toolCalls: [] }),
+    ]);
+    const assistantTextRecords: AssistantTextRecord[] = [];
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle,
+      llmModel: "gpt-test",
+      textDelivery: "always",
+      memory,
+      onAssistantText: (record) => assistantTextRecords.push(record),
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    stt.pushFinal(session.id, "repeat the answer in text");
+    await deliveryStarted;
+    expect(call.sent.some((event) => event.type === "media.audio.chunk")).toBe(true);
+    call.push(streamEnded(session.id, "remote_hangup"));
+    await inputIteratorReturning;
+    releaseDelivery(true);
+    releaseInputIteratorReturn();
+    const result = await running;
+
+    const snapshot = await runtime.inspectSession(session.id);
+    const stored = await memory.list(
+      { scope: "session", sessionId: session.id },
+      { prefix: `exchange:${session.id}:`, kind: "raw" },
+    );
+    expect(result.terminalReason).toBe("remote_hangup");
+    expect(snapshot.turns[0]?.status).toBe("completed");
+    expect(snapshot.turns[0]?.output.delivery).toEqual({
+      audio: "playout_confirmed",
+      text: "transport_accepted",
+    });
+    expect(stored.map((entry) => entry.value)).toEqual([
+      { user: "repeat the answer in text", assistant: "An audio answer." },
+    ]);
+    expect(assistantTextRecords).toMatchObject([
+      { status: "completed", text: "An audio answer.", delivered: true },
+    ]);
+  });
+
   it("does not complete or memorize text delivery after unexpected STT EOF", async () => {
     const memory = createInMemoryMemory();
     const runtime = createRuntime({ memory });
