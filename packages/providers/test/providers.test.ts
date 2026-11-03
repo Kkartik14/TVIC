@@ -146,6 +146,25 @@ function twilioStopFrame(
   };
 }
 
+function twilioMediaFrame(
+  streamSid: string,
+  sequenceNumber: string,
+  chunk: string,
+  timestamp: string,
+): Readonly<Record<string, unknown>> {
+  return {
+    event: "media",
+    sequenceNumber,
+    streamSid,
+    media: {
+      track: "inbound",
+      chunk,
+      timestamp,
+      payload: bytesToBase64(new Uint8Array(160)),
+    },
+  };
+}
+
 const provider: TelephonyProvider = {
   name: "telephony-contract-provider",
   kind: "telephony",
@@ -579,6 +598,161 @@ describe("provider utilities", () => {
     });
 
     expect(readyStates).toEqual([WebSocket.CLOSED, WebSocket.CLOSED]);
+  });
+
+  it("accepts a Twilio media timestamp of zero at the stream origin", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_zero_timestamp" as CallId,
+      sessionId: "session_twilio_zero_timestamp" as SessionId,
+    });
+    const iterator = handle.events[Symbol.asyncIterator]();
+
+    socket.receive(JSON.stringify(twilioStartFrame("MZzero")));
+    socket.receive(JSON.stringify(twilioMediaFrame("MZzero", "2", "1", "0")));
+    socket.receive(JSON.stringify(twilioMediaFrame("MZzero", "3", "2", "20")));
+    socket.receive(JSON.stringify(twilioMediaFrame("MZzero", "4", "3", "40")));
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.stream.started" },
+      done: false,
+    });
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.audio.chunk", monotonicOffsetMs: 0 },
+      done: false,
+    });
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it.each([
+    ["skipped first chunk", ["3"]],
+    ["duplicate chunk", ["1", "1"]],
+    ["skipped chunk", ["1", "3"]],
+  ])("rejects Twilio media with a %s", async (_name, chunks) => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_chunk_progression" as CallId,
+      sessionId: "session_twilio_chunk_progression" as SessionId,
+    });
+    const iterator = handle.events[Symbol.asyncIterator]();
+    socket.receive(JSON.stringify(twilioStartFrame("MZchunk")));
+    await iterator.next();
+
+    for (const [index, chunk] of chunks.entries()) {
+      const sequenceNumber = String(index + 2);
+      socket.receive(
+        JSON.stringify(twilioMediaFrame("MZchunk", sequenceNumber, chunk, String(index * 20 + 20))),
+      );
+    }
+
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    const events = [];
+    while (true) {
+      const next = await iterator.next();
+      if (next.done) break;
+      events.push(next.value);
+    }
+    expect(events.some((event) => event.type === "media.error")).toBe(true);
+    expect(
+      events.filter((event) => event.type === "media.audio.chunk").map((event) => event.sequence),
+    ).not.toContain(chunks.length + 1);
+  });
+
+  it("rejects regressing Twilio media timestamps without emitting the bad audio", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_timestamp_regression" as CallId,
+      sessionId: "session_twilio_timestamp_regression" as SessionId,
+    });
+    const iterator = handle.events[Symbol.asyncIterator]();
+    socket.receive(JSON.stringify(twilioStartFrame("MZtimestamp")));
+    await iterator.next();
+
+    for (const [sequenceNumber, chunk, timestamp] of [
+      ["2", "1", "20"],
+      ["3", "2", "40"],
+      ["4", "3", "60"],
+      ["5", "4", "59"],
+    ] as const) {
+      socket.receive(
+        JSON.stringify(twilioMediaFrame("MZtimestamp", sequenceNumber, chunk, timestamp)),
+      );
+    }
+
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    const events = [];
+    while (true) {
+      const next = await iterator.next();
+      if (next.done) break;
+      events.push(next.value);
+    }
+    expect(events.some((event) => event.type === "media.error")).toBe(true);
+    expect(
+      events.filter((event) => event.type === "media.audio.chunk").map((event) => event.sequence),
+    ).not.toContain(5);
+  });
+
+  it.each([
+    ["negative", "-1"],
+    ["malformed", "not-a-timestamp"],
+    ["unsafe", "9007199254740992"],
+  ])("rejects a %s Twilio media timestamp", async (_name, timestamp) => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_bad_timestamp" as CallId,
+      sessionId: "session_twilio_bad_timestamp" as SessionId,
+    });
+    const iterator = handle.events[Symbol.asyncIterator]();
+    socket.receive(JSON.stringify(twilioStartFrame("MZbad-timestamp")));
+    await iterator.next();
+    socket.receive(JSON.stringify(twilioMediaFrame("MZbad-timestamp", "2", "1", timestamp)));
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.error", error: { category: "media" } },
+      done: false,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+  });
+
+  it("allows equal nondecreasing Twilio timestamps and DTMF between media chunks", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_equal_timestamp" as CallId,
+      sessionId: "session_twilio_equal_timestamp" as SessionId,
+    });
+    const iterator = handle.events[Symbol.asyncIterator]();
+    socket.receive(JSON.stringify(twilioStartFrame("MZequal")));
+    socket.receive(JSON.stringify(twilioMediaFrame("MZequal", "2", "1", "5")));
+    socket.receive(
+      JSON.stringify({
+        event: "dtmf",
+        sequenceNumber: "3",
+        streamSid: "MZequal",
+        dtmf: { track: "inbound", digit: "1" },
+      }),
+    );
+    socket.receive(JSON.stringify(twilioMediaFrame("MZequal", "4", "2", "5")));
+    socket.receive(JSON.stringify(twilioStopFrame("MZequal", "5")));
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.stream.started" },
+      done: false,
+    });
+    const events = [];
+    while (true) {
+      const next = await iterator.next();
+      if (next.done) break;
+      events.push(next.value);
+    }
+    expect(events.some((event) => event.type === "dtmf.received")).toBe(true);
+    expect(events.some((event) => event.type === "media.stream.ended")).toBe(true);
+    expect(events.some((event) => event.type === "media.error")).toBe(false);
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
   });
 
   it("rejects Twilio sequence numbers with trailing line terminators", () => {
