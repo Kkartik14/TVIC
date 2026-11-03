@@ -113,6 +113,39 @@ function cartesiaVoiceSnapshot(
   });
 }
 
+function twilioStartFrame(
+  streamSid: string,
+  sequenceNumber = "1",
+  startOverrides: Readonly<Record<string, unknown>> = {},
+): Readonly<Record<string, unknown>> {
+  return {
+    event: "start",
+    sequenceNumber,
+    streamSid,
+    start: {
+      streamSid,
+      accountSid: "AC123",
+      callSid: "CA123",
+      tracks: ["inbound"],
+      mediaFormat: { encoding: "audio/x-mulaw", sampleRate: 8000, channels: 1 },
+      ...startOverrides,
+    },
+  };
+}
+
+function twilioStopFrame(
+  streamSid: string,
+  sequenceNumber: string,
+  stopOverrides: Readonly<Record<string, unknown>> = {},
+): Readonly<Record<string, unknown>> {
+  return {
+    event: "stop",
+    sequenceNumber,
+    streamSid,
+    stop: { accountSid: "AC123", callSid: "CA123", ...stopOverrides },
+  };
+}
+
 const provider: TelephonyProvider = {
   name: "telephony-contract-provider",
   kind: "telephony",
@@ -286,12 +319,12 @@ describe("provider utilities", () => {
     });
     const next = handle.events[Symbol.asyncIterator]().next();
     socket.receive(
-      JSON.stringify({
-        event: "start",
-        sequenceNumber: "1",
-        streamSid: "MZ_identity",
-        start: { streamSid: "MZ_identity", callSid: "CA_other", accountSid: "AC_expected" },
-      }),
+      JSON.stringify(
+        twilioStartFrame("MZ_identity", "1", {
+          callSid: "CA_other",
+          accountSid: "AC_expected",
+        }),
+      ),
     );
     await expect(next).resolves.toMatchObject({
       value: { type: "media.error", error: { category: "media" } },
@@ -300,11 +333,152 @@ describe("provider utilities", () => {
     expect(socket.readyState).toBe(WebSocket.CLOSED);
   });
 
+  it.each([
+    ["missing start metadata", { event: "start", sequenceNumber: "1", streamSid: "MZ_bad" }],
+    ["missing media format", twilioStartFrame("MZ_bad", "1", { mediaFormat: undefined })],
+    [
+      "unsupported media encoding",
+      twilioStartFrame("MZ_bad", "1", {
+        mediaFormat: { encoding: "audio/pcm", sampleRate: 8000, channels: 1 },
+      }),
+    ],
+    [
+      "unsupported media sample rate",
+      twilioStartFrame("MZ_bad", "1", {
+        mediaFormat: { encoding: "audio/x-mulaw", sampleRate: 16000, channels: 1 },
+      }),
+    ],
+    [
+      "unsupported media channel count",
+      twilioStartFrame("MZ_bad", "1", {
+        mediaFormat: { encoding: "audio/x-mulaw", sampleRate: 8000, channels: 2 },
+      }),
+    ],
+    ["missing tracks", twilioStartFrame("MZ_bad", "1", { tracks: undefined })],
+  ])("rejects a Twilio start with %s before announcing stream start", async (_name, message) => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_bad_start" as CallId,
+      sessionId: "session_twilio_bad_start" as SessionId,
+    });
+    const iterator = handle.events[Symbol.asyncIterator]();
+
+    socket.receive(JSON.stringify(message));
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.error", error: { category: "media" } },
+      done: false,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+  });
+
+  it.each([
+    ["outbound", { track: "outbound", digit: "1" }],
+    ["missing track", { digit: "1" }],
+    ["missing nested object", undefined],
+  ])("rejects DTMF with %s track metadata", async (_name, dtmfFrame) => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_bad_dtmf" as CallId,
+      sessionId: "session_twilio_bad_dtmf" as SessionId,
+    });
+    const iterator = handle.events[Symbol.asyncIterator]();
+    socket.receive(JSON.stringify(twilioStartFrame("MZ_dtmf")));
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.stream.started" },
+      done: false,
+    });
+
+    socket.receive(
+      JSON.stringify({
+        event: "dtmf",
+        sequenceNumber: "2",
+        streamSid: "MZ_dtmf",
+        ...(dtmfFrame !== undefined ? { dtmf: dtmfFrame } : {}),
+      }),
+    );
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.error", error: { category: "media" } },
+      done: false,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+  });
+
+  it("emits valid inbound DTMF and accepts a stop matching start identity", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_valid_dtmf" as CallId,
+      sessionId: "session_twilio_valid_dtmf" as SessionId,
+    });
+    const iterator = handle.events[Symbol.asyncIterator]();
+    socket.receive(JSON.stringify(twilioStartFrame("MZ_valid")));
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.stream.started" },
+      done: false,
+    });
+
+    socket.receive(
+      JSON.stringify({
+        event: "dtmf",
+        sequenceNumber: "2",
+        streamSid: "MZ_valid",
+        dtmf: { track: "inbound", digit: "1" },
+      }),
+    );
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "dtmf.received", digit: "1" },
+      done: false,
+    });
+
+    socket.receive(JSON.stringify(twilioStopFrame("MZ_valid", "3")));
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.stream.ended", reason: "remote_hangup" },
+      done: false,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it.each([
+    ["missing stop metadata", undefined],
+    ["mismatching call identity", { accountSid: "AC123", callSid: "CA_other" }],
+  ])("rejects a Twilio stop with %s instead of ending normally", async (_name, stop) => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_bad_stop" as CallId,
+      sessionId: "session_twilio_bad_stop" as SessionId,
+    });
+    const iterator = handle.events[Symbol.asyncIterator]();
+    socket.receive(JSON.stringify(twilioStartFrame("MZ_stop")));
+    await iterator.next();
+
+    socket.receive(
+      JSON.stringify(
+        stop === undefined
+          ? { event: "stop", sequenceNumber: "2", streamSid: "MZ_stop" }
+          : { ...twilioStopFrame("MZ_stop", "2"), stop },
+      ),
+    );
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.error", error: { category: "media" } },
+      done: false,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+  });
+
   it("rejects Twilio streams whose sequence numbers do not start at one and stay contiguous", () => {
     const streams = [
-      [{ event: "start", sequenceNumber: "7", streamSid: "MZsequence" }],
+      [twilioStartFrame("MZsequence", "7")],
       [
-        { event: "start", sequenceNumber: "1", streamSid: "MZsequence" },
+        twilioStartFrame("MZsequence"),
         {
           event: "media",
           sequenceNumber: "3",
@@ -335,9 +509,7 @@ describe("provider utilities", () => {
       callId: "call_twilio_sequence_newline" as CallId,
       sessionId: "session_twilio_sequence_newline" as SessionId,
     });
-    socket.receive(
-      JSON.stringify({ event: "start", sequenceNumber: "1\n", streamSid: "MZsequence" }),
-    );
+    socket.receive(JSON.stringify(twilioStartFrame("MZsequence", "1\n")));
 
     expect(socket.readyState).toBe(WebSocket.CLOSED);
   });
@@ -349,7 +521,7 @@ describe("provider utilities", () => {
       callId: "call_twilio_output_format" as CallId,
       sessionId: "session_twilio_output_format" as SessionId,
     });
-    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZformat" }));
+    socket.receive(JSON.stringify(twilioStartFrame("MZformat")));
 
     await expect(
       handle.send(
@@ -383,14 +555,7 @@ describe("provider utilities", () => {
     });
     const iterator = handle.events[Symbol.asyncIterator]();
 
-    socket.receive(
-      JSON.stringify({
-        event: "start",
-        sequenceNumber: "1",
-        streamSid: "MZ123",
-        start: { streamSid: "MZ123", callSid: "CA123" },
-      }),
-    );
+    socket.receive(JSON.stringify(twilioStartFrame("MZ123")));
     socket.receive(
       JSON.stringify({
         event: "media",
@@ -476,7 +641,7 @@ describe("provider utilities", () => {
     });
     const iterator = handle.events[Symbol.asyncIterator]();
 
-    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZcross" }));
+    socket.receive(JSON.stringify(twilioStartFrame("MZcross")));
     for (const [sequenceNumber, chunk, timestamp] of [
       ["2", "1", "20"],
       ["3", "2", "40"],
@@ -602,7 +767,7 @@ describe("provider utilities", () => {
     });
     const firstEvent = first.events[Symbol.asyncIterator]().next();
     const secondEvent = second.events[Symbol.asyncIterator]().next();
-    const start = JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZ1" });
+    const start = JSON.stringify(twilioStartFrame("MZ1"));
     firstSocket.receive(start);
     secondSocket.receive(start);
 
@@ -620,9 +785,7 @@ describe("provider utilities", () => {
       sessionId: "session_twilio_stop" as SessionId,
     });
     const iterator = handle.events[Symbol.asyncIterator]();
-    const start = Buffer.from(
-      JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZstop" }),
-    );
+    const start = Buffer.from(JSON.stringify(twilioStartFrame("MZstop")));
     socket.receiveRaw([start.subarray(0, 8), start.subarray(8)]);
     socket.receive(
       JSON.stringify({
@@ -637,7 +800,7 @@ describe("provider utilities", () => {
         },
       }),
     );
-    socket.receive(JSON.stringify({ event: "stop", sequenceNumber: "3", streamSid: "MZstop" }));
+    socket.receive(JSON.stringify(twilioStopFrame("MZstop", "3")));
 
     await expect(iterator.next()).resolves.toMatchObject({
       value: expect.objectContaining({ type: "media.stream.started" }),
@@ -4139,7 +4302,7 @@ describe("provider utilities", () => {
       callId: "call_twilio_clear_barrier" as CallId,
       sessionId: "session_twilio_clear_barrier" as SessionId,
     });
-    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZclear" }));
+    socket.receive(JSON.stringify(twilioStartFrame("MZclear")));
 
     const first = handle.send(outputAudio());
     const second = handle.send(outputAudio());
@@ -4158,7 +4321,7 @@ describe("provider utilities", () => {
       callId: "call_twilio_clear_partial" as CallId,
       sessionId: "session_twilio_clear_partial" as SessionId,
     });
-    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZpartial" }));
+    socket.receive(JSON.stringify(twilioStartFrame("MZpartial")));
 
     await expect(handle.send(outputAudio())).resolves.toBe(true);
     await expect(handle.clear()).resolves.toBeUndefined();
@@ -4173,7 +4336,7 @@ describe("provider utilities", () => {
       callId: "call_twilio_duplicate_clear" as CallId,
       sessionId: "session_twilio_duplicate_clear" as SessionId,
     });
-    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZclear" }));
+    socket.receive(JSON.stringify(twilioStartFrame("MZclear")));
 
     const first = handle.clear();
     const queuedAudio = handle.send(outputAudio());
@@ -4191,7 +4354,7 @@ describe("provider utilities", () => {
       callId: "call_twilio_clear_then_end" as CallId,
       sessionId: "session_twilio_clear_then_end" as SessionId,
     });
-    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZclose" }));
+    socket.receive(JSON.stringify(twilioStartFrame("MZclose")));
 
     const clear = handle.clear();
     const end = handle.send(
@@ -4222,7 +4385,7 @@ describe("provider utilities", () => {
       callId: "call_twilio_partial_commit" as CallId,
       sessionId: "session_twilio_partial_commit" as SessionId,
     });
-    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZpartial" }));
+    socket.receive(JSON.stringify(twilioStartFrame("MZpartial")));
 
     await expect(handle.send(outputAudio(new Uint8Array(200)))).resolves.toBe(true);
     await expect(handle.send(committedOutput("m_partial"))).resolves.toBe(true);
@@ -4247,7 +4410,7 @@ describe("provider utilities", () => {
       callId: "call_twilio_write_failure" as CallId,
       sessionId: "session_twilio_write_failure" as SessionId,
     });
-    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZwrite" }));
+    socket.receive(JSON.stringify(twilioStartFrame("MZwrite")));
     const iterator = handle.events[Symbol.asyncIterator]();
     await iterator.next();
     const errorEvent = iterator.next();
@@ -4277,7 +4440,7 @@ describe("provider utilities", () => {
       sessionId,
       clock: fixedClock,
     });
-    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZrest" }));
+    socket.receive(JSON.stringify(twilioStartFrame("MZrest")));
 
     const pcm = Uint8Array.from({ length: 166_400 }, (_, index) => index % 251);
     const provider = new SarvamTtsRestProvider({
@@ -4340,7 +4503,7 @@ describe("provider utilities", () => {
       callId: "call_twilio_queue_bound" as CallId,
       sessionId: "session_twilio_queue_bound" as SessionId,
     });
-    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZbound" }));
+    socket.receive(JSON.stringify(twilioStartFrame("MZbound")));
 
     const sends = Array.from({ length: 256 }, () => handle.send(outputAudio()));
     const results = await Promise.all(sends);
@@ -4804,7 +4967,7 @@ describe("twilio playout confirmation", () => {
 
   it("confirms playout only on a mark ack, never on timeout", async () => {
     const { socket, handle } = makeHandle();
-    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "s" }));
+    socket.receive(JSON.stringify(twilioStartFrame("s")));
     expect(await handle.confirmPlayout("m1", 10)).toBe(false);
 
     await handle.send(outputAudio());
@@ -4825,9 +4988,7 @@ describe("twilio playout confirmation", () => {
 
   it("does not treat Twilio's clear echo as proof of playout", async () => {
     const { socket, handle } = makeHandle();
-    socket.receive(
-      JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "stream_marks" }),
-    );
+    socket.receive(JSON.stringify(twilioStartFrame("stream_marks")));
     const pending = handle.confirmPlayout("m_clear", 1000);
 
     await handle.send(outputAudio());
@@ -4853,7 +5014,7 @@ describe("twilio playout confirmation", () => {
 
   it("invalidates a commit mark when an outbound write is undelivered", async () => {
     const { socket, handle } = makeHandle();
-    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "stream" }));
+    socket.receive(JSON.stringify(twilioStartFrame("stream")));
     socket.readyState = WebSocket.CLOSING;
 
     await expect(handle.send(outputAudio())).resolves.toBe(true);
@@ -4865,7 +5026,7 @@ describe("twilio playout confirmation", () => {
     vi.useFakeTimers();
     try {
       const { socket, handle } = makeHandle();
-      socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "stream" }));
+      socket.receive(JSON.stringify(twilioStartFrame("stream")));
 
       await handle.send(outputAudio());
       await expect(handle.send(committedOutput("m_old"))).resolves.toBe(true);
@@ -4895,7 +5056,7 @@ describe("twilio playout confirmation", () => {
     vi.useFakeTimers();
     try {
       const { socket, handle } = makeHandle();
-      socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "stream" }));
+      socket.receive(JSON.stringify(twilioStartFrame("stream")));
 
       await handle.send(outputAudio());
       await expect(handle.send(committedOutput("m_late"))).resolves.toBe(true);
@@ -4933,7 +5094,7 @@ describe("twilio playout confirmation", () => {
 
   it("fails closed when unacknowledged playout marks reach their bound", async () => {
     const { socket, handle } = makeHandle();
-    socket.receive(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "stream" }));
+    socket.receive(JSON.stringify(twilioStartFrame("stream")));
 
     for (let index = 0; index < 128; index += 1) {
       await handle.send(outputAudio());
