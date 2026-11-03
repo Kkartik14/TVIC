@@ -25,7 +25,10 @@ class AmbiguousAgentContextHandoff extends Error {
 
 export interface ResilientSttAgentContextCoordinatorHost {
   readonly provider: SpeechToTextProvider;
-  readonly options: Pick<ResolvedSttReconnectOptions, "contextUpdateTimeoutMs">;
+  readonly options: Pick<
+    ResolvedSttReconnectOptions,
+    "contextUpdateTimeoutMs" | "maxBufferedCommands"
+  >;
   readonly journal: SttJournalEntry[];
   readonly lifecycleSignal: AbortSignal;
   readonly isAcceptingUpdates: () => boolean;
@@ -37,6 +40,7 @@ export interface ResilientSttAgentContextCoordinatorHost {
   readonly isCurrentOrOpeningGeneration: (generation: number, stream: SttStream) => boolean;
   readonly compactJournal: (nowMs: number) => void;
   readonly hasCommandCapacity: () => boolean;
+  readonly bufferedCommandCount: () => number;
   readonly signalWork: () => void;
   readonly notifyProgress: () => void;
   readonly failTerminal: (error: unknown) => void;
@@ -150,7 +154,13 @@ export class ResilientSttAgentContextCoordinator {
       return pending.waiter.promise;
     }
     if (!this.#host.hasCommandCapacity()) {
-      const error = TvicThrowableError.from(bufferOverflowError());
+      const error = TvicThrowableError.from(
+        bufferOverflowError(
+          "entries",
+          this.#host.options.maxBufferedCommands,
+          this.#host.bufferedCommandCount() + 1,
+        ),
+      );
       this.#host.failTerminal(error);
       return Promise.reject(error);
     }

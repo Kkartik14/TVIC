@@ -29,17 +29,16 @@ export interface SttReconnectOptions {
   readonly uncertainWindowMs?: number;
   /**
    * Maximum bytes retained for replay and pending audio. The default is derived
-   * from the requested audio format, the replay and recovery windows, and one
-   * input frame of headroom. Set this explicitly for a smaller fail-fast budget
-   * or when the derived default ceiling is insufficient.
+   * from the requested audio format and `2 * uncertainWindowMs + maxRecoveryDurationMs`
+   * plus one input frame of headroom, up to a 16 MiB default ceiling. Set this
+   * explicitly for a smaller fail-fast budget or when that ceiling is insufficient.
    */
   readonly maxBufferedBytes?: number;
   /**
-   * Maximum journal entries. The default is derived from the replay and recovery
-   * windows and the format's frameDurationMs (or an assumed 10 ms when
-   * unspecified), plus control-command headroom. The sizing assumes each audio
-   * entry is at least that long; shorter actual frames can reach this bound
-   * before the time windows expire.
+   * Maximum journal entries. The default is derived from `2 * uncertainWindowMs +
+   * maxRecoveryDurationMs`, the format's frameDurationMs (or an assumed 10 ms
+   * when unspecified), and control-command headroom, up to an 8,192-entry ceiling.
+   * Shorter actual frames can reach this bound before the time windows expire.
    */
   readonly maxBufferedCommands?: number;
   readonly sendTimeoutMs?: number;

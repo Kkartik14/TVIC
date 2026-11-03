@@ -56,14 +56,29 @@ describe("withSttReconnect", () => {
       frameDurationMs: 20,
     });
 
-    expect(sixteenKhz.maxBufferedBytes).toBe(1_280_640);
-    expect(eightKhz.maxBufferedBytes).toBe(640_320);
-    expect(sixteenKhz.maxBufferedCommands).toBe(4_018);
-    expect(eightKhz.maxBufferedCommands).toBe(4_018);
-    expect(declaredTwentyMsFrames.maxBufferedCommands).toBe(2_017);
-    expect(() =>
-      resolveStreamOptions(resolveOptions({ maxRecoveryDurationMs: 200_000 }), PCM16_16K_MONO),
-    ).toThrow("set maxBufferedCommands explicitly");
+    expect(sixteenKhz.maxBufferedBytes).toBe(1_600_640);
+    expect(eightKhz.maxBufferedBytes).toBe(800_320);
+    expect(sixteenKhz.maxBufferedCommands).toBe(5_018);
+    expect(eightKhz.maxBufferedCommands).toBe(5_018);
+    expect(declaredTwentyMsFrames.maxBufferedCommands).toBe(2_517);
+
+    const largerRecoveryWindow = resolveStreamOptions(
+      resolveOptions({ maxRecoveryDurationMs: 200_000 }),
+      PCM16_16K_MONO,
+    );
+    const beyondBothCeilings = resolveStreamOptions(
+      resolveOptions({ uncertainWindowMs: 1_000_000 }),
+      PCM16_16K_MONO,
+    );
+    expect(largerRecoveryWindow.maxBufferedCommands).toBe(8_192);
+    expect(beyondBothCeilings.maxBufferedBytes).toBe(16 * 1024 * 1024);
+    expect(beyondBothCeilings.maxBufferedCommands).toBe(8_192);
+    expect(() => resolveOptions({ maxBufferedBytes: 0 })).toThrow(
+      "maxBufferedBytes must be an integer >= 1",
+    );
+    expect(() => resolveOptions({ maxBufferedCommands: 1.5 })).toThrow(
+      "maxBufferedCommands must be an integer >= 1",
+    );
   });
 
   it("normalizes arbitrary custom-provider open failures at the public boundary", async () => {
@@ -88,6 +103,17 @@ describe("withSttReconnect", () => {
       code: STT_ERROR_CODES.protocolError,
       message: "custom provider exploded",
     });
+  });
+
+  it("clamps oversized derived limits when opening a stream", async () => {
+    const fake = makeProvider();
+    const stream = await withSttReconnect(fake.provider, {
+      uncertainWindowMs: 1_000_000,
+      maxRecoveryDurationMs: 200_000,
+    }).open(openRequest());
+
+    expect(fake.streams).toHaveLength(1);
+    await stream.close();
   });
 
   it("replays ordered audio and commit barriers after a retriable generation failure", async () => {
@@ -172,7 +198,66 @@ describe("withSttReconnect", () => {
     }
   });
 
-  it("fails visibly when shorter chunks reach the default command bound early", async () => {
+  it("retains the replay tail while another uncertain window arrives after a long reopen", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(0);
+
+    const fake = makeProvider({ blockReconnectOpen: true });
+    const stream = await withSttReconnect(fake.provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      connectTimeoutMs: 30_000,
+      maxRecoveryDurationMs: 30_000,
+      stableUptimeMs: 5_000,
+    }).open(openRequest());
+    const first = fake.streams[0]!;
+
+    try {
+      for (let index = 1; index <= 500; index += 1) {
+        await stream.sendAudio(audioChunk(index, 640, 20));
+      }
+      await waitFor(() => first.order.length === 500);
+      vi.setSystemTime(10_000);
+
+      first.events.fail(
+        providerError("stt.transport.write_failed", "generation failed", {
+          provider: fake.provider.name,
+          retriable: true,
+        }),
+      );
+      await waitFor(() => getSttRecoveryControl(stream)?.state() === "recovering");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      vi.advanceTimersByTime(0);
+      await waitFor(() => fake.openCalls === 2);
+
+      for (let index = 501; index <= 1_650; index += 1) {
+        await stream.sendAudio(audioChunk(index, 640, 20));
+      }
+      vi.setSystemTime(33_000);
+
+      fake.releaseReconnectOpen();
+      await waitFor(() => fake.streams.length === 2);
+      await waitFor(() => getSttRecoveryControl(stream)?.state() === "probationary");
+
+      for (let index = 1_651; index <= 2_150; index += 1) {
+        await stream.sendAudio(audioChunk(index, 640, 20));
+        vi.advanceTimersByTime(20);
+      }
+
+      await waitFor(() => fake.streams[1]?.order.length === 2_150);
+      await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
+      expect(getSttRecoveryControl(stream)?.state()).toBe("healthy");
+    } finally {
+      fake.releaseReconnectOpen();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      vi.advanceTimersByTime(0);
+      vi.useRealTimers();
+      await stream.close();
+    }
+  });
+
+  it("fails visibly when shorter chunks reach the derived command bound early", async () => {
     const fake = makeProvider({ blockReconnectOpen: true });
     const stream = await withSttReconnect(fake.provider, {
       jitter: false,
@@ -196,12 +281,13 @@ describe("withSttReconnect", () => {
       await waitFor(() => getSttRecoveryControl(stream)?.state() === "recovering");
       await waitFor(() => fake.openCalls === 2);
 
-      for (let index = 1_001; index <= 4_018; index += 1) {
+      for (let index = 1_001; index <= 5_018; index += 1) {
         await stream.sendAudio(audioChunk(index, 160, 5));
       }
 
-      await expect(stream.sendAudio(audioChunk(4_019, 160, 5))).rejects.toMatchObject({
+      await expect(stream.sendAudio(audioChunk(5_019, 160, 5))).rejects.toMatchObject({
         code: "stt.reconnect.buffer_overflow",
+        metadata: { limit: "entries", configured: 5_018, observed: 5_019 },
       });
       expect(getSttRecoveryControl(stream)?.state()).toBe("failed");
     } finally {
@@ -211,11 +297,31 @@ describe("withSttReconnect", () => {
   });
 
   it.each([
-    { limit: "byte", maxBufferedBytes: 1_280, maxBufferedCommands: 8 },
-    { limit: "command", maxBufferedBytes: 12_800, maxBufferedCommands: 2 },
+    {
+      limit: "byte",
+      maxBufferedBytes: 1_280,
+      maxBufferedCommands: 8,
+      expectedLimit: "bytes",
+      expectedConfigured: 1_280,
+      expectedObserved: 1_920,
+    },
+    {
+      limit: "command",
+      maxBufferedBytes: 12_800,
+      maxBufferedCommands: 2,
+      expectedLimit: "entries",
+      expectedConfigured: 2,
+      expectedObserved: 3,
+    },
   ])(
     "keeps concurrent audio admission within the $limit limit",
-    async ({ maxBufferedBytes, maxBufferedCommands }) => {
+    async ({
+      maxBufferedBytes,
+      maxBufferedCommands,
+      expectedLimit,
+      expectedConfigured,
+      expectedObserved,
+    }) => {
       const fake = makeProvider({ blockInitialAudio: true });
       const stream = await withSttReconnect(fake.provider, {
         jitter: false,
@@ -240,6 +346,15 @@ describe("withSttReconnect", () => {
         expect(
           rejected.filter((error) => error?.code === "stt.reconnect.buffer_overflow"),
         ).toHaveLength(1);
+        expect(
+          rejected.find((error) => error?.code === "stt.reconnect.buffer_overflow"),
+        ).toMatchObject({
+          metadata: {
+            limit: expectedLimit,
+            configured: expectedConfigured,
+            observed: expectedObserved,
+          },
+        });
         expect(rejected.filter((error) => error?.code === "stt.reconnect.closed")).toHaveLength(7);
       } finally {
         fake.releaseReconnectAudio();
@@ -1489,9 +1604,9 @@ function endpointTranscript(): TranscriptEvent {
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = performance.now() + timeoutMs;
   while (!predicate()) {
-    if (Date.now() >= deadline) {
+    if (performance.now() >= deadline) {
       throw new Error("timed out waiting for resilient STT state");
     }
     await new Promise<void>((resolve) => setImmediate(resolve));

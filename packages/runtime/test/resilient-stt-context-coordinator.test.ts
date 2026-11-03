@@ -6,7 +6,10 @@ import type { ResolvedSttReconnectOptions } from "../src/resilient-stt-policy.js
 import { ResilientSttAgentContextCoordinator } from "../src/resilient-stt-context-coordinator.js";
 import type { SttJournalEntry } from "../src/resilient-stt-journal.js";
 
-function coordinatorFixture(updateAgentContext: SttStream["updateAgentContext"]) {
+function coordinatorFixture(
+  updateAgentContext: SttStream["updateAgentContext"],
+  maxBufferedCommands = 512,
+) {
   const journal: SttJournalEntry[] = [];
   let currentGeneration = 1;
   let closing = false;
@@ -19,11 +22,13 @@ function coordinatorFixture(updateAgentContext: SttStream["updateAgentContext"])
     async close() {},
   } as SttStream;
   const provider = { name: "context-coordinator-test-stt" } as SpeechToTextProvider;
+  const bufferedCommandCount = () =>
+    journal.filter((entry) => entry.kind !== "agent_context" || !entry.settled).length;
   const coordinator = new ResilientSttAgentContextCoordinator({
     provider,
-    options: { contextUpdateTimeoutMs: 1_000 } as Pick<
+    options: { contextUpdateTimeoutMs: 1_000, maxBufferedCommands } as Pick<
       ResolvedSttReconnectOptions,
-      "contextUpdateTimeoutMs"
+      "contextUpdateTimeoutMs" | "maxBufferedCommands"
     >,
     journal,
     lifecycleSignal: new AbortController().signal,
@@ -36,8 +41,8 @@ function coordinatorFixture(updateAgentContext: SttStream["updateAgentContext"])
     isCurrentOrOpeningGeneration: (generation, candidate) =>
       generation === currentGeneration && candidate === stream,
     compactJournal: () => undefined,
-    hasCommandCapacity: () =>
-      journal.filter((entry) => entry.kind !== "agent_context" || !entry.settled).length < 512,
+    hasCommandCapacity: () => bufferedCommandCount() < maxBufferedCommands,
+    bufferedCommandCount,
     signalWork: () => undefined,
     notifyProgress: () => undefined,
     failTerminal: (error) => {
@@ -62,6 +67,28 @@ function coordinatorFixture(updateAgentContext: SttStream["updateAgentContext"])
 }
 
 describe("ResilientSttAgentContextCoordinator", () => {
+  it("reports configured and observed entry counts when context admission overflows", () => {
+    const { coordinator, journal } = coordinatorFixture(async () => undefined, 1);
+    journal.push({
+      kind: "commit",
+      admittedAtMs: 0,
+      settled: false,
+      resolve: () => undefined,
+      reject: () => undefined,
+    });
+
+    let overflow: unknown;
+    try {
+      coordinator.update("context");
+    } catch (error) {
+      overflow = error;
+    }
+    expect(overflow).toMatchObject({
+      code: "stt.reconnect.buffer_overflow",
+      metadata: { limit: "entries", configured: 1, observed: 2 },
+    });
+  });
+
   it("serializes provider writes and settles updates in version order", async () => {
     const writes: string[] = [];
     let releaseFirst!: () => void;

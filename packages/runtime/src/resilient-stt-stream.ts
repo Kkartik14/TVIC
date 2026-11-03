@@ -156,6 +156,7 @@ export class ResilientSttStream implements SttStream {
         this.#isCurrentOrOpeningGeneration(generation, candidate),
       compactJournal: (nowMs) => this.#compactJournal(nowMs),
       hasCommandCapacity: () => this.#hasCommandCapacity(),
+      bufferedCommandCount: () => this.#bufferedCommandCount(),
       signalWork: () => this.#signalWork(),
       notifyProgress: () => this.#notifyProgress(),
       failTerminal: (error) => this.#failTerminal(error),
@@ -197,11 +198,22 @@ export class ResilientSttStream implements SttStream {
     }
     const bytes = chunk.audio.bytes.byteLength;
     this.#compactJournal(Date.now());
-    if (
-      !this.#hasCommandCapacity() ||
-      journalBytes(this.#journal) + bytes > this.#options.maxBufferedBytes
-    ) {
-      const error = TvicThrowableError.from(bufferOverflowError());
+    if (!this.#hasCommandCapacity()) {
+      const error = TvicThrowableError.from(
+        bufferOverflowError(
+          "entries",
+          this.#options.maxBufferedCommands,
+          this.#bufferedCommandCount() + 1,
+        ),
+      );
+      this.#failTerminal(error);
+      return Promise.reject(error);
+    }
+    const observedBytes = journalBytes(this.#journal) + bytes;
+    if (observedBytes > this.#options.maxBufferedBytes) {
+      const error = TvicThrowableError.from(
+        bufferOverflowError("bytes", this.#options.maxBufferedBytes, observedBytes),
+      );
       this.#failTerminal(error);
       return Promise.reject(error);
     }
@@ -227,7 +239,13 @@ export class ResilientSttStream implements SttStream {
     }
     this.#compactJournal(Date.now());
     if (!this.#hasCommandCapacity()) {
-      const error = TvicThrowableError.from(bufferOverflowError());
+      const error = TvicThrowableError.from(
+        bufferOverflowError(
+          "entries",
+          this.#options.maxBufferedCommands,
+          this.#bufferedCommandCount() + 1,
+        ),
+      );
       this.#failTerminal(error);
       return Promise.reject(error);
     }
@@ -510,7 +528,13 @@ export class ResilientSttStream implements SttStream {
       (this.#state !== "healthy" || this.#cursor < this.#replayBoundary)
     ) {
       if (this.#heldEndpoints.length >= this.#options.maxBufferedCommands) {
-        this.#failTerminal(bufferOverflowError());
+        this.#failTerminal(
+          bufferOverflowError(
+            "entries",
+            this.#options.maxBufferedCommands,
+            this.#heldEndpoints.length + 1,
+          ),
+        );
         return;
       }
       this.#heldEndpoints.push({ event: normalized, generation });
@@ -875,11 +899,15 @@ export class ResilientSttStream implements SttStream {
   }
 
   #hasCommandCapacity(): boolean {
+    return this.#bufferedCommandCount() < this.#options.maxBufferedCommands;
+  }
+
+  #bufferedCommandCount(): number {
     const journalCommands = this.#journal.filter(
       (entry) => entry.kind !== "agent_context" || !entry.settled,
     ).length;
     const detachedContextWrites = this.#agentContext.detachedPendingEntryCount();
-    return journalCommands + detachedContextWrites < this.#options.maxBufferedCommands;
+    return journalCommands + detachedContextWrites;
   }
 
   #releaseHeldEndpoints(): void {
