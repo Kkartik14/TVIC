@@ -112,7 +112,7 @@ type TwilioInboundMessage =
       readonly event: "dtmf";
       readonly sequenceNumber?: string;
       readonly streamSid: string;
-      readonly dtmf?: { readonly track: "inbound"; readonly digit: string };
+      readonly dtmf: { readonly track: "inbound"; readonly digit: string };
     }
   | {
       readonly event: "mark";

@@ -203,6 +203,8 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   `tts.selection_unsupported` provider compatibility issue code.
 - Compile the published README quick-start example as part of the public-package
   check so its loader contract and TypeScript example remain valid.
+- Validate Twilio start, stop, and DTMF envelopes before changing call state;
+  malformed nested fields fail with a specific protocol reason.
 
 ### Fixed
 

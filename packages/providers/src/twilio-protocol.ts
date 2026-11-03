@@ -87,7 +87,7 @@ export function validateTwilioMessage(
     if (mediaFormat.channels !== 1) {
       return "start.mediaFormat.channels must be 1";
     }
-    if (start?.customParameters !== undefined) {
+    if (start.customParameters !== undefined) {
       const parameters = optionalRecord(start.customParameters);
       if (!parameters || Object.values(parameters).some((item) => typeof item !== "string")) {
         return "start.customParameters must contain only string values";
