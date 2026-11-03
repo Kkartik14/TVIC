@@ -997,15 +997,17 @@ export class PipelineVoiceLoop {
     try {
       const input = await this.#sttInput.consumeInput(stt, commandController, supervisor.signal);
       endReason = input.endReason;
-      this.#runEndReason = endReason;
       streamError = input.streamError;
       mediaEnded = input.mediaEnded;
-      const source = this.#terminal.sourceForEndReason(endReason, streamError);
-      if (source !== "normal_completion") {
-        this.#terminal.offerTerminal({
-          source,
-          ...(streamError ? { error: streamError } : {}),
-        });
+      if (mediaEnded) {
+        this.#runEndReason = endReason;
+        const source = this.#terminal.sourceForEndReason(endReason, streamError);
+        if (source !== "normal_completion") {
+          this.#terminal.offerTerminal({
+            source,
+            ...(streamError ? { error: streamError } : {}),
+          });
+        }
       }
     } catch (error) {
       endReason = "media_error";
