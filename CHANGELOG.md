@@ -246,12 +246,6 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   report the error and continue the call.
 - Close the STT stream cleanly when hangup overlaps a reconnect open, and keep
   replay audio moving if a replayed context write times out.
-- Prevent text-only delivery that settles after hangup, cancellation, or STT
-  shutdown from completing the turn or writing it to memory; preserve a true
-  `delivery.text` transport receipt as `transport_accepted`, and skip text
-  delivery when terminal shutdown is already observed.
-- Report unexpected STT EOF as `call_ended.reason = failed` instead of
-  misreporting it as `remote_hangup`.
 
 ## 2.1.0
 
