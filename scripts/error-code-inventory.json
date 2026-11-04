@@ -4331,6 +4331,42 @@
       ]
     },
     {
+      "code": "voice_runtime.call_close_failed",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:normalizeUnknownError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 1405,
+          "column": 21,
+          "kind": "factory:normalizeUnknownError"
+        }
+      ]
+    },
+    {
+      "code": "voice_runtime.call_close_timeout",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": true,
+      "retryOwner": "runtime-policy",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:timeoutError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/pipeline-loop.ts",
+          "line": 1400,
+          "column": 15,
+          "kind": "factory:timeoutError"
+        }
+      ]
+    },
+    {
       "code": "voice_runtime.completion_unsupported",
       "owner": "voice-runtime",
       "status": "canonical",
