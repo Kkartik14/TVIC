@@ -102,7 +102,7 @@ type TwilioInboundMessage =
       readonly sequenceNumber?: string;
       readonly streamSid: string;
       readonly media?: {
-        readonly track?: "inbound";
+        readonly track?: "inbound" | "outbound";
         readonly chunk?: string;
         readonly timestamp?: string;
         readonly payload?: string;
@@ -141,6 +141,23 @@ interface InputMetadata {
   readonly monotonicOffsetMs: number;
   readonly twilioChunk: string | undefined;
   readonly streamSid: string;
+  readonly twilioChunkGap?: true;
+  readonly expectedChunk?: number;
+  readonly twilioTimestampRegression?: true;
+  readonly diagnosticCounts: TwilioMediaDiagnosticCounts;
+}
+
+interface TwilioMediaDiagnosticCounts {
+  readonly twilioChunkGapCount: number;
+  readonly twilioDuplicateMediaDroppedCount: number;
+  readonly twilioTimestampRegressionCount: number;
+  readonly twilioOutboundMediaDroppedCount: number;
+}
+
+interface LastInboundMediaFrame {
+  readonly chunk: number;
+  readonly timestamp: number;
+  readonly payload: string;
 }
 
 interface InputMetadataSegment {
@@ -185,6 +202,13 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   #lastSequenceNumber: number | null = null;
   #lastMediaChunk: number | null = null;
   #lastMediaTimestamp: number | null = null;
+  #lastInboundMediaFrame: LastInboundMediaFrame | undefined;
+  #mediaDiagnosticCounts: TwilioMediaDiagnosticCounts = {
+    twilioChunkGapCount: 0,
+    twilioDuplicateMediaDroppedCount: 0,
+    twilioTimestampRegressionCount: 0,
+    twilioOutboundMediaDroppedCount: 0,
+  };
   #closed = false;
   #closeNotified = false;
 
@@ -269,6 +293,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         provider: PROVIDER_NAMES.twilio,
         reason,
         durationMs: 0,
+        metadata: { ...this.#mediaDiagnosticCounts },
       }),
     );
   }
@@ -297,6 +322,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
           provider: PROVIDER_NAMES.twilio,
           reason,
           durationMs: 0,
+          metadata: { ...this.#mediaDiagnosticCounts },
         }),
       );
     }
@@ -318,13 +344,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
       return;
     }
 
-    const protocolError = validateTwilioMessage(
-      parsed,
-      this.#streamSid,
-      this.#lastSequenceNumber,
-      this.#lastMediaChunk,
-      this.#lastMediaTimestamp,
-    );
+    const protocolError = validateTwilioMessage(parsed, this.#streamSid, this.#lastSequenceNumber);
     if (protocolError) {
       this.#failProtocol(protocolError);
       return;
@@ -332,12 +352,6 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
     if (parsed.event !== "connected") {
       this.#lastSequenceNumber = Number(parsed.sequenceNumber);
     }
-    if (parsed.event === "media") {
-      const media = parsed.media as Readonly<Record<string, unknown>>;
-      this.#lastMediaChunk = Number(media.chunk);
-      this.#lastMediaTimestamp = Number(media.timestamp);
-    }
-
     this.#handleMessage(parsed as TwilioInboundMessage);
   }
 
@@ -429,19 +443,53 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   }
 
   #handleMediaMessage(message: Extract<TwilioInboundMessage, { readonly event: "media" }>): void {
-    if (this.#inputFinished || message.media?.track !== "inbound" || !message.media.payload) {
+    const media = message.media;
+    if (!media) return;
+    if (media.track === "outbound") {
+      this.#incrementMediaDiagnostic("twilioOutboundMediaDroppedCount");
+      return;
+    }
+    if (this.#inputFinished || media.track !== "inbound" || !media.payload) return;
+
+    const chunk = numericSequence(media.chunk);
+    const timestamp = numericSequence(media.timestamp);
+    const previousFrame = this.#lastInboundMediaFrame;
+    if (
+      previousFrame?.chunk === chunk &&
+      previousFrame.timestamp === timestamp &&
+      previousFrame.payload === media.payload
+    ) {
+      this.#incrementMediaDiagnostic("twilioDuplicateMediaDroppedCount");
       return;
     }
 
-    const mulaw = base64ToBytes(message.media.payload);
+    const expectedChunk = (this.#lastMediaChunk ?? 0) + 1;
+    const hasChunkGap = chunk !== expectedChunk;
+    if (hasChunkGap) this.#incrementMediaDiagnostic("twilioChunkGapCount");
+
+    const timestampRegression =
+      this.#lastMediaTimestamp !== null && timestamp < this.#lastMediaTimestamp;
+    const monotonicOffsetMs = timestampRegression
+      ? (this.#lastMediaTimestamp ?? timestamp)
+      : timestamp;
+    if (timestampRegression) this.#incrementMediaDiagnostic("twilioTimestampRegressionCount");
+
+    this.#lastMediaChunk = chunk;
+    this.#lastMediaTimestamp = monotonicOffsetMs;
+    this.#lastInboundMediaFrame = { chunk, timestamp, payload: media.payload };
+
+    const mulaw = base64ToBytes(media.payload);
     const pcm8k = mulawToPcm16le(mulaw);
     const converted = this.#inputNormalizer.push(pcm8k);
     if (converted.byteLength > 0) {
       const metadata: InputMetadata = {
         sequence: message.sequenceNumber,
-        monotonicOffsetMs: numericSequence(message.media.timestamp),
-        twilioChunk: message.media.chunk,
+        monotonicOffsetMs,
+        twilioChunk: media.chunk,
         streamSid: message.streamSid,
+        ...(hasChunkGap ? { twilioChunkGap: true as const, expectedChunk } : {}),
+        ...(timestampRegression ? { twilioTimestampRegression: true as const } : {}),
+        diagnosticCounts: this.#mediaDiagnosticCounts,
       };
       this.#lastInputMetadata = metadata;
       this.#inputMetadataSegments.push({ byteLength: converted.byteLength, metadata });
@@ -525,6 +573,13 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
       metadata: {
         twilioChunk: metadata?.twilioChunk,
         twilioStreamSid: metadata?.streamSid ?? "",
+        ...(metadata?.twilioChunkGap === true
+          ? { twilioChunkGap: true, expectedChunk: metadata.expectedChunk }
+          : {}),
+        ...(metadata?.twilioTimestampRegression === true
+          ? { twilioTimestampRegression: true }
+          : {}),
+        ...(metadata?.diagnosticCounts ?? this.#mediaDiagnosticCounts),
       },
     });
     this.#pushEvent(event);
@@ -615,6 +670,13 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
 
   #mediaEventId(kind: string, sequence?: string): MediaEventId {
     return `${this.callId}_${this.#eventIds.next()}_${kind}_${sequence ?? this.#clock.now()}` as MediaEventId;
+  }
+
+  #incrementMediaDiagnostic(key: keyof TwilioMediaDiagnosticCounts): void {
+    this.#mediaDiagnosticCounts = {
+      ...this.#mediaDiagnosticCounts,
+      [key]: this.#mediaDiagnosticCounts[key] + 1,
+    };
   }
 
   async confirmPlayout(markId: string, timeoutMs: number): Promise<boolean> {

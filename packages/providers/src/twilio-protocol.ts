@@ -15,8 +15,6 @@ export function validateTwilioMessage(
   value: Readonly<Record<string, unknown>>,
   streamSid: string | null,
   lastSequenceNumber: number | null,
-  lastMediaChunk: number | null = null,
-  lastMediaTimestamp: number | null = null,
 ): string | null {
   const event = value.event;
   if (event === "connected") {
@@ -101,20 +99,14 @@ export function validateTwilioMessage(
   if (event === "media") {
     const media = optionalRecord(value.media);
     if (!media) return "media must be an object";
-    if (media.track !== "inbound") {
-      return "media.track must be inbound for a bidirectional stream";
+    if (media.track !== "inbound" && media.track !== "outbound") {
+      return "media.track must be inbound or outbound";
     }
     const chunk = strictSequence(media.chunk);
     if (chunk === null) return "media.chunk must be a positive decimal integer";
-    if (chunk !== (lastMediaChunk ?? 0) + 1) {
-      return "media.chunk must start at 1 and remain contiguous";
-    }
     const timestamp = nonNegativeSequence(media.timestamp);
     if (timestamp === null) {
       return "media.timestamp must be a non-negative decimal integer";
-    }
-    if (lastMediaTimestamp !== null && timestamp < lastMediaTimestamp) {
-      return "media.timestamp must not regress";
     }
     if (!isCanonicalBase64(media.payload)) return "media.payload must be non-empty base64";
     return null;
