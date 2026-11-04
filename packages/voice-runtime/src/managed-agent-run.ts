@@ -8,6 +8,7 @@ export interface ManagedRunClaim {
 
 class ManagedVoiceEventIterator implements AsyncIterator<VoiceEvent>, AsyncIterable<VoiceEvent> {
   #done = false;
+  #readFailure: Promise<never> | undefined;
   readonly #raw: AsyncIterator<VoiceEvent>;
   readonly #completion: Promise<PipelineVoiceLoopResult>;
   readonly #cancel: () => void;
@@ -23,8 +24,29 @@ class ManagedVoiceEventIterator implements AsyncIterator<VoiceEvent>, AsyncItera
   }
 
   async next(...args: [] | [undefined]): Promise<IteratorResult<VoiceEvent>> {
-    if (this.#done) return { done: true, value: undefined };
-    const step = await this.#raw.next(...args);
+    if (this.#done) {
+      if (this.#readFailure) return this.#readFailure;
+      return { done: true, value: undefined };
+    }
+    let step: IteratorResult<VoiceEvent>;
+    try {
+      step = await this.#raw.next(...args);
+    } catch (iteratorError) {
+      this.#done = true;
+      this.#readFailure ??= this.#completion.then(
+        () => {
+          throw iteratorError;
+        },
+        (completionError) => {
+          throw completionError;
+        },
+      );
+      return this.#readFailure;
+    }
+    if (this.#done) {
+      if (this.#readFailure) return this.#readFailure;
+      return { done: true, value: undefined };
+    }
     if (!step.done) return step;
     this.#done = true;
     await this.#completion;
@@ -32,7 +54,10 @@ class ManagedVoiceEventIterator implements AsyncIterator<VoiceEvent>, AsyncItera
   }
 
   async return(value?: unknown): Promise<IteratorResult<VoiceEvent>> {
-    if (this.#done) return { done: true, value };
+    if (this.#done) {
+      await this.#readFailure?.catch(() => undefined);
+      return { done: true, value };
+    }
     this.#done = true;
     this.#cancel();
     try {
@@ -44,7 +69,10 @@ class ManagedVoiceEventIterator implements AsyncIterator<VoiceEvent>, AsyncItera
   }
 
   async throw(error?: unknown): Promise<IteratorResult<VoiceEvent>> {
-    if (this.#done) throw error;
+    if (this.#done) {
+      await this.#readFailure?.catch(() => undefined);
+      throw error;
+    }
     this.#done = true;
     this.#cancel();
     try {

@@ -4355,6 +4355,136 @@ describe("managed voice agent", () => {
     await expect(iterator.next()).rejects.toBe(failure);
   });
 
+  it("waits for managed completion before surfacing a rejected event read", async () => {
+    const iteratorError = new Error("event queue failed");
+    const completionError = new Error("call finalization failed");
+    let rejectCompletion!: (error: Error) => void;
+    const completion = new Promise<never>((_, reject) => {
+      rejectCompletion = reject;
+    });
+    const run = new ManagedVoiceAgentRun("iterator-order" as SessionId, {
+      claim: () => ({
+        completion,
+        iterator: {
+          async next() {
+            throw iteratorError;
+          },
+        },
+      }),
+      cancel() {},
+    });
+    const iterator = run[Symbol.asyncIterator]();
+    const runFailure = run.catch((error: unknown) => error);
+    let settled = false;
+    const observed = iterator.next().catch((error: unknown) => {
+      settled = true;
+      return error;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    rejectCompletion(completionError);
+    await expect(runFailure).resolves.toBe(completionError);
+    await expect(observed).resolves.toBe(completionError);
+  });
+
+  it("keeps subsequent reads pending while a failed read awaits managed completion", async () => {
+    const iteratorError = new Error("event queue failed");
+    const completionError = new Error("call finalization failed");
+    let rejectCompletion!: (error: Error) => void;
+    const completion = new Promise<never>((_, reject) => {
+      rejectCompletion = reject;
+    });
+    const run = new ManagedVoiceAgentRun("iterator-concurrent-order" as SessionId, {
+      claim: () => ({
+        completion,
+        iterator: {
+          async next() {
+            throw iteratorError;
+          },
+        },
+      }),
+      cancel() {},
+    });
+    const iterator = run[Symbol.asyncIterator]();
+    const first = iterator.next();
+
+    await Promise.resolve();
+    await Promise.resolve();
+    let secondSettled = false;
+    const second = iterator.next().finally(() => {
+      secondSettled = true;
+    });
+
+    await Promise.resolve();
+    expect(secondSettled).toBe(false);
+    rejectCompletion(completionError);
+    await expect(first).rejects.toBe(completionError);
+    await expect(second).rejects.toBe(completionError);
+  });
+
+  it("does not yield an in-flight event after another read fails", async () => {
+    const iteratorError = new Error("event queue failed");
+    const completionError = new Error("call finalization failed");
+    let rejectCompletion!: (error: Error) => void;
+    const completion = new Promise<never>((_, reject) => {
+      rejectCompletion = reject;
+    });
+    let rejectFirstRead!: (error: Error) => void;
+    let resolveSecondRead!: (step: IteratorResult<VoiceEvent>) => void;
+    let reads = 0;
+    const run = new ManagedVoiceAgentRun("iterator-inflight-order" as SessionId, {
+      claim: () => ({
+        completion,
+        iterator: {
+          next() {
+            reads += 1;
+            if (reads === 1) {
+              return new Promise<IteratorResult<VoiceEvent>>((_, reject) => {
+                rejectFirstRead = reject;
+              });
+            }
+            return new Promise<IteratorResult<VoiceEvent>>((resolve) => {
+              resolveSecondRead = resolve;
+            });
+          },
+        },
+      }),
+      cancel() {},
+    });
+    const iterator = run[Symbol.asyncIterator]();
+    const first = iterator.next();
+    const second = iterator.next();
+
+    rejectFirstRead(iteratorError);
+    await Promise.resolve();
+    await Promise.resolve();
+    resolveSecondRead({ done: false, value: {} as VoiceEvent });
+    rejectCompletion(completionError);
+
+    await expect(first).rejects.toBe(completionError);
+    await expect(second).rejects.toBe(completionError);
+  });
+
+  it("uses the iterator error when managed completion unexpectedly resolves", async () => {
+    const iteratorError = new Error("event queue failed");
+    const run = new ManagedVoiceAgentRun("iterator-fallback" as SessionId, {
+      claim: () => ({
+        completion: Promise.resolve({} as never),
+        iterator: {
+          async next() {
+            throw iteratorError;
+          },
+        },
+      }),
+      cancel() {},
+    });
+    const iterator = run[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).rejects.toBe(iteratorError);
+  });
+
   it("finalizes cleanly through a real WebClientAudioCallHandle after stop", async () => {
     const harness = createLifecycleHarness();
     const server = new WebSocketServer({ port: 0 });
