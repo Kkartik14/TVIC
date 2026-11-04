@@ -246,8 +246,6 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   report the error and continue the call.
 - Close the STT stream cleanly when hangup overlaps a reconnect open, and keep
   replay audio moving if a replayed context write times out.
-- Resume transcript admission after an interruption checkpoint recovers, while
-  preserving degradation from an unrelated durable write failure.
 
 ## 2.1.0
 
