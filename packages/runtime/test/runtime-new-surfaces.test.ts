@@ -229,6 +229,7 @@ describe("new runtime surfaces", () => {
     });
     await originalRuntime.start();
     const session = await originalRuntime.startSession(agent, { channel: "simulated" });
+    const interruptedByRestart = await originalRuntime.startTurn({ sessionId: session.id });
     await originalRuntime.stop();
 
     const recoveredObservations: RuntimeObservation[] = [];
@@ -244,6 +245,13 @@ describe("new runtime surfaces", () => {
     });
     await recoveringRuntime.start();
     await recoveringRuntime.attachSession(agent, session.id);
+    const recovered = await recoveringRuntime.inspectSession(session.id);
+    expect(recovered.session.state.currentTurnId).toBeUndefined();
+    expect(recovered.turns).toMatchObject([
+      { id: interruptedByRestart.id, status: "cancelled", reason: "runtime_restarted" },
+    ]);
+    const nextTurn = await recoveringRuntime.startTurn({ sessionId: session.id });
+    expect(nextTurn.status).toBe("started");
     await recoveringRuntime.stop();
 
     expect(recoveredObservations).toContainEqual(

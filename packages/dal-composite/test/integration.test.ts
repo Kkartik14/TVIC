@@ -7,6 +7,7 @@ import type {
   Agent,
   AgentProviders,
   AgentId,
+  DurableRuntimeStore,
   DurableOutboxEvent,
   ProviderCapabilities,
   SessionId,
@@ -64,6 +65,137 @@ const postgresIntegrationEnabled =
 const integrationRunId = randomUUID();
 const integrationTestId = (value: string) => `${value}_${integrationRunId}`;
 const integrationRedisPrefix = `tvic:test:composite-durability:${integrationRunId}:`;
+
+function buildSingleActiveTurnAgent(agentId: AgentId) {
+  const capabilities = {
+    streaming: { input: true, output: true, native: true },
+    cancellation: { request: true, output: true, buffer: true, truncation: true },
+    transports: ["websocket"],
+    audio: { input: [PCM16_16K_MONO], output: [PCM16_16K_MONO] },
+    tools: { functionCalling: true, parallelCalls: true },
+    playout: { clearBuffer: true, acknowledgement: true, position: true },
+  } satisfies ProviderCapabilities;
+  const providers = {
+    telephony: {
+      name: "turn-invariant-telephony",
+      kind: "telephony",
+      version: "0.1.0",
+      capabilities,
+      async dial() {
+        throw new Error("unused in turn invariant integration test");
+      },
+      async accept() {
+        throw new Error("unused in turn invariant integration test");
+      },
+      async hangup() {},
+    },
+    stt: {
+      name: "turn-invariant-stt",
+      kind: "stt",
+      version: "0.1.0",
+      capabilities,
+      async open() {
+        throw new Error("unused in turn invariant integration test");
+      },
+    },
+    llm: {
+      name: "turn-invariant-llm",
+      kind: "llm",
+      version: "0.1.0",
+      capabilities,
+      async complete() {
+        throw new Error("unused in turn invariant integration test");
+      },
+    },
+  } satisfies AgentProviders;
+  return defineAgent({
+    id: agentId,
+    name: "Single active turn integration agent",
+    instructions: "This test exercises durable turn start transactions.",
+    tools: [],
+    providers,
+    audioPolicy: { input: PCM16_16K_MONO, output: PCM16_16K_MONO },
+    memoryPolicy: { enabled: false, scopes: [] },
+  });
+}
+
+async function assertSingleActiveTurnAfterConcurrentStart(
+  durableStore: DurableRuntimeStore,
+  onSessionStarted?: (sessionId: SessionId) => void,
+): Promise<SessionId> {
+  const runtime = createRuntime({ durableStore, durableStoreOwnership: "caller" });
+  await runtime.start();
+  try {
+    const session = await runtime.startSession(
+      buildSingleActiveTurnAgent(`turn_invariant_agent_${randomUUID()}` as AgentId),
+      { channel: "simulated" },
+    );
+    onSessionStarted?.(session.id);
+    const attempts = await Promise.allSettled([
+      runtime.startTurn({ sessionId: session.id }),
+      runtime.startTurn({ sessionId: session.id }),
+    ]);
+    const started = attempts.filter((result) => result.status === "fulfilled");
+    const rejected = attempts.filter((result) => result.status === "rejected");
+    expect(started).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({
+      reason: { code: "turn.already_active", category: "validation", retriable: false },
+    });
+    const activeTurnId = (
+      started[0] as PromiseFulfilledResult<Awaited<ReturnType<typeof runtime.startTurn>>>
+    ).value.id;
+    await expect(runtime.inspectSession(session.id)).resolves.toMatchObject({
+      session: { state: { turnSequence: 1, currentTurnId: activeTurnId } },
+      turns: [{ id: activeTurnId, status: "started" }],
+    });
+    return session.id;
+  } finally {
+    await runtime.stop();
+  }
+}
+
+describe.skipIf(!redisIntegrationEnabled)("real Redis runtime turn serialization", () => {
+  it("reports one concurrent start as turn.already_active", async () => {
+    const redis = createClient({ url: process.env.REDIS_URL ?? "" });
+    await redis.connect();
+    const prefix = `tvic:test:single-active-turn:${randomUUID()}:`;
+    const store = createRedisDurableRuntimeStore(adaptRedis(redis), { prefix });
+    try {
+      await assertSingleActiveTurnAfterConcurrentStart(store);
+    } finally {
+      const keys: string[] = [];
+      for await (const key of redis.scanIterator({ MATCH: `${prefix}*`, COUNT: 100 })) {
+        keys.push(key);
+      }
+      if (keys.length > 0) await redis.del(keys);
+      await store.close();
+      await redis.quit();
+    }
+  }, 15_000);
+});
+
+describe.skipIf(!postgresIntegrationEnabled)("real PostgreSQL runtime turn serialization", () => {
+  it("reports one concurrent start as turn.already_active", async () => {
+    const pg = new Pool({ connectionString: process.env.DATABASE_URL ?? "", max: 4 });
+    const sqlPool = adaptPool(pg);
+    const store = createPostgresDurableRuntimeStore({ pool: sqlPool });
+    let sessionId: SessionId | undefined;
+    try {
+      await runPostgresMigrations(sqlPool);
+      sessionId = await assertSingleActiveTurnAfterConcurrentStart(store, (id) => {
+        sessionId = id;
+      });
+    } finally {
+      if (sessionId) {
+        await pg.query("DELETE FROM tvic_outbox WHERE session_id = $1", [sessionId]);
+        await pg.query("DELETE FROM tvic_sessions WHERE id = $1", [sessionId]);
+      }
+      await store.close();
+      await pg.end();
+    }
+  }, 15_000);
+});
 
 async function updateIdempotencyWithLeaseContext(
   pool: Pool,

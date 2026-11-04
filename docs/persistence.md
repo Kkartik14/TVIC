@@ -436,6 +436,14 @@ sequence, then update an adapter before compiling against this checkout:
 The [release guide](./releasing.md) records the required major-version decision
 for publishing these changed public contracts.
 
+Both `runSessionTransaction()` and `runUnfencedSessionTransaction()` must apply
+the callback's related record and outbox writes atomically. Transactions for one
+session must serialize, or reject a stale snapshot with `RecordConflictError`
+without committing its writes. TVIC checks existing turn records inside that
+transaction so concurrent `startTurn()` calls cannot create more than one active
+turn; a conflicting start is retried once to return `turn.already_active` when
+another request won the commit.
+
 Each `stop()` clears the timer and waits up to five seconds for its current
 poll. It returns `true` when that work has settled and `false` when it is still
 running; `false` does not cancel the poll. Keep the runtime, durable store,

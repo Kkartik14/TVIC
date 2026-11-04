@@ -3743,6 +3743,24 @@
       ]
     },
     {
+      "code": "turn.already_active",
+      "owner": "runtime",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "none",
+      "persistedReadPolicy": "accept-current-code; never use unknown persisted code for retry",
+      "observedFactories": ["factory:validationError"],
+      "sourceLocations": [
+        {
+          "file": "packages/runtime/src/runtime-turns.ts",
+          "line": 122,
+          "column": 11,
+          "kind": "factory:validationError"
+        }
+      ]
+    },
+    {
       "code": "turn.invalid_transition",
       "owner": "runtime",
       "status": "canonical",

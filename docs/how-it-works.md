@@ -57,6 +57,14 @@ assembles the conversation context, and starts the model/tool work. Turn state
 tracks whether the turn is thinking, calling a tool, speaking, completed,
 cancelled, or failed.
 
+With a transactional `durableStore`, a session has at most one active turn.
+Starting another while one is active rejects with the validation code
+`turn.already_active`. The check runs inside the session transaction, so
+concurrent starts cannot create two active turns; after the current turn reaches
+a terminal state, the next turn can start. The separate `sessionStore`,
+`turnStore`, and `toolCallStore` compatibility options do not provide this
+cross-runtime guarantee.
+
 The runtime treats these as different facts:
 
 - the provider accepted output;

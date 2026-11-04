@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createInMemorySessionStore } from "@tvic/dal";
+import { createInMemoryDurableRuntimeStore, createInMemorySessionStore } from "@tvic/dal";
 import { createRuntime, defineAgent, defineTool } from "../src/index.js";
 import { buildAgent } from "./harness.js";
 
@@ -42,6 +42,95 @@ describe("runtime lifecycle invariants", () => {
         ).rejects.toThrow();
       }
     }
+    await runtime.stop();
+  });
+
+  it("rejects a second active turn and leaves the first current turn intact", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = createRuntime({ durableStore });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    const results = await Promise.allSettled([
+      runtime.startTurn({ sessionId: session.id }),
+      runtime.startTurn({ sessionId: session.id }),
+    ]);
+    const started = results.filter((result) => result.status === "fulfilled");
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(started).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({
+      reason: {
+        code: "turn.already_active",
+        category: "validation",
+        retriable: false,
+      },
+    });
+    const first = (
+      started[0] as PromiseFulfilledResult<Awaited<ReturnType<typeof runtime.startTurn>>>
+    ).value;
+
+    await expect(runtime.startTurn({ sessionId: session.id })).rejects.toMatchObject({
+      code: "turn.already_active",
+      category: "validation",
+      retriable: false,
+    });
+    await expect(runtime.inspectSession(session.id)).resolves.toMatchObject({
+      session: { state: { turnSequence: 1, currentTurnId: first.id } },
+      turns: [{ id: first.id, status: "started" }],
+    });
+
+    await runtime.endTurn(session.id, first.id, {
+      reason: "completed",
+      output: { text: "done", mediaEventIds: [] },
+    });
+    const next = await runtime.startTurn({ sessionId: session.id });
+    expect(next.sequence).toBe(first.sequence + 1);
+    await expect(runtime.inspectSession(session.id)).resolves.toMatchObject({
+      session: { state: { currentTurnId: next.id } },
+      turns: [
+        { id: first.id, status: "completed" },
+        { id: next.id, status: "started" },
+      ],
+    });
+    await runtime.stop();
+  });
+
+  it("uses active turn records when currentTurnId is missing or stale", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = createRuntime({ durableStore });
+    await runtime.start();
+    const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+    const first = await runtime.startTurn({ sessionId: session.id });
+    await runtime.checkpointTurnInterruption(session.id, first.id, "barge_in");
+
+    await durableStore.sessions.update(session.id, (record) => {
+      const { currentTurnId: _currentTurnId, ...state } = record.session.state;
+      return { ...record, session: { ...record.session, state } };
+    });
+    await expect(runtime.startTurn({ sessionId: session.id })).rejects.toMatchObject({
+      code: "turn.already_active",
+    });
+
+    await runtime.endTurn(session.id, first.id, {
+      reason: "cancelled",
+      cancelReason: "barge_in",
+    });
+    await durableStore.sessions.update(session.id, (record) => ({
+      ...record,
+      session: {
+        ...record.session,
+        state: { ...record.session.state, currentTurnId: first.id },
+      },
+    }));
+    const next = await runtime.startTurn({ sessionId: session.id });
+    expect(next.id).not.toBe(first.id);
+    await expect(runtime.inspectSession(session.id)).resolves.toMatchObject({
+      session: { state: { currentTurnId: next.id } },
+      turns: [
+        { id: first.id, status: "cancelled" },
+        { id: next.id, status: "started" },
+      ],
+    });
     await runtime.stop();
   });
 

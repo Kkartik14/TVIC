@@ -203,11 +203,21 @@ export interface DurableRuntimeStore {
     ttlMs: number,
     initialEvent?: (lease: SessionLease) => DurableOutboxEvent,
   ): Promise<SessionLease | null>;
+  /**
+   * Apply a session's related record and outbox writes atomically. Concurrent transactions for the
+   * same session must serialize or detect stale snapshots and fail without committing them. An
+   * optimistic implementation may report a conflicting uncommitted transaction with
+   * `RecordConflictError`.
+   */
   runSessionTransaction<T>(
     sessionId: SessionId,
     lease: Pick<SessionLease, "holder" | "fence" | "generationId">,
     operation: (tx: DurableSessionTransaction) => Promise<T>,
   ): Promise<T>;
+  /**
+   * Apply an unleased session's related record and outbox writes atomically with the same
+   * per-session serialization or stale-snapshot conflict guarantee as `runSessionTransaction`.
+   */
   runUnfencedSessionTransaction?<T>(
     sessionId: SessionId,
     operation: (tx: DurableSessionTransaction) => Promise<T>,
