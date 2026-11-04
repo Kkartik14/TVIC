@@ -246,17 +246,6 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   report the error and continue the call.
 - Close the STT stream cleanly when hangup overlaps a reconnect open, and keep
   replay audio moving if a replayed context write times out.
-- Prevent default PCM16 16 kHz mono STT reconnect journals from overflowing
-  after about 10 seconds on `main`. The replay budget now covers `2U + R + frame`:
-  1,600,640 bytes and 5,018 entries by default, up from 320,000 bytes and 512
-  entries. Derived defaults clamp at 16 MiB and 8,192 entries rather than
-  rejecting otherwise-valid opens; overflow errors include the limit,
-  configured cap, and observed size. At 5 ms actual chunks with omitted frame
-  duration, the 5,018-entry default represents about 25 seconds of input; the
-  10-second uncertain window alone is about 2,000 such chunks. For 500
-  concurrent default-format calls, the byte cap allows about 800 MB of retained
-  audio in the worst case. Shorter-than-assumed chunks can still reach the entry
-  limit before the time window expires; explicit limits remain available.
 
 ## 2.1.0
 
