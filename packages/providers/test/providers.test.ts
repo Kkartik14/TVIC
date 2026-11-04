@@ -4041,6 +4041,74 @@ describe("provider utilities", () => {
     }
   });
 
+  it("fails non-retriably when malformed accumulated tool arguments reach response.completed", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(
+        sseStream([
+          {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: {
+              type: "function_call",
+              call_id: "call_completed_bad",
+              name: "lookup",
+              arguments: "",
+            },
+          },
+          {
+            type: "response.function_call_arguments.delta",
+            output_index: 0,
+            delta: "{bad",
+          },
+          {
+            type: "response.completed",
+            response: {
+              model: "gpt-4.1-2025-04-14",
+              usage: {
+                input_tokens: 14,
+                output_tokens: 6,
+                input_tokens_details: { cached_tokens: 4 },
+              },
+            },
+          },
+        ]),
+        { status: 200 },
+      );
+
+    try {
+      const provider = new OpenAiResponsesLlmProvider({ apiKey: "test" });
+      const completion = await provider.complete({
+        sessionId: "session_openai_completed_bad_tool" as SessionId,
+        turnId: "turn_openai_completed_bad_tool" as TurnId,
+        model: "gpt-test",
+        messages: [{ role: "user", content: "look this up" }],
+        stream: true,
+      });
+      const events = [];
+      for await (const event of completion.events) events.push(event);
+
+      expect(events.map((event) => event.type)).toEqual(["llm.started", "llm.failed"]);
+      expect(events.filter((event) => event.type === "llm.failed")).toHaveLength(1);
+      expect(events.at(-1)).toMatchObject({
+        type: "llm.failed",
+        providerModel: "gpt-4.1-2025-04-14",
+        usageReport: {
+          inputTokens: { status: "reported", value: 14 },
+          outputTokens: { status: "reported", value: 6 },
+          cachedTokens: { status: "reported", value: 4 },
+        },
+        error: {
+          code: PROVIDER_ERROR_CODES.openaiResponseFailed,
+          message: "OpenAI returned malformed tool call arguments",
+          retriable: false,
+        },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("fails a response that ends before a terminal event", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () =>
