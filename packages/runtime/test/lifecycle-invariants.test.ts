@@ -1,10 +1,191 @@
 import { describe, expect, it } from "vitest";
 
-import { createInMemoryDurableRuntimeStore, createInMemorySessionStore } from "@tvic/dal";
+import { createDefaultIdGenerator } from "@tvic/core";
+import type { Clock, SessionStore, TurnStore } from "@tvic/core";
+import {
+  createInMemoryDurableRuntimeStore,
+  createInMemorySessionStore,
+  createInMemoryTurnStore,
+} from "@tvic/dal";
 import { createRuntime, defineAgent, defineTool } from "../src/index.js";
 import { buildAgent } from "./harness.js";
 
+function failTurnProjectionAfterWriteOptions() {
+  const ids = createDefaultIdGenerator();
+  let failNextClockRead = false;
+  const clock: Clock = {
+    now() {
+      if (failNextClockRead) {
+        failNextClockRead = false;
+        throw new Error("injected session projection failure");
+      }
+      return "2026-11-05T00:00:00.000Z" as never;
+    },
+    monotonicMs: () => 0,
+  };
+  return {
+    clock,
+    idGenerator: {
+      ...ids,
+      turn() {
+        failNextClockRead = true;
+        return ids.turn();
+      },
+    },
+  };
+}
+
 describe("runtime lifecycle invariants", () => {
+  it("rolls back a partial turn write on the default in-memory runtime path", async () => {
+    const runtime = createRuntime(failTurnProjectionAfterWriteOptions());
+    await runtime.start();
+    try {
+      const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+
+      await expect(runtime.startTurn({ sessionId: session.id })).rejects.toThrow(
+        "injected session projection failure",
+      );
+      await expect(runtime.inspectSession(session.id)).resolves.toMatchObject({
+        session: { state: { turnSequence: 0 } },
+        turns: [],
+      });
+      const snapshot = await runtime.inspectSession(session.id);
+      expect(snapshot.session.state.currentTurnId).toBeUndefined();
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("rolls back turn and outbox writes on an explicit in-memory durableStore", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = createRuntime({ ...failTurnProjectionAfterWriteOptions(), durableStore });
+    await runtime.start();
+    try {
+      const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+
+      await expect(runtime.startTurn({ sessionId: session.id })).rejects.toThrow(
+        "injected session projection failure",
+      );
+      await expect(runtime.inspectSession(session.id)).resolves.toMatchObject({
+        session: { state: { turnSequence: 0 } },
+        turns: [],
+      });
+      expect(durableStore.outbox.filter((event) => event.aggregateType === "turn")).toEqual([]);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("pins best-effort rollback for public-interface-only stores and closes the leftover on session end", async () => {
+    const baseSessions = createInMemorySessionStore();
+    const baseTurns = createInMemoryTurnStore();
+    let failNextSessionUpdate = false;
+    const sessionStore: SessionStore = {
+      get: (id) => baseSessions.get(id),
+      list: () => baseSessions.list(),
+      put: (record) => baseSessions.put(record),
+      update: async (id, updater) => {
+        if (failNextSessionUpdate) {
+          failNextSessionUpdate = false;
+          throw new Error("injected session projection failure");
+        }
+        return baseSessions.update(id, updater);
+      },
+      close: () => baseSessions.close(),
+    };
+    const turnStore: TurnStore = {
+      get: (sessionId, id) => baseTurns.get(sessionId, id),
+      listBySession: (sessionId) => baseTurns.listBySession(sessionId),
+      put: (record) => baseTurns.put(record),
+      update: (sessionId, id, updater) => baseTurns.update(sessionId, id, updater),
+      close: () => baseTurns.close(),
+    };
+    const runtime = createRuntime({ sessionStore, turnStore });
+    await runtime.start();
+    try {
+      const session = await runtime.startSession(buildAgent(), { channel: "simulated" });
+      failNextSessionUpdate = true;
+
+      await expect(runtime.startTurn({ sessionId: session.id })).rejects.toThrow(
+        "injected session projection failure",
+      );
+      await expect(runtime.inspectSession(session.id)).resolves.toMatchObject({
+        session: { state: { turnSequence: 0 } },
+        turns: [{ sequence: 1, status: "started" }],
+      });
+      const failedStart = await runtime.inspectSession(session.id);
+      expect(failedStart.session.state.currentTurnId).toBeUndefined();
+      await expect(runtime.startTurn({ sessionId: session.id })).rejects.toMatchObject({
+        code: "turn.already_active",
+        category: "validation",
+        retriable: false,
+      });
+
+      await runtime.endSession(session.id, { reason: "completed" });
+      const ended = await runtime.inspectSession(session.id);
+      expect(ended.turns).toMatchObject([{ sequence: 1, status: "cancelled" }]);
+      expect(ended.session.state.currentTurnId).toBeUndefined();
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("closes a leftover turn during attachment recovery", async () => {
+    const baseSessions = createInMemorySessionStore();
+    const baseTurns = createInMemoryTurnStore();
+    let failNextSessionUpdate = false;
+    const sessionStore: SessionStore = {
+      get: (id) => baseSessions.get(id),
+      list: () => baseSessions.list(),
+      put: (record) => baseSessions.put(record),
+      update: async (id, updater) => {
+        if (failNextSessionUpdate) {
+          failNextSessionUpdate = false;
+          throw new Error("injected session projection failure");
+        }
+        return baseSessions.update(id, updater);
+      },
+      close: () => baseSessions.close(),
+    };
+    const turnStore: TurnStore = {
+      get: (sessionId, id) => baseTurns.get(sessionId, id),
+      listBySession: (sessionId) => baseTurns.listBySession(sessionId),
+      put: (record) => baseTurns.put(record),
+      update: (sessionId, id, updater) => baseTurns.update(sessionId, id, updater),
+      close: () => baseTurns.close(),
+    };
+    const runtime = createRuntime({ sessionStore, turnStore });
+    const agent = buildAgent();
+    await runtime.start();
+    try {
+      const session = await runtime.startSession(agent, { channel: "simulated" });
+      failNextSessionUpdate = true;
+
+      await expect(runtime.startTurn({ sessionId: session.id })).rejects.toThrow(
+        "injected session projection failure",
+      );
+      const failedStart = await runtime.inspectSession(session.id);
+      expect(failedStart.session.state.turnSequence).toBe(0);
+      expect(failedStart.session.state.currentTurnId).toBeUndefined();
+      expect(failedStart.turns).toMatchObject([{ sequence: 1, status: "started" }]);
+
+      const attachment = await runtime.attachSession(agent, session.id);
+      try {
+        expect(attachment.snapshot.turns).toMatchObject([
+          { sequence: 1, status: "cancelled", reason: "runtime_restarted" },
+        ]);
+      } finally {
+        await attachment.detach();
+      }
+      const recovered = await runtime.inspectSession(session.id);
+      expect(recovered.turns).toMatchObject([
+        { sequence: 1, status: "cancelled", reason: "runtime_restarted" },
+      ]);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
   it("session: only active accepts startTurn (interrupted/waiting_for_tool/ending throw)", async () => {
     const sessionStore = createInMemorySessionStore();
     const runtime = createRuntime({ sessionStore });

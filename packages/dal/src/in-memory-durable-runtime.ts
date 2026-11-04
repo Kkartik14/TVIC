@@ -32,8 +32,23 @@ export interface InMemoryDurableRuntimeStore extends DurableRuntimeStore {
 
 export interface InMemoryDurableRuntimeStoreOptions {
   readonly nowMs?: () => number;
+  /**
+   * @deprecated Use a transactional `DurableRuntimeStore` instead. The built-in in-memory store is
+   * transactional only when created without per-store overrides; overrides without internal
+   * restore hooks get best-effort rollback and coordination local to one Runtime instance.
+   */
   readonly sessionStore?: SessionStore;
+  /**
+   * @deprecated Use a transactional `DurableRuntimeStore` instead. The built-in in-memory store is
+   * transactional only when created without per-store overrides; overrides without internal
+   * restore hooks get best-effort rollback and coordination local to one Runtime instance.
+   */
   readonly turnStore?: TurnStore;
+  /**
+   * @deprecated Use a transactional `DurableRuntimeStore` instead. The built-in in-memory store is
+   * transactional only when created without per-store overrides; overrides without internal
+   * restore hooks get best-effort rollback and coordination local to one Runtime instance.
+   */
   readonly toolCallStore?: ToolCallStore;
 }
 
