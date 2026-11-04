@@ -556,6 +556,7 @@ export class SonioxSttStream implements SttStream {
       await Promise.race([this.#finishedPromise, delay(SONIOX_CLOSE_TIMEOUT_MS)]);
     }
 
+    if (!this.#closed) this.#flushFinalSegment();
     this.#closed = true;
     safeClose(this.#socket);
     this.#events.close();
