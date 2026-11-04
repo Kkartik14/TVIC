@@ -176,6 +176,8 @@ Read the [transport guide](./transports.md) before implementing one.
 
 The value at `session.run` has two uses. It is an async event stream and it is
 awaitable for the final result.
+The event consumer can reject when the run fails, so settle both promises
+together to avoid leaving either rejection unhandled.
 
 ```js
 const eventsFinished = (async () => {
@@ -193,10 +195,16 @@ const eventsFinished = (async () => {
 })();
 
 try {
-  const result = await session.run;
-  await eventsFinished;
-  console.log("turns:", result.turnsHandled);
-  console.log("interruptions:", result.interruptions);
+  const [runOutcome, eventsOutcome] = await Promise.allSettled([session.run, eventsFinished]);
+  if (runOutcome.status === "rejected") {
+    console.error("call failed:", runOutcome.reason);
+  } else {
+    if (eventsOutcome.status === "rejected") {
+      console.error("event stream failed:", eventsOutcome.reason);
+    }
+    console.log("turns:", runOutcome.value.turnsHandled);
+    console.log("interruptions:", runOutcome.value.interruptions);
+  }
 } finally {
   await agent.stop();
 }
