@@ -27,6 +27,25 @@ import type {
 import type { SessionUsageAccumulator } from "./session-usage.js";
 import type { AttachmentAdmission } from "./attachment-admission.js";
 
+class CriticalWriteTimeoutError extends BackendUnavailableError {
+  constructor(timeoutMs: number) {
+    super(`Durable write exceeded ${timeoutMs}ms`);
+    this.name = "CriticalWriteTimeoutError";
+  }
+}
+
+const criticalWriteLateSettlements = new WeakMap<CriticalWriteTimeoutError, Promise<void>>();
+
+export function isCriticalWriteTimeoutError(error: unknown): error is BackendUnavailableError {
+  return error instanceof CriticalWriteTimeoutError;
+}
+
+export function criticalWriteLateSettlement(error: unknown): Promise<void> | undefined {
+  return error instanceof CriticalWriteTimeoutError
+    ? criticalWriteLateSettlements.get(error)
+    : undefined;
+}
+
 export interface RuntimeAttachmentState {
   readonly agent: Agent;
   readonly controller: AbortController;
@@ -466,7 +485,9 @@ export async function criticalWrite<T>(
       try {
         onTimeout?.();
       } catch {}
-      reject(new BackendUnavailableError(`Durable write exceeded ${deadlineMs}ms`));
+      const timeoutError = new CriticalWriteTimeoutError(deadlineMs);
+      criticalWriteLateSettlements.set(timeoutError, lateCompletion);
+      reject(timeoutError);
     }, deadlineMs);
   });
   try {

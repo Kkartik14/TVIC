@@ -6,6 +6,7 @@ import {
   createDefaultIdGenerator,
   evaluateProviderCompatibility,
   internalError,
+  isTerminalTurn,
   normalizeUnknownError,
   timeoutError,
   validationError,
@@ -67,12 +68,7 @@ import { boundSttAgentContext } from "./stt-agent-context.js";
 import * as pipelineConstants from "./pipeline-constants.js";
 import type { TextDeliveryMode } from "./text-delivery.js";
 import { persistInterruptionCheckpoint } from "./persistence-policy.js";
-import {
-  cancellationReason,
-  awaitTerminalTurn,
-  linkAbortSignal,
-  readTerminalTurn,
-} from "./pipeline-helpers.js";
+import { cancellationReason, linkAbortSignal, readTerminalTurn } from "./pipeline-helpers.js";
 import { appendTurnMemory, type TurnMemoryContext } from "./pipeline-tool-exec.js";
 import {
   attachmentAbortReason,
@@ -105,6 +101,7 @@ import type {
 } from "./turn-state.js";
 import type { RuntimeAudioTapHooks } from "./runtime-support.js";
 import type { RuntimeUsageHooks } from "./runtime-support.js";
+import { criticalWriteLateSettlement, isCriticalWriteTimeoutError } from "./runtime-support.js";
 import { SessionUsageAccumulator } from "./session-usage.js";
 export type { TurnLatencyRecord } from "./turn-state.js";
 
@@ -204,6 +201,33 @@ export interface PipelineVoiceLoopResult {
 
 type PipelineVoiceLoopCoreResult = Omit<PipelineVoiceLoopResult, "audioTap">;
 
+type DeadlineResult<T> =
+  | { readonly status: "completed"; readonly value: T }
+  | { readonly status: "rejected"; readonly error: unknown }
+  | { readonly status: "timeout" };
+
+function settleWithinDeadline<T>(
+  operation: () => Promise<T>,
+  deadlineMs: number,
+): Promise<DeadlineResult<T>> {
+  const remainingMs = deadlineMs - Date.now();
+  if (remainingMs <= 0) return Promise.resolve({ status: "timeout" });
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const result = Promise.resolve()
+    .then(operation)
+    .then(
+      (value): DeadlineResult<T> => ({ status: "completed", value }),
+      (error: unknown): DeadlineResult<T> => ({ status: "rejected", error }),
+    );
+  const timeout = new Promise<DeadlineResult<T>>((resolve) => {
+    timer = setTimeout(() => resolve({ status: "timeout" }), remainingMs);
+  });
+  return Promise.race([result, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
 export class PipelineVoiceLoop {
   readonly #options: PipelineVoiceLoopInternalOptions;
   readonly #providers: AgentProviders;
@@ -231,6 +255,14 @@ export class PipelineVoiceLoop {
   #persistenceDegraded = false;
   #nonCheckpointPersistenceDegraded = false;
   #checkpointPersistenceDegraded = false;
+  #nonCheckpointPersistenceGeneration = 0;
+  #lastPersistenceFailure: NormalizedError | undefined;
+  #persistenceSessionEnding = false;
+  readonly #pendingPersistenceWriteSettlements = new Set<Promise<void>>();
+  #callClosePromise: Promise<void> | undefined;
+  #persistenceRecoveryStartedAtMs: number | undefined;
+  #persistenceRecoveryDeadlineMs: number | undefined;
+  #lastTurnSequence: number;
   #persistenceGate: Promise<boolean> = Promise.resolve(true);
   readonly #memoryUserId: UserId | undefined;
   readonly #organizationId: OrganizationId | undefined;
@@ -250,6 +282,7 @@ export class PipelineVoiceLoop {
   #lastAudioTapTimestampMs = 0;
   #lastAudioTapClockObservationMs = globalThis.performance.now();
   constructor(options: PipelineVoiceLoopOptions) {
+    this.#lastTurnSequence = options.session.state.turnSequence;
     if (options.turnProfile !== undefined) {
       const provider = options.agent.providers.stt;
       const compatibility = evaluateProviderCompatibility(provider, {
@@ -434,7 +467,7 @@ export class PipelineVoiceLoop {
       now: () => this.#monotonicMs(),
       getActive: () => this.#active,
       onMediaEnd: (endReason, streamError) => {
-        this.#runEndReason = endReason;
+        if (this.#runEndReason !== "error") this.#runEndReason = endReason;
         const source = this.#terminal.sourceForEndReason(endReason, streamError);
         if (source !== "normal_completion") {
           this.#terminal.offerTerminal({
@@ -966,7 +999,7 @@ export class PipelineVoiceLoop {
         error: failure,
       });
       supervisor.abort();
-      void this.#options.callHandle.close("error").catch(() => undefined);
+      void this.#closeCallHandle().catch(() => undefined);
     });
     const transcriptTask = this.#sttInput.consumeTranscripts(stt.events, supervisor.signal);
     transcriptTask.then(
@@ -999,10 +1032,10 @@ export class PipelineVoiceLoop {
     try {
       const input = await this.#sttInput.consumeInput(stt, commandController, supervisor.signal);
       endReason = input.endReason;
+      if (this.#runEndReason !== "error") this.#runEndReason = endReason;
       streamError = input.streamError;
       mediaEnded = input.mediaEnded;
       if (mediaEnded) {
-        this.#runEndReason = endReason;
         const source = this.#terminal.sourceForEndReason(endReason, streamError);
         if (source !== "normal_completion") {
           this.#terminal.offerTerminal({
@@ -1242,14 +1275,28 @@ export class PipelineVoiceLoop {
     });
   }
 
-  #markPersistenceDegraded(): void {
+  #markPersistenceDegraded(error: unknown, source = "durable_write"): number {
+    const wasDegraded = this.#persistenceDegraded;
+    if (!this.#nonCheckpointPersistenceDegraded) {
+      this.#nonCheckpointPersistenceGeneration += 1;
+      this.#beginPersistenceRecoveryWindow();
+    }
     this.#nonCheckpointPersistenceDegraded = true;
+    this.#trackPendingPersistenceWrite(error);
+    this.#lastPersistenceFailure = this.#persistenceFailure(error, source);
     this.#syncPersistenceHealth();
+    if (!wasDegraded) this.#emitPersistenceFailure(this.#lastPersistenceFailure);
+    return this.#nonCheckpointPersistenceGeneration;
   }
 
-  #markCheckpointPersistenceDegraded(): void {
+  #markCheckpointPersistenceDegraded(error: unknown): void {
+    const wasDegraded = this.#persistenceDegraded;
+    this.#beginPersistenceRecoveryWindow();
+    this.#trackPendingPersistenceWrite(error);
     this.#checkpointPersistenceDegraded = true;
+    this.#lastPersistenceFailure = this.#persistenceFailure(error, "interruption_checkpoint");
     this.#syncPersistenceHealth();
+    if (!wasDegraded) this.#emitPersistenceFailure(this.#lastPersistenceFailure);
   }
 
   #recoverCheckpointPersistence(): void {
@@ -1257,9 +1304,220 @@ export class PipelineVoiceLoop {
     this.#syncPersistenceHealth();
   }
 
+  #recoverNonCheckpointPersistence(generation: number): void {
+    if (
+      generation !== this.#nonCheckpointPersistenceGeneration ||
+      !this.#nonCheckpointPersistenceDegraded
+    ) {
+      return;
+    }
+    this.#nonCheckpointPersistenceDegraded = false;
+    this.#lastPersistenceFailure = undefined;
+    this.#syncPersistenceHealth();
+  }
+
+  #persistenceFailure(error: unknown, source: string): NormalizedError {
+    const normalized = normalizeUnknownError(error, {
+      code: "durable.write.failure",
+      category: "internal",
+      retriable: true,
+    });
+    return {
+      ...normalized,
+      code: "durable.write.failure",
+      category: "internal",
+      metadata: { ...(normalized.metadata ?? {}), degraded: true, source },
+    };
+  }
+
+  #emitPersistenceFailure(error: NormalizedError): void {
+    this.#emitVoiceEvent({ kind: "error", error, recoverable: error.retriable });
+  }
+
+  async #recoverFailedTurn(
+    failure: NormalizedError,
+    turnId: TurnId | undefined,
+    afterSequence: number,
+    recoveryDeadline: number,
+    expectedStatus?: Turn["status"],
+  ): Promise<TerminalTurn | null> {
+    const deadline = recoveryDeadline;
+    const criticalWriteTimeoutMs =
+      this.#options.runtime.durablePolicy?.criticalWriteTimeoutMs ?? 2_000;
+    const terminalWriteCutoff = Math.max(
+      this.#persistenceRecoveryStartedAtMs ?? Date.now(),
+      deadline - criticalWriteTimeoutMs,
+    );
+    let candidateTurnId = turnId;
+    let nextTerminalWriteAttemptAt = terminalWriteCutoff;
+    let terminalWriteRetryDisabled = false;
+
+    while (true) {
+      const pendingWrites = [...this.#pendingPersistenceWriteSettlements];
+      if (pendingWrites.length > 0) {
+        const settlement = await settleWithinDeadline(
+          () => Promise.all(pendingWrites).then(() => undefined),
+          deadline,
+        );
+        if (settlement.status === "timeout") break;
+        for (const pendingWrite of pendingWrites) {
+          this.#pendingPersistenceWriteSettlements.delete(pendingWrite);
+        }
+      }
+
+      let snapshot: Awaited<ReturnType<Runtime["inspectSession"]>> | undefined;
+      const inspection = await settleWithinDeadline(
+        () => this.#options.runtime.inspectSession(this.#options.session.id),
+        deadline,
+      );
+      if (inspection.status === "completed") snapshot = inspection.value;
+      if (inspection.status === "timeout") break;
+
+      if (!candidateTurnId && snapshot) {
+        const currentTurnId = snapshot.session.state.currentTurnId;
+        const lateTurn = currentTurnId
+          ? snapshot.turns.find(
+              (candidate) => candidate.id === currentTurnId && candidate.sequence > afterSequence,
+            )
+          : snapshot.turns.find((candidate) => candidate.sequence > afterSequence);
+        if (lateTurn) candidateTurnId = lateTurn.id;
+      }
+
+      if (candidateTurnId) {
+        const persisted = snapshot?.turns.find((candidate) => candidate.id === candidateTurnId);
+        if (persisted && isTerminalTurn(persisted)) return persisted;
+        const mayTerminalize =
+          (expectedStatus !== undefined && persisted?.status === expectedStatus) ||
+          Date.now() >= terminalWriteCutoff;
+        if (
+          mayTerminalize &&
+          !terminalWriteRetryDisabled &&
+          Date.now() >= nextTerminalWriteAttemptAt
+        ) {
+          const terminalization = await settleWithinDeadline(
+            () =>
+              this.#options.runtime.endTurn(this.#options.session.id, candidateTurnId!, {
+                reason: "failed",
+                error: failure,
+              }),
+            deadline,
+          );
+          if (terminalization.status === "completed" && isTerminalTurn(terminalization.value)) {
+            return terminalization.value;
+          }
+          if (terminalization.status === "rejected") {
+            this.#markPersistenceDegraded(terminalization.error, "turn_terminal");
+            if (
+              isBackendUnavailableError(terminalization.error) &&
+              !isCriticalWriteTimeoutError(terminalization.error)
+            ) {
+              nextTerminalWriteAttemptAt = Date.now() + 25;
+            } else {
+              terminalWriteRetryDisabled = true;
+            }
+          }
+          if (terminalization.status === "timeout") {
+            break;
+          }
+        }
+      }
+
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, remaining)));
+    }
+
+    return null;
+  }
+
+  async #endSessionAfterPersistenceFailure(
+    failure: NormalizedError,
+    pendingCheckpointWrite?: Promise<unknown>,
+  ): Promise<void> {
+    if (this.#persistenceSessionEnding) return;
+    this.#persistenceSessionEnding = true;
+    this.#runEndReason = "error";
+    this.#firstTurnError ??= failure;
+    this.#turnsFailed = Math.max(1, this.#turnsFailed);
+    this.#terminal.offerTerminal({ source: "provider_runtime", error: failure });
+    const criticalWriteTimeoutMs =
+      this.#options.runtime.durablePolicy?.criticalWriteTimeoutMs ?? 2_000;
+    const closeResult = await settleWithinDeadline(
+      () => this.#closeCallHandle(),
+      Date.now() + criticalWriteTimeoutMs,
+    );
+    if (closeResult.status !== "completed") {
+      const closeError =
+        closeResult.status === "timeout"
+          ? timeoutError(
+              "voice_runtime.call_close_timeout",
+              "The call transport did not confirm closure before its deadline",
+              { retriable: true },
+            )
+          : normalizeUnknownError(closeResult.error, {
+              code: "voice_runtime.call_close_failed",
+              category: "network",
+              retriable: true,
+            });
+      this.#emitVoiceEvent({ kind: "error", error: closeError, recoverable: false });
+      this.#runSupervisor?.abort(closeError);
+    }
+    if (pendingCheckpointWrite) {
+      void pendingCheckpointWrite.catch((error: unknown) =>
+        this.#trackPendingPersistenceWrite(error),
+      );
+      const checkpointSettlement = await settleWithinDeadline(
+        () => pendingCheckpointWrite,
+        Date.now() + criticalWriteTimeoutMs,
+      );
+      if (checkpointSettlement.status === "rejected") {
+        this.#trackPendingPersistenceWrite(checkpointSettlement.error);
+      }
+    }
+    const pendingWrites = [...this.#pendingPersistenceWriteSettlements];
+    if (pendingWrites.length > 0) {
+      await settleWithinDeadline(
+        () => Promise.all(pendingWrites).then(() => undefined),
+        Date.now() + criticalWriteTimeoutMs,
+      );
+    }
+    await settleWithinDeadline(
+      () =>
+        this.#options.runtime.endSession(this.#options.session.id, {
+          reason: "failed",
+          error: failure,
+        }),
+      Date.now() + criticalWriteTimeoutMs,
+    );
+  }
+
+  #closeCallHandle(): Promise<void> {
+    if (!this.#callClosePromise) {
+      this.#callClosePromise = Promise.resolve().then(() =>
+        this.#options.callHandle.close("error"),
+      );
+      void this.#callClosePromise.catch(() => undefined);
+    }
+    return this.#callClosePromise;
+  }
+
+  #trackPendingPersistenceWrite(error: unknown): void {
+    const pendingWrite = criticalWriteLateSettlement(error);
+    if (!pendingWrite || this.#pendingPersistenceWriteSettlements.has(pendingWrite)) return;
+    this.#pendingPersistenceWriteSettlements.add(pendingWrite);
+    void pendingWrite.then(
+      () => this.#pendingPersistenceWriteSettlements.delete(pendingWrite),
+      () => this.#pendingPersistenceWriteSettlements.delete(pendingWrite),
+    );
+  }
+
   #syncPersistenceHealth(): void {
     this.#persistenceDegraded =
       this.#nonCheckpointPersistenceDegraded || this.#checkpointPersistenceDegraded;
+    if (!this.#persistenceDegraded) {
+      this.#persistenceRecoveryStartedAtMs = undefined;
+      this.#persistenceRecoveryDeadlineMs = undefined;
+    }
     try {
       this.#options.runtime.setPersistenceHealth(
         this.#options.session.id,
@@ -1271,6 +1529,15 @@ export class PipelineVoiceLoop {
     }
   }
 
+  #beginPersistenceRecoveryWindow(): number {
+    if (this.#persistenceRecoveryDeadlineMs === undefined) {
+      this.#persistenceRecoveryStartedAtMs = Date.now();
+      const graceMs = this.#options.runtime.durablePolicy?.persistenceRecoveryGraceMs ?? 2_000;
+      this.#persistenceRecoveryDeadlineMs = this.#persistenceRecoveryStartedAtMs + graceMs;
+    }
+    return this.#persistenceRecoveryDeadlineMs;
+  }
+
   async #persistTurnStatus(
     turnId: Turn["id"],
     status: "thinking" | "calling_tool" | "speaking",
@@ -1278,7 +1545,7 @@ export class PipelineVoiceLoop {
     try {
       await this.#options.runtime.updateTurnStatus(this.#options.session.id, turnId, status);
     } catch (error) {
-      this.#markPersistenceDegraded();
+      this.#markPersistenceDegraded(error, "turn_status");
       throw error;
     }
   }
@@ -1289,7 +1556,7 @@ export class PipelineVoiceLoop {
     try {
       return await this.#options.runtime.startToolCall(queued);
     } catch (error) {
-      this.#markPersistenceDegraded();
+      this.#markPersistenceDegraded(error, "tool_start");
       throw error;
     }
   }
@@ -1298,7 +1565,7 @@ export class PipelineVoiceLoop {
     try {
       return await this.#options.runtime.finishToolCall(result);
     } catch (error) {
-      this.#markPersistenceDegraded();
+      this.#markPersistenceDegraded(error, "tool_finish");
       throw error;
     }
   }
@@ -1308,55 +1575,50 @@ export class PipelineVoiceLoop {
       await this.#options.runtime.recordToolCall(result);
       return result;
     } catch (error) {
-      this.#markPersistenceDegraded();
+      this.#markPersistenceDegraded(error, "tool_record");
       throw error;
     }
   }
 
   async #handleTranscript(transcript: string, timing: UtteranceTiming): Promise<void> {
-    if (
-      this.#nonCheckpointPersistenceDegraded ||
-      !(await this.#persistenceGate) ||
-      this.#persistenceDegraded
-    ) {
-      const failure = internalError(
-        "durable.write.failure",
-        "Turn dropped: persistence is degraded or the interruption checkpoint failed",
-        { metadata: { degraded: true, source: "persistence_gate" } },
-      );
-      this.#turnsFailed += 1;
-      this.#firstTurnError ??= failure;
-      this.#emitVoiceEvent({ kind: "error", error: failure, recoverable: false });
+    const checkpointRecovered = await this.#persistenceGate;
+    if (this.#persistenceSessionEnding) return;
+    if (!checkpointRecovered || this.#persistenceDegraded) {
+      const failure =
+        this.#lastPersistenceFailure ??
+        this.#persistenceFailure(
+          new BackendUnavailableError("Persistence could not recover before the next turn"),
+          "persistence_gate",
+        );
+      this.#markPersistenceDegraded(failure, "persistence_gate");
+      await this.#endSessionAfterPersistenceFailure(failure);
       return;
     }
-    let turn: Turn;
+    const sequenceBeforeStart = this.#lastTurnSequence;
+    let turn: Turn | undefined;
     try {
       turn = await this.#options.runtime.startTurn({
         sessionId: this.#options.session.id,
         input: { transcript, mediaEventIds: [] },
       });
+      this.#lastTurnSequence = turn.sequence;
       await this.#persistTurnStatus(turn.id, "thinking");
     } catch (error) {
-      this.#markPersistenceDegraded();
-      const normalized = normalizeUnknownError(error, {
-        code: "durable.write.failure",
-        category: "internal",
-        retriable: false,
-      });
-      const failure: NormalizedError = {
-        ...normalized,
-        metadata: { ...(normalized.metadata ?? {}), degraded: true, source: "turn_start" },
-      };
+      const generation = this.#markPersistenceDegraded(error, "turn_start");
+      const failure = this.#lastPersistenceFailure!;
       this.#turnsFailed += 1;
       this.#firstTurnError ??= failure;
-      await this.#options.runtime
-        .endSession(this.#options.session.id, { reason: "failed", error: failure })
-        .catch(() => undefined);
-      this.#emitVoiceEvent({
-        kind: "error",
-        error: failure,
-        recoverable: failure.retriable,
-      });
+      const terminal = await this.#recoverFailedTurn(
+        failure,
+        turn?.id,
+        sequenceBeforeStart,
+        isBackendUnavailableError(error)
+          ? (this.#persistenceRecoveryDeadlineMs ?? this.#beginPersistenceRecoveryWindow())
+          : Date.now(),
+        turn ? "thinking" : undefined,
+      );
+      if (terminal) this.#recoverNonCheckpointPersistence(generation);
+      else await this.#endSessionAfterPersistenceFailure(failure);
       return;
     }
     this.#turnsHandled += 1;
@@ -1588,7 +1850,7 @@ export class PipelineVoiceLoop {
           });
         } catch (error) {
           terminalWriteMayBeLate = isBackendUnavailableError(error);
-          this.#markPersistenceDegraded();
+          this.#markPersistenceDegraded(error, "turn_terminal");
           throw error;
         }
         if (terminal.status !== "cancelled") {
@@ -1647,7 +1909,7 @@ export class PipelineVoiceLoop {
         });
       } catch (error) {
         terminalWriteMayBeLate = isBackendUnavailableError(error);
-        this.#markPersistenceDegraded();
+        this.#markPersistenceDegraded(error, "turn_terminal");
         throw error;
       }
       if (terminal.status !== "completed") {
@@ -1694,44 +1956,80 @@ export class PipelineVoiceLoop {
     } catch (error) {
       latency.totalMs = this.#durationSince(startedAtMs);
       const turnError = truncateErrorCause(
-        normalizeUnknownError(error, {
-          code: "turn.failed",
-          category: "internal",
-          retriable: false,
-        }),
+        this.#nonCheckpointPersistenceDegraded || isBackendUnavailableError(error)
+          ? (this.#lastPersistenceFailure ?? this.#persistenceFailure(error, "turn"))
+          : normalizeUnknownError(error, {
+              code: "turn.failed",
+              category: "internal",
+              retriable: false,
+            }),
       );
-      let terminalPersisted = true;
+      let recoveryGeneration = this.#nonCheckpointPersistenceGeneration;
       let terminal: TerminalTurn | undefined;
-      terminal =
-        (await (terminalWriteMayBeLate
-          ? awaitTerminalTurn(this.#options.runtime, this.#options.session.id, turn.id)
-          : readTerminalTurn(this.#options.runtime, this.#options.session.id, turn.id))) ??
-        undefined;
+      const criticalWriteTimeoutMs =
+        this.#options.runtime.durablePolicy?.criticalWriteTimeoutMs ?? 2_000;
+      const terminalReadDeadline =
+        this.#persistenceRecoveryDeadlineMs ?? Date.now() + criticalWriteTimeoutMs;
+      const existingTerminal = await settleWithinDeadline(
+        () => readTerminalTurn(this.#options.runtime, this.#options.session.id, turn.id),
+        terminalReadDeadline,
+      );
+      if (existingTerminal.status === "completed") terminal = existingTerminal.value ?? undefined;
       if (!terminal) {
-        terminal = await this.#options.runtime
-          .endTurn(this.#options.session.id, turn.id, {
-            reason: "failed",
-            error: turnError,
-            output: {
-              text: finalText,
-              mediaEventIds: [],
-              delivery: turnOutputDelivery(control, textDelivered),
-            },
-            toolCallIds,
-            latency,
-          })
-          .catch(async () => {
-            terminalPersisted = false;
-            const lateTerminal = await awaitTerminalTurn(
-              this.#options.runtime,
-              this.#options.session.id,
+        if (this.#nonCheckpointPersistenceDegraded || terminalWriteMayBeLate) {
+          terminal =
+            (await this.#recoverFailedTurn(
+              turnError,
               turn.id,
-            );
-            if (lateTerminal) terminalPersisted = true;
-            return lateTerminal ?? undefined;
-          });
+              turn.sequence - 1,
+              this.#persistenceRecoveryDeadlineMs ?? this.#beginPersistenceRecoveryWindow(),
+            )) ?? undefined;
+        } else {
+          const terminalization = await settleWithinDeadline(
+            () =>
+              this.#options.runtime.endTurn(this.#options.session.id, turn.id, {
+                reason: "failed",
+                error: turnError,
+                output: {
+                  text: finalText,
+                  mediaEventIds: [],
+                  delivery: turnOutputDelivery(control, textDelivered),
+                },
+                toolCallIds,
+                latency,
+              }),
+            Date.now() + criticalWriteTimeoutMs,
+          );
+          if (terminalization.status === "completed") {
+            terminal = terminalization.value;
+          } else {
+            const terminalError =
+              terminalization.status === "rejected"
+                ? terminalization.error
+                : new BackendUnavailableError(
+                    "Turn terminal write did not settle before its deadline",
+                  );
+            recoveryGeneration = this.#markPersistenceDegraded(terminalError, "turn_terminal");
+            const persistenceFailure = this.#lastPersistenceFailure!;
+            terminal =
+              (await this.#recoverFailedTurn(
+                persistenceFailure,
+                turn.id,
+                turn.sequence - 1,
+                this.#persistenceRecoveryDeadlineMs ?? this.#beginPersistenceRecoveryWindow(),
+              )) ?? undefined;
+            if (!terminal) await this.#endSessionAfterPersistenceFailure(persistenceFailure);
+          }
+        }
       }
-      if (!terminalPersisted) this.#markPersistenceDegraded();
+      if (terminal && this.#nonCheckpointPersistenceDegraded) {
+        this.#recoverNonCheckpointPersistence(recoveryGeneration);
+      }
+      if (!terminal && this.#nonCheckpointPersistenceDegraded) {
+        await this.#endSessionAfterPersistenceFailure(
+          this.#lastPersistenceFailure ?? this.#persistenceFailure(error, "turn_terminal"),
+        );
+      }
       if (terminal && terminal.status !== "failed") {
         if (terminal.status === "completed") {
           this.#policy.recordTurn(transcript, finalText);
@@ -1937,8 +2235,14 @@ export class PipelineVoiceLoop {
       sessionId: this.#options.session.id,
       turnId: control.turnId,
       cause,
-      onDegraded: () => this.#markCheckpointPersistenceDegraded(),
+      recoveryDeadlineMs: this.#beginPersistenceRecoveryWindow(),
+      onDegraded: (error) => this.#markCheckpointPersistenceDegraded(error),
       onRecovered: () => this.#recoverCheckpointPersistence(),
+      onFatal: (error, pendingWrite) =>
+        this.#endSessionAfterPersistenceFailure(
+          this.#persistenceFailure(error, "interruption_checkpoint"),
+          pendingWrite,
+        ),
     });
     const checkpoint = control.interruptionCheckpoint;
     this.#persistenceGate = this.#persistenceGate

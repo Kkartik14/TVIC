@@ -98,6 +98,39 @@ Tune the connection limit for the total number of application replicas and
 pools, and tune request timeouts to the host's request and shutdown budgets.
 PostgreSQL enforces `statement_timeout` and `lock_timeout` on the server.
 
+## Durable-write failures during a live call
+
+`criticalWriteTimeoutMs` bounds how long the runtime waits for a correctness-
+critical store write. Its default is 2,000 ms; tune it for store latency and the
+host's call-latency budget. A timeout does not cancel the transaction, so the
+write may still commit afterward. When a write fails or exceeds that deadline, the
+voice event stream emits an `error` with code `durable.write.failure`, and the
+session attachment reports `persistence_degraded` while the runtime holds new
+caller transcripts.
+
+The runtime retries or inspects the affected turn within its persistence
+recovery window. If the write or a terminal turn state is confirmed, it clears
+degraded health and resumes turn admission. If the state cannot be confirmed in
+time, TVIC emits a failed call outcome, attempts to persist the session as
+`failed` with the durable-write error, and closes the call handle. If the store
+remains unavailable, the failed session record cannot be guaranteed. Managed
+sessions also run their normal finalizer after the pipeline stops; a locally
+initiated call close is not reclassified as a remote hangup, and repeated
+session finalization is idempotent. The recovery window bounds retries and
+inspection; after recovery ends, call closure and terminal session persistence
+use separate bounded cleanup attempts.
+
+If `CallHandle.close()` rejects or does not settle within
+`criticalWriteTimeoutMs`, the event stream also emits
+`voice_runtime.call_close_failed` or `voice_runtime.call_close_timeout`, and the
+pipeline stops processing further input. Treat transport closure as unconfirmed
+and surface the failure through the host's call-control or operations path. The
+managed facade shares one close attempt between pipeline failure handling and
+session finalization.
+
+Hosts should observe the voice event stream and session health rather than
+treating a connected transport as proof that the runtime can accept turns.
+
 Migration 014 is the first writer-compatibility boundary: its trigger rejects
 active-session inserts unless each row carries the current lease fence and
 generation. It also rejects updates without the current fence, with a narrow

@@ -457,6 +457,46 @@ const MANAGED_STOP_DRAIN_TIMEOUT_MS = 5_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const DEFAULT_PROVIDER_CAPABILITY_SNAPSHOT_TIMEOUT_MS = 30_000;
 
+function closeOnceCallHandle(handle: CallHandle, onLocalClose: () => void): CallHandle {
+  let closePromise: Promise<void> | undefined;
+  const remoteHangup = dataProperty(handle, "remoteHangup");
+  const deliverText = dataProperty(handle, "deliverText");
+  const endInput = dataProperty(handle, "endInput");
+  const confirmPlayout = dataProperty(handle, "confirmPlayout");
+  return {
+    callId: handle.callId,
+    events: handle.events,
+    ...(isPromiseLike(remoteHangup)
+      ? { remoteHangup: nativePromiseFromThenable(remoteHangup).then(() => undefined) }
+      : {}),
+    send: (event: Parameters<CallHandle["send"]>[0]) => handle.send(event),
+    ...(typeof deliverText === "function"
+      ? {
+          deliverText: (turnId, sequence, text) =>
+            Reflect.apply(deliverText, handle, [turnId, sequence, text]),
+        }
+      : {}),
+    clear: () => handle.clear(),
+    ...(typeof endInput === "function"
+      ? { endInput: (reason) => Reflect.apply(endInput, handle, [reason]) }
+      : {}),
+    close(reason) {
+      if (!closePromise) {
+        onLocalClose();
+        closePromise = Promise.resolve().then(() => handle.close(reason));
+        void closePromise.catch(() => undefined);
+      }
+      return closePromise;
+    },
+    ...(typeof confirmPlayout === "function"
+      ? {
+          confirmPlayout: (markId, timeoutMs) =>
+            Reflect.apply(confirmPlayout, handle, [markId, timeoutMs]),
+        }
+      : {}),
+  };
+}
+
 function raceWithAbortSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason ?? startupCancelledError());
 
@@ -518,6 +558,7 @@ interface ManagedStartRecord {
   removeAttachmentAbort: (() => void) | undefined;
   attachment: SessionAttachment | undefined;
   callHandle: CallHandle | undefined;
+  localCallCloseRequested: boolean;
   handleAccepted: boolean;
   completePromise: Promise<TerminalSession> | undefined;
   closePromise: Promise<void> | undefined;
@@ -2517,6 +2558,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
       removeAttachmentAbort: undefined,
       attachment: undefined,
       callHandle: preconstructedCallHandle,
+      localCallCloseRequested: false,
       handleAccepted: preconstructedCallHandle !== undefined,
       completePromise: undefined,
       closePromise: undefined,
@@ -2664,7 +2706,9 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         this.#cleanupLateAttachment(record, lateAttachment),
       );
       record.attachment = attachment;
-      const attachmentAborted = () => this.#observeRemoteHangup(record);
+      const attachmentAborted = () => {
+        if (!record.localCallCloseRequested) this.#observeRemoteHangup(record);
+      };
       attachment.signal.addEventListener("abort", attachmentAborted, { once: true });
       record.removeAttachmentAbort = () =>
         attachment.signal.removeEventListener("abort", attachmentAborted);
@@ -2715,16 +2759,20 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         callHandle = preconstructedCallHandle;
       }
       validateCallHandle(callHandle);
-      record.callHandle = callHandle;
+      record.callHandle = closeOnceCallHandle(callHandle, () => {
+        record.localCallCloseRequested = true;
+      });
       record.handleAccepted = true;
-      const remoteHangup = dataProperty(callHandle, "remoteHangup");
+      const remoteHangup = dataProperty(record.callHandle, "remoteHangup");
       if (isPromiseLike(remoteHangup)) {
         void nativePromiseFromThenable(remoteHangup).then(
-          () => this.#observeRemoteHangup(record),
+          () => {
+            if (!record.localCallCloseRequested) this.#observeRemoteHangup(record);
+          },
           () => undefined,
         );
       }
-      validateCallHandleMatchesCall(provisionalCall, callHandle);
+      validateCallHandleMatchesCall(provisionalCall, record.callHandle);
       this.#assertStartupOpen(record);
       record.state = "deferred";
       this.#clearStartupDeadline(record);
@@ -2995,7 +3043,13 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
   }
 
   #observeRemoteHangup(record: ManagedStartRecord): void {
-    if (record.state === "finalizing" || record.state === "settled") return;
+    if (
+      record.state === "finalizing" ||
+      record.state === "settled" ||
+      record.localCallCloseRequested
+    ) {
+      return;
+    }
     record.remoteHangup = true;
     const error = remoteHangupError();
     if (record.state === "deferred") {
