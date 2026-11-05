@@ -1183,7 +1183,25 @@ describe("R2-06 recovery and durable correctness", () => {
     }
   }, 15_000);
 
-  it("ends the session as failed when turn persistence stays unavailable through the recovery window", async () => {
+  it.each([
+    {
+      closeMode: "abort" as const,
+      failureStatus: "thinking" as const,
+      description: "transport close aborts input",
+    },
+    {
+      closeMode: "media_end" as const,
+      failureStatus: "thinking" as const,
+      description: "transport close emits a media end",
+    },
+    {
+      closeMode: "media_end" as const,
+      failureStatus: "speaking" as const,
+      description: "transport close emits a media end during an active turn",
+    },
+  ])(
+    "ends the session as failed when turn persistence stays unavailable and $description",
+    async ({ closeMode, failureStatus }) => {
     const durableStore = createInMemoryDurableRuntimeStore();
     const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
     let outageUntilMs = 0;
@@ -1211,7 +1229,7 @@ describe("R2-06 recovery and durable correctness", () => {
               ) =>
                 target.updateTurn(turnSessionId, turnId, (record) => {
                   const next = updater(record);
-                  if (next.turn.status === "thinking" && !outageStarted) {
+                  if (next.turn.status === failureStatus && !outageStarted) {
                     outageStarted = true;
                     outageUntilMs = Date.now() + 100;
                   }
@@ -1237,12 +1255,20 @@ describe("R2-06 recovery and durable correctness", () => {
     const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
     const session = attachment.session;
     const call = makeCallHandle();
-    const closeCall = vi
-      .spyOn(call.handle, "close")
-      .mockRejectedValue(new Error("injected transport close failure"));
+    const closeCall = vi.spyOn(call.handle, "close");
+    if (closeMode === "abort") {
+      closeCall.mockRejectedValue(new Error("injected transport close failure"));
+    } else {
+      closeCall.mockImplementation(async () => {
+        call.push(streamEnded(session.id, "completed"));
+      });
+    }
     const stt = makeStt();
-    const llm = makeLlm(() => {
-      throw new Error("the turn must not reach the model while persistence is unavailable");
+    const llm = makeLlm((request) => {
+      if (failureStatus === "thinking") {
+        throw new Error("the turn must not reach the model while persistence is unavailable");
+      }
+      return [llmEvent(request, 1, { type: "llm.completed", text: "answer", toolCalls: [] })];
     });
     const tts = makeTts(() => [], { endStream: true });
     const loop = new PipelineVoiceLoop({
@@ -1289,7 +1315,12 @@ describe("R2-06 recovery and durable correctness", () => {
           (event) =>
             event.kind === "error" && event.error.code === "voice_runtime.call_close_failed",
         ),
-      ).toBe(true);
+      ).toBe(closeMode === "abort");
+      const result = await running.catch(() => undefined);
+      await draining;
+      if (closeMode === "media_end") {
+        expect(result).toMatchObject({ terminalReason: "failed", terminalSource: "provider_runtime" });
+      }
     } finally {
       call.push(streamEnded(session.id, "error"));
       await running.catch(() => undefined);
