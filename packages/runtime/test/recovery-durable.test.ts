@@ -1202,132 +1202,137 @@ describe("R2-06 recovery and durable correctness", () => {
   ])(
     "ends the session as failed when turn persistence stays unavailable and $description",
     async ({ closeMode, failureStatus }) => {
-    const durableStore = createInMemoryDurableRuntimeStore();
-    const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
-    let outageUntilMs = 0;
-    let outageStarted = false;
-    durableStore.runSessionTransaction = async <T>(
-      sessionId: SessionId,
-      lease: SessionLease,
-      operation: (transaction: DurableSessionTransaction) => Promise<T>,
-    ) =>
-      runSessionTransaction(sessionId, lease, async (transaction) => {
-        let sessionEndTransaction = false;
-        const wrapped = new Proxy(transaction, {
-          get(target, property, receiver) {
-            if (property === "listTurns") {
-              return async (...args: Parameters<DurableSessionTransaction["listTurns"]>) => {
-                sessionEndTransaction = true;
-                return target.listTurns(...args);
-              };
-            }
-            if (property === "updateTurn") {
-              return async (
-                turnSessionId: SessionId,
-                turnId: Parameters<DurableSessionTransaction["updateTurn"]>[1],
-                updater: Parameters<DurableSessionTransaction["updateTurn"]>[2],
-              ) =>
-                target.updateTurn(turnSessionId, turnId, (record) => {
-                  const next = updater(record);
-                  if (next.turn.status === failureStatus && !outageStarted) {
-                    outageStarted = true;
-                    outageUntilMs = Date.now() + 100;
-                  }
-                  if (Date.now() < outageUntilMs && !sessionEndTransaction) {
-                    throw new BackendUnavailableError("injected bounded store outage");
-                  }
-                  return next;
-                });
-            }
-            const value = Reflect.get(target, property, receiver) as unknown;
-            return typeof value === "function" ? value.bind(target) : value;
-          },
+      const durableStore = createInMemoryDurableRuntimeStore();
+      const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+      let outageUntilMs = 0;
+      let outageStarted = false;
+      durableStore.runSessionTransaction = async <T>(
+        sessionId: SessionId,
+        lease: SessionLease,
+        operation: (transaction: DurableSessionTransaction) => Promise<T>,
+      ) =>
+        runSessionTransaction(sessionId, lease, async (transaction) => {
+          let sessionEndTransaction = false;
+          const wrapped = new Proxy(transaction, {
+            get(target, property, receiver) {
+              if (property === "listTurns") {
+                return async (...args: Parameters<DurableSessionTransaction["listTurns"]>) => {
+                  sessionEndTransaction = true;
+                  return target.listTurns(...args);
+                };
+              }
+              if (property === "updateTurn") {
+                return async (
+                  turnSessionId: SessionId,
+                  turnId: Parameters<DurableSessionTransaction["updateTurn"]>[1],
+                  updater: Parameters<DurableSessionTransaction["updateTurn"]>[2],
+                ) =>
+                  target.updateTurn(turnSessionId, turnId, (record) => {
+                    const next = updater(record);
+                    if (next.turn.status === failureStatus && !outageStarted) {
+                      outageStarted = true;
+                      outageUntilMs = Date.now() + 100;
+                    }
+                    if (Date.now() < outageUntilMs && !sessionEndTransaction) {
+                      throw new BackendUnavailableError("injected bounded store outage");
+                    }
+                    return next;
+                  });
+              }
+              const value = Reflect.get(target, property, receiver) as unknown;
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+          return operation(wrapped);
         });
-        return operation(wrapped);
-      });
 
-    const runtime = createRuntime({
-      durableStore,
-      durablePolicy: { criticalWriteTimeoutMs: 10, persistenceRecoveryGraceMs: 50 },
-    });
-    await runtime.start();
-    const agent = buildAgent();
-    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
-    const session = attachment.session;
-    const call = makeCallHandle();
-    const closeCall = vi.spyOn(call.handle, "close");
-    if (closeMode === "abort") {
-      closeCall.mockRejectedValue(new Error("injected transport close failure"));
-    } else {
-      closeCall.mockImplementation(async () => {
-        call.push(streamEnded(session.id, "completed"));
+      const runtime = createRuntime({
+        durableStore,
+        durablePolicy: { criticalWriteTimeoutMs: 10, persistenceRecoveryGraceMs: 50 },
       });
-    }
-    const stt = makeStt();
-    const llm = makeLlm((request) => {
-      if (failureStatus === "thinking") {
-        throw new Error("the turn must not reach the model while persistence is unavailable");
+      await runtime.start();
+      const agent = buildAgent();
+      const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+      const session = attachment.session;
+      const call = makeCallHandle();
+      const closeCall = vi.spyOn(call.handle, "close");
+      if (closeMode === "abort") {
+        closeCall.mockRejectedValue(new Error("injected transport close failure"));
+      } else {
+        closeCall.mockImplementation(async () => {
+          call.push(streamEnded(session.id, "completed"));
+        });
       }
-      return [llmEvent(request, 1, { type: "llm.completed", text: "answer", toolCalls: [] })];
-    });
-    const tts = makeTts(() => [], { endStream: true });
-    const loop = new PipelineVoiceLoop({
-      runtime,
-      session,
-      attachment,
-      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
-      callHandle: call.handle,
-      llmModel: "gpt-test",
-    });
-    const running = loop.start();
-    const seen: VoiceEvent[] = [];
-    const draining = (async () => {
-      for await (const event of running) seen.push(event);
-    })();
+      const stt = makeStt();
+      const llm = makeLlm((request) => {
+        if (failureStatus === "thinking") {
+          throw new Error("the turn must not reach the model while persistence is unavailable");
+        }
+        return [llmEvent(request, 1, { type: "llm.completed", text: "answer", toolCalls: [] })];
+      });
+      const tts = makeTts(() => [], { endStream: true });
+      const loop = new PipelineVoiceLoop({
+        runtime,
+        session,
+        attachment,
+        agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      });
+      const running = loop.start();
+      const seen: VoiceEvent[] = [];
+      const draining = (async () => {
+        for await (const event of running) seen.push(event);
+      })();
 
-    try {
-      const startedAt = Date.now();
-      call.push(streamStarted(session.id));
-      stt.pushFinal(session.id, "cannot persist this turn");
-      await until(() => outageStarted, "turn-write outage");
-      await until(
-        async () => (await runtime.inspectSession(session.id)).session.status === "failed",
-        "explicit failed session end",
-      );
-      const snapshot = await runtime.inspectSession(session.id);
-      expect(snapshot.session).toMatchObject({
-        status: "failed",
-        error: { code: "durable.write.failure" },
-      });
-      expect(snapshot.turns[0]?.status).toBe("failed");
-      expect(Date.now() - startedAt).toBeLessThan(500);
-      expect(
-        seen.some(
-          (event) => event.kind === "error" && event.error.code === "durable.write.failure",
-        ),
-      ).toBe(true);
-      expect(seen.some((event) => event.kind === "call_ended" && event.reason === "failed")).toBe(
-        true,
-      );
-      expect(closeCall).toHaveBeenCalledWith("error");
-      expect(
-        seen.some(
-          (event) =>
-            event.kind === "error" && event.error.code === "voice_runtime.call_close_failed",
-        ),
-      ).toBe(closeMode === "abort");
-      const result = await running.catch(() => undefined);
-      await draining;
-      if (closeMode === "media_end") {
-        expect(result).toMatchObject({ terminalReason: "failed", terminalSource: "provider_runtime" });
+      try {
+        const startedAt = Date.now();
+        call.push(streamStarted(session.id));
+        stt.pushFinal(session.id, "cannot persist this turn");
+        await until(() => outageStarted, "turn-write outage");
+        await until(
+          async () => (await runtime.inspectSession(session.id)).session.status === "failed",
+          "explicit failed session end",
+        );
+        const snapshot = await runtime.inspectSession(session.id);
+        expect(snapshot.session).toMatchObject({
+          status: "failed",
+          error: { code: "durable.write.failure" },
+        });
+        expect(snapshot.turns[0]?.status).toBe("failed");
+        expect(Date.now() - startedAt).toBeLessThan(500);
+        expect(
+          seen.some(
+            (event) => event.kind === "error" && event.error.code === "durable.write.failure",
+          ),
+        ).toBe(true);
+        expect(seen.some((event) => event.kind === "call_ended" && event.reason === "failed")).toBe(
+          true,
+        );
+        expect(closeCall).toHaveBeenCalledWith("error");
+        expect(
+          seen.some(
+            (event) =>
+              event.kind === "error" && event.error.code === "voice_runtime.call_close_failed",
+          ),
+        ).toBe(closeMode === "abort");
+        const result = await running.catch(() => undefined);
+        await draining;
+        if (closeMode === "media_end") {
+          expect(result).toMatchObject({
+            terminalReason: "failed",
+            terminalSource: "provider_runtime",
+          });
+        }
+      } finally {
+        call.push(streamEnded(session.id, "error"));
+        await running.catch(() => undefined);
+        await draining;
+        await runtime.stop();
       }
-    } finally {
-      call.push(streamEnded(session.id, "error"));
-      await running.catch(() => undefined);
-      await draining;
-      await runtime.stop();
-    }
-  }, 15_000);
+    },
+    15_000,
+  );
 
   it("closes the call on the recovery deadline when store reads stall", async () => {
     const durableStore = createInMemoryDurableRuntimeStore();
