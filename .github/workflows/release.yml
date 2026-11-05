@@ -82,10 +82,12 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Install an npm version that supports trusted publishing
+      - name: Install pinned npm version for trusted publishing
         run: |
-          npm install -g npm@latest
-          npm --version
+          npm install -g npm@11.21.1
+          NPM_VERSION="$(npm --version)"
+          echo "Using npm $NPM_VERSION"
+          test "$NPM_VERSION" = "11.21.1"
 
       - name: Verify release source and version
         id: source
@@ -297,7 +299,12 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      - run: npm install -g npm@latest
+      - name: Install pinned npm version for trusted publishing
+        run: |
+          npm install -g npm@11.21.1
+          NPM_VERSION="$(npm --version)"
+          echo "Using npm $NPM_VERSION"
+          test "$NPM_VERSION" = "11.21.1"
       - uses: actions/download-artifact@v4
         with:
           name: voice-runtime-release-artifact
