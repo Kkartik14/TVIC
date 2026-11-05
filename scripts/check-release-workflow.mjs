@@ -162,6 +162,19 @@ assert(
   releaseCheckNameMatch[1] === ciCheckName,
   `release check name ${releaseCheckNameMatch[1]} does not match CI verify job name ${ciCheckName}`,
 );
+for (const [document, contents] of [
+  [
+    "release guide",
+    await readFile(path.join(repositoryRoot, "docs/releasing.md"), "utf8"),
+  ],
+  ["security guide", await readFile(path.join(repositoryRoot, "docs/security.md"), "utf8")],
+]) {
+  assert(
+    contents.includes(`\`${ciCheckName}\``),
+    `${document} does not name the required ${ciCheckName} check`,
+  );
+  assert(!contents.includes("`Verify`"), `${document} names the obsolete Verify check`);
+}
 const lintJobStart = ciWorkflow.search(/^  lint:\s*$/mu);
 assert(lintJobStart >= 0, "CI workflow is missing the lint job");
 const lintJob = ciWorkflow.slice(lintJobStart);
