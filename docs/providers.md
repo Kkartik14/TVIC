@@ -372,11 +372,16 @@ Official model information: <https://developers.deepgram.com/docs/models-languag
 
 ### Sarvam
 
-The adapter uses the Sarvam realtime WebSocket protocol and supports partial and
-final transcripts, VAD signals, and manual flush. The default model is
-`saaras:v3`.
+The adapter uses Sarvam's legacy streaming WebSocket endpoint
+(`/speech-to-text/ws`); TVIC defaults to `saaras:v3` and also supports
+`saaras:v4`. The endpoint's documented result is a final transcript per
+utterance. The adapter maps its VAD signals and supports manual flush, but TVIC
+does not advertise interim transcripts for this adapter. Sarvam's newer Realtime WebSocket
+(`/speech-to-text-realtime/ws`) uses a separate protocol and is not implemented
+by this adapter.
 
-Official protocol information: <https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/ws>
+Official references: [legacy WebSocket API](https://docs.sarvam.ai/api-reference/legacy/speech-to-text/transcribe/ws)
+and [Realtime Streaming API](https://docs.sarvam.ai/api/api-guides-tutorials/speech-to-text/realtime-streaming).
 
 ### ElevenLabs Scribe
 
