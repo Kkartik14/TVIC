@@ -225,10 +225,14 @@ accounts. The example starts with deterministic mock STT, LLM, and TTS providers
 switch to `VOICE_PROVIDER_MODE=live` only after adding live credentials.
 
 ```bash
-cp examples/voice-mode/.env.example .env
+test -e .env || cp examples/voice-mode/.env.example .env
 pnpm install --frozen-lockfile
 pnpm --filter @tvic/example-voice-mode start
 ```
+
+If a root `.env` already exists, merge the `VOICE_*` settings into it instead
+of overwriting it. The root file is shared with the live-call example and
+provider smoke scripts.
 
 Open <http://localhost:8090>, then generate and paste a local app token:
 

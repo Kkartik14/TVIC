@@ -9,10 +9,14 @@ phone gateway's capacity.
 From the repository root:
 
 ```bash
-cp examples/voice-mode/.env.example .env
+test -e .env || cp examples/voice-mode/.env.example .env
 pnpm install --frozen-lockfile
 pnpm --filter @tvic/example-voice-mode start
 ```
+
+If a root `.env` already exists, merge the `VOICE_*` settings into it instead
+of overwriting it. The root file is shared with the live-call example and
+provider smoke scripts.
 
 Open <http://localhost:8090>, generate a local application token in another terminal,
 and paste it into the client:
@@ -30,7 +34,10 @@ turn boundary; continuous mode uses deterministic 500 ms audio windows instead o
 real VAD. This mode is for local validation only.
 The example file opts into built-in development signing secrets for this local demo.
 Deployments must remove `VOICE_ALLOW_INSECURE_LOCAL_SECRETS` and provide all four
-signing secrets explicitly.
+signing secrets explicitly. When `NODE_ENV` or `TVIC_ENV` is `production`, each
+of `VOICE_AUTH_SECRET`, `VOICE_ADMIN_SECRET`, `STREAM_TOKEN_SECRET`, and
+`SAFETY_IDENTIFIER_SECRET` must contain at least 32 characters or startup fails.
+Generate each secret separately with `openssl rand -base64 48`.
 
 The client first mints a single-use session token with `POST /v1/voice/session`, then
 opens `/voice/:sessionRef?token=...&exp=...` and sends `session.start`. The mint request
@@ -178,8 +185,9 @@ With PostgreSQL configured, local and standalone runs bootstrap the runtime and
 memory schemas before opening request-time pools. When `NODE_ENV=production` or
 `TVIC_ENV=production`, the app skips database migrations at startup. Run both
 `runPostgresMigrations` and `runPostgresMemoryMigrations` from a deployment job
-before starting the app, using migration credentials separate from the runtime
-database credentials where possible.
+before starting the app, using a DDL-capable connection separate from the runtime
+database credentials where possible. Production requires both `DATABASE_URL` and
+`REDIS_URL`; configure both before starting the app.
 
 `409 cap_exceeded` means a per-user session slot is still reserved. If the browser knows
 that session reference, pass it as `supersedes`. A lost mint response can leave the

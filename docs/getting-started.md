@@ -74,10 +74,14 @@ a paid service.
 From a checkout of TVIC:
 
 ```bash
-cp examples/voice-mode/.env.example .env
+test -e .env || cp examples/voice-mode/.env.example .env
 pnpm install --frozen-lockfile
 pnpm --filter @tvic/example-voice-mode start
 ```
+
+If a root `.env` already exists, merge the `VOICE_*` settings into it instead
+of overwriting it. The root file is shared with the live-call example and
+provider smoke scripts.
 
 Open <http://localhost:8090>. In another terminal, mint a local development
 token:
