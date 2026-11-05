@@ -11,6 +11,10 @@ const selector = await readFile(
   path.join(repositoryRoot, "scripts/release-check-selector.mjs"),
   "utf8",
 );
+const checkRunFetcher = await readFile(
+  path.join(repositoryRoot, "scripts/fetch-release-check-runs.mjs"),
+  "utf8",
+);
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -86,10 +90,10 @@ assert(
   "release does not compare tag and main SHAs",
 );
 assert(
-  /check-runs\?check_name=Merge%20Gate&app_id=15368&filter=all&per_page=100/u.test(
+  /node scripts\/fetch-release-check-runs\.mjs "\$API_URL" "\$REPOSITORY" "\$TAG_SHA" "\$CHECKS_JSON"/u.test(
     sourceVerification,
   ),
-  "release does not request every Merge Gate run from the expected GitHub Actions app",
+  "release does not enumerate paginated check suites and runs for the expected app",
 );
 assert(
   /node scripts\/release-check-selector\.mjs "\$CHECKS_JSON" "\$TAG_SHA"/u.test(sourceVerification),
@@ -116,6 +120,14 @@ assert(
   /export function runFixture/u.test(selector) &&
     /newer failure must not be masked by an older successful run/u.test(selector),
   "release selector is missing the regression fixture for a newer failed run",
+);
+assert(
+  /export async function runPaginationFixture/u.test(checkRunFetcher) &&
+    /RELEASE_CHECK_APP_ID = 15368/u.test(checkRunFetcher) &&
+    /collectionKey: "check_suites"/u.test(checkRunFetcher) &&
+    /collectionKey: "check_runs"/u.test(checkRunFetcher) &&
+    /items.length === expectedTotal/u.test(checkRunFetcher),
+  "release check fetcher does not validate complete paginated check-suite and check-run results",
 );
 const verifyJobStart = ciWorkflow.search(/^  verify:\s*$/mu);
 assert(verifyJobStart >= 0, "CI workflow is missing the verify job");

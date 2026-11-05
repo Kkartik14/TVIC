@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { runPaginationFixture } from "./fetch-release-check-runs.mjs";
 
 export const REQUIRED_CHECK_NAME = "Merge Gate";
 export const REQUIRED_APP_ID = 15368;
@@ -136,6 +137,12 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
   const [, , ...args] = process.argv;
   if (args.length === 1 && args[0] === "--fixture") {
     runFixture();
+    const paginated = await runPaginationFixture();
+    const paginatedSelection = selectReleaseCheckRun(paginated.check_runs, "expected-sha");
+    assert(
+      !paginatedSelection.ok && paginatedSelection.selectedRun?.id === 101,
+      "a newer failed run on a later API page must fail release selection",
+    );
   } else if (args.length === 2) {
     await selectFromFile(args[0], args[1]);
   } else {
