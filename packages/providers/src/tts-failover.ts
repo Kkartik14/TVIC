@@ -1596,9 +1596,9 @@ function failoverCapabilitySnapshotVoices(
             selection.model === mapping.requestedModel),
       );
       if (declaredPrimarySelections.length === 0) {
-        const primarySnapshotProviders =
-          primary.capabilities.voiceSnapshotProviders ??
-          (mapping.requestedProvider !== undefined ? [mapping.requestedProvider] : [primary.name]);
+        const primarySnapshotProviders = primary.capabilities.voiceSnapshotProviders ?? [
+          primary.name,
+        ];
         selections.push(
           ...primarySnapshotProviders.map((provider) => ({
             provider,
