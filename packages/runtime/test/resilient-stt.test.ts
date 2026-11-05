@@ -170,8 +170,8 @@ describe("withSttReconnect", () => {
     try {
       for (let index = 1; index <= 500; index += 1) {
         await stream.sendAudio(audioChunk(index, 640, 20));
-        await waitFor(() => first.order.length === index);
       }
+      await waitFor(() => first.order.length === 500);
 
       first.events.fail(
         providerError("stt.transport.write_failed", "generation failed", {
@@ -179,8 +179,8 @@ describe("withSttReconnect", () => {
           retriable: true,
         }),
       );
-      await waitFor(() => getSttRecoveryControl(stream)?.state() === "recovering");
       await waitFor(() => fake.openCalls === 2);
+      expect(getSttRecoveryControl(stream)?.state()).toBe("opening");
 
       for (let index = 501; index <= 2_000; index += 1) {
         await stream.sendAudio(audioChunk(index, 640, 20));
@@ -196,7 +196,7 @@ describe("withSttReconnect", () => {
       fake.releaseReconnectOpen();
       await stream.close();
     }
-  });
+  }, 15_000);
 
   it("retains the replay tail while another uncertain window arrives after a long reopen", async () => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });

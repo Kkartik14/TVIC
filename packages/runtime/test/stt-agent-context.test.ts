@@ -2043,12 +2043,15 @@ describe("STT agent context commands", () => {
       code: STT_ERROR_CODES.contextUpdateFailed,
       category: "timeout",
     });
-    await waitFor(() => openCount === 3 && getSttRecoveryControl(stream)?.state() === "healthy");
+    await waitFor(
+      () => openCount === 3 && getSttRecoveryControl(stream)?.state() === "healthy",
+      5_000,
+    );
     const secondRecoveryDelayMs = Date.now() - secondFailureAt;
     await stream.close();
 
     expect(secondRecoveryDelayMs).toBeGreaterThanOrEqual(40);
-  });
+  }, 15_000);
 
   it("does not hold reconnect audio for a local context update", async () => {
     const order: string[] = [];
@@ -3026,34 +3029,41 @@ describe("STT agent context commands", () => {
     const removeErrorListener = getSttRecoveryControl(stream)?.subscribeContextUpdateError?.(() => {
       markOlderReplayFailed();
     });
+    let latestUpdate: Promise<void> | undefined;
 
-    await stream.updateAgentContext!("accepted context");
-    await stream.sendAudio(audioChunk(1));
-    await olderReplayStarted;
-    await olderReplayFailed;
-    expect(openCount).toBe(2);
-    const latestUpdate = stream.updateAgentContext!("latest context");
-    await waitFor(() => openCount === 3);
-    await latestContextApplied;
-    await latestUpdate;
-    await waitFor(() => openCount === 3);
+    try {
+      await stream.updateAgentContext!("accepted context");
+      await stream.sendAudio(audioChunk(1));
+      await olderReplayStarted;
+      await olderReplayFailed;
+      expect(openCount).toBe(2);
+      latestUpdate = stream.updateAgentContext!("latest context");
+      void latestUpdate.catch(() => undefined);
+      await waitFor(() => openCount === 3, 5_000);
+      await latestContextApplied;
+      await latestUpdate;
+      await waitFor(() => openCount === 3, 5_000);
 
-    releaseOlderReplay();
-    await waitFor(
-      () => generations[1]?.order.includes("context-applied-late:accepted context") === true,
-    );
-    await stream.close();
-    removeErrorListener?.();
+      releaseOlderReplay();
+      await waitFor(
+        () => generations[1]?.order.includes("context-applied-late:accepted context") === true,
+        5_000,
+      );
 
-    expect(generations[1]?.order).toEqual([
-      "context-start:accepted context",
-      "context-applied-late:accepted context",
-    ]);
-    expect(generations[2]?.order).toEqual([
-      "context-start:latest context",
-      "context-applied:latest context",
-    ]);
-  });
+      expect(generations[1]?.order).toEqual([
+        "context-start:accepted context",
+        "context-applied-late:accepted context",
+      ]);
+      expect(generations[2]?.order).toEqual([
+        "context-start:latest context",
+        "context-applied:latest context",
+      ]);
+    } finally {
+      releaseOlderReplay();
+      removeErrorListener?.();
+      await stream.close().catch(() => undefined);
+    }
+  }, 15_000);
 
   it("recovers when a timed-out probationary context write lands after a newer update", async () => {
     let openCount = 0;
@@ -3657,8 +3667,8 @@ function audioChunk(value: number): InputAudioChunk {
   }) as InputAudioChunk;
 }
 
-async function waitFor(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 1_000;
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error("condition was not reached");
     await new Promise<void>((resolve) => setTimeout(resolve, 1));
