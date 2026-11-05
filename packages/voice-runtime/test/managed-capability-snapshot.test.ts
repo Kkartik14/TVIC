@@ -1424,9 +1424,10 @@ describe("managed account voice capability preflight", () => {
       providers: { ...providerSet, tts },
       models: { tts: "primary-model", ttsVoice: "requested-voice" },
       loadProviderCapabilitySnapshots: async ({ providerCapabilitySnapshotSelections }) => {
-        selectionsSeenByLoader = providerCapabilitySnapshotSelections;
+        const selections = providerCapabilitySnapshotSelections ?? [];
+        selectionsSeenByLoader = selections;
         const validUntil = new Date(Date.now() + 60_000).toISOString();
-        return providerCapabilitySnapshotSelections.map((selection) =>
+        return selections.map((selection) =>
           selectedVoiceSnapshot(
             selection.provider,
             selection.model ?? "primary-model",
@@ -1448,6 +1449,76 @@ describe("managed account voice capability preflight", () => {
           call: testCall(),
         }),
       ).rejects.toThrow(/snapshot is unsupported.*from source-owner/u);
+      expect(selectionsSeenByLoader).toEqual([
+        { provider: "source-owner", model: "primary-model", voice: "requested-voice" },
+        { provider: "target-owner", model: "fallback-model", voice: "fallback-voice" },
+      ]);
+      expect(callHandleCreated).toBe(false);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("checks a wrapper mapping's requested provider when it is a snapshot provider", async () => {
+    const providerSet = providers();
+    let selectionsSeenByLoader:
+      | readonly { readonly provider: string; readonly model?: string; readonly voice: string }[]
+      | undefined;
+    let callHandleCreated = false;
+    const tts: TextToSpeechProvider = {
+      name: "wrapper-tts",
+      kind: "tts",
+      version: "1.0.0",
+      capabilities: {
+        ...capabilities,
+        voiceSelection: "account_snapshot",
+        voiceSnapshotProviders: ["source-owner", "target-owner"],
+        ttsVoiceMappings: [
+          {
+            requestedProvider: "source-owner",
+            requestedModel: "primary-model",
+            requestedVoice: "requested-voice",
+            provider: "target-owner",
+            model: "fallback-model",
+            voice: "fallback-voice",
+          },
+        ],
+      },
+      configuredModel: "primary-model",
+      configuredVoice: "requested-voice",
+      async synthesize() {
+        throw new Error("synthesis should not start during preflight");
+      },
+    };
+    const agent = createVoiceAgent({
+      prompt: "Answer the caller.",
+      providers: { ...providerSet, tts },
+      loadProviderCapabilitySnapshots: async ({ providerCapabilitySnapshotSelections }) => {
+        const selections = providerCapabilitySnapshotSelections ?? [];
+        selectionsSeenByLoader = selections;
+        const validUntil = new Date(Date.now() + 60_000).toISOString();
+        return selections.map((selection) =>
+          selectedVoiceSnapshot(
+            selection.provider,
+            selection.model ?? "primary-model",
+            selection.voice,
+            selection.provider === "source-owner" ? "unsupported" : "supported",
+            validUntil,
+          ),
+        );
+      },
+    });
+
+    try {
+      await expect(
+        agent.start({
+          callHandle: async () => {
+            callHandleCreated = true;
+            return testCallHandle();
+          },
+          call: testCall(),
+        }),
+      ).rejects.toThrow(/capability snapshot is unsupported.*model primary-model/u);
       expect(selectionsSeenByLoader).toEqual([
         { provider: "source-owner", model: "primary-model", voice: "requested-voice" },
         { provider: "target-owner", model: "fallback-model", voice: "fallback-voice" },

@@ -83,3 +83,70 @@ setup step, then pass an immutable snapshot to the provider.
 one. Providers with stricter submission limits should return their limit for
 the selected model and voice; complete-text `synthesize()` implementations
 should continue validating their own request size.
+
+## Capability snapshots for wrapper adapters
+
+### Declaring snapshot-dependent fallback routes
+
+`requiresDeclaredTtsVoiceMappingForCapabilitySnapshots` is optional. Set it to
+`true` when an adapter can route a request to an account-backed voice that it
+cannot identify before synthesis, such as a wrapper whose request mapper picks
+the voice at run time. When it is `true`, `createVoiceAgent()` rejects the
+configuration when either `providerCapabilitySnapshots` or
+`loadProviderCapabilitySnapshots` is configured, with
+`voice_runtime.invalid_config`. `createTtsFailoverProvider()` rejects a
+`synthesize()` request carrying `providerCapabilitySnapshots` before calling
+the primary provider, with `provider.invalid_request` and
+`metadata.snapshotsRequired: true`. Requests without snapshots are unaffected.
+
+Failover sets this flag when either child sets it, or when `mapFallbackRequest`
+is used with an account-backed fallback and `fallbackRequestVariants` are
+absent or any variant has no resolvable fallback voice. Declare variants for
+the primary model/voice selections that can be requested, and make sure each
+variant resolves to a fallback voice. Its fallback model may come from the
+variant or the fallback provider's `configuredModel`; specify a variant model
+when it must override that default, or when the fallback has no configured
+model. A custom adapter that sets the flag must reject
+snapshot-bearing requests in its own `synthesize()` method. Non-boolean values
+are configuration errors.
+
+### Declaring TTS voice mappings
+
+`capabilities.ttsVoiceMappings` contains `ProviderTtsVoiceMapping` entries. Each
+entry maps an optional `requestedModel` and `requestedVoice` to the target
+`provider`, `model`, and `voice`. If either requested field is omitted, it
+matches any value for that field.
+
+`requestedProvider` identifies the provider that receives the requested model
+and voice before mapping. `provider` identifies the provider that receives the
+mapped selection. `createTtsFailoverProvider()` publishes voice mappings for
+declared fallback variants when every variant resolves to a fallback voice;
+equivalent mappings are deduplicated. Those mappings set `requestedProvider`
+to the primary child's name and `provider` to the fallback child's name. The
+fallback model comes from the variant or the fallback child's
+`configuredModel`. If any variant has no resolvable fallback voice, failover
+omits the mapping catalog rather than publishing a partial one.
+
+Mappings describe routing; they do not by themselves make account-backed
+voices mandatory snapshot checks. `createTtsFailoverProvider()` derives
+`providerCapabilitySnapshotVoices` from child declarations and complete
+fallback variants. A custom wrapper should declare each source/target
+selection there, or include their owners in `capabilities.voiceSnapshotProviders`,
+to require them in managed voice preflight. When a failover mapping's
+`requestedProvider` is the primary child, TVIC checks the requested voice
+using the failover's declared primary `providerCapabilitySnapshotVoices`; those
+selections can name a separate snapshot owner.
+
+For another wrapper, `requestedProvider` adds the source
+provider/model/voice to the loader's requested selections when that provider is
+listed in `providerCapabilitySnapshotProviders` or
+`capabilities.voiceSnapshotProviders`. `providerCapabilitySnapshotProviders`
+only makes snapshots available to the adapter; it does not require a managed
+voice check by itself. If `requestedProvider` is omitted, the mapping adds
+only the target selection; explicit `providerCapabilitySnapshotVoices`
+declarations are still checked separately.
+
+Mappings may contain at most 64 entries. `provider` and `voice`, plus any
+supplied `requestedProvider`, `requestedModel`, `requestedVoice`, and `model`,
+must be non-empty strings of at most 256 characters with no control
+characters. Duplicate entries are rejected.
