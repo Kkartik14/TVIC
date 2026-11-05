@@ -6,6 +6,7 @@ import type {
   AgentId,
   Clock,
   DurableSessionTransaction,
+  FailedSession,
   Runtime,
   SessionLease,
   SessionId,
@@ -1660,4 +1661,145 @@ describe("R2-06 recovery and durable correctness", () => {
     },
     15_000,
   );
+
+  it("does not confirm a competing failed session with a different error", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+    const runUnfencedSessionTransaction =
+      durableStore.runUnfencedSessionTransaction?.bind(durableStore);
+    if (!runUnfencedSessionTransaction) {
+      throw new Error("Test store does not support unfenced session transactions");
+    }
+    const outageDurationMs = 100;
+    let outageStarted = false;
+    let outageUntilMs = 0;
+    let shouldInsertCompetingFailure = false;
+    let competingFailureInserted = false;
+    durableStore.runSessionTransaction = async <T>(
+      sessionId: SessionId,
+      lease: SessionLease,
+      operation: (transaction: DurableSessionTransaction) => Promise<T>,
+    ) => {
+      if (outageStarted && Date.now() < outageUntilMs) {
+        throw new BackendUnavailableError("injected bounded store outage");
+      }
+      return runSessionTransaction(sessionId, lease, async (transaction) => {
+        const wrapped = new Proxy(transaction, {
+          get(target, property, receiver) {
+            if (property === "updateTurn") {
+              return async (
+                turnSessionId: SessionId,
+                turnId: Parameters<DurableSessionTransaction["updateTurn"]>[1],
+                updater: Parameters<DurableSessionTransaction["updateTurn"]>[2],
+              ) =>
+                target.updateTurn(turnSessionId, turnId, (record) => {
+                  const next = updater(record);
+                  if (next.turn.status === "thinking" && !outageStarted) {
+                    outageStarted = true;
+                    outageUntilMs = Date.now() + outageDurationMs;
+                    throw new BackendUnavailableError("injected bounded store outage");
+                  }
+                  return next;
+                });
+            }
+            const value = Reflect.get(target, property, receiver) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        return operation(wrapped);
+      });
+    };
+    durableStore.runUnfencedSessionTransaction = async <T>(
+      sessionId: SessionId,
+      operation: (transaction: DurableSessionTransaction) => Promise<T>,
+    ) => {
+      if (outageStarted && Date.now() < outageUntilMs) {
+        throw new BackendUnavailableError("injected bounded store outage");
+      }
+      return runUnfencedSessionTransaction(sessionId, async (transaction) => {
+        if (shouldInsertCompetingFailure && !competingFailureInserted) {
+          competingFailureInserted = true;
+          const endedAt = new Date().toISOString() as Timestamp;
+          await transaction.updateSession(sessionId, (record) => ({
+            ...record,
+            session: {
+              ...record.session,
+              status: "failed",
+              startedAt: "startedAt" in record.session ? record.session.startedAt : endedAt,
+              endedAt,
+              error: {
+                name: "InternalError",
+                code: "test.competing_session_failure",
+                category: "internal",
+                message: "another writer failed this session first",
+                retriable: false,
+              },
+            } as FailedSession,
+          }));
+        }
+        return operation(transaction);
+      });
+    };
+
+    const runtime = createRuntime({
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 300, persistenceRecoveryGraceMs: 20 },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const session = attachment.session;
+    const call = makeCallHandle();
+    vi.spyOn(call.handle, "close").mockImplementation(async () => {
+      shouldInsertCompetingFailure = true;
+    });
+    const stt = makeStt();
+    const llm = makeLlm(() => {
+      throw new Error("the turn must not reach the model while persistence is unavailable");
+    });
+    const tts = makeTts(() => [], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      attachment,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.start();
+    const seen: VoiceEvent[] = [];
+    const draining = (async () => {
+      for await (const event of running) seen.push(event);
+    })().catch(() => undefined);
+
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "a competing writer fails the session");
+      await running.catch(() => undefined);
+      await draining;
+      const snapshot = await runtime.inspectSession(session.id);
+
+      expect(outageStarted).toBe(true);
+      expect(competingFailureInserted).toBe(true);
+      expect(snapshot.session).toMatchObject({
+        status: "failed",
+        error: { code: "test.competing_session_failure" },
+      });
+      expect(
+        seen.some(
+          (event) =>
+            event.kind === "error" &&
+            event.error.code === "durable.write.failure" &&
+            event.error.metadata?.sessionTerminalizationConfirmed === false &&
+            event.error.metadata?.sessionTerminalizationOutcome === "failed" &&
+            event.recoverable === false,
+        ),
+      ).toBe(true);
+    } finally {
+      call.push(streamEnded(session.id, "error"));
+      await running.catch(() => undefined);
+      await draining;
+      await runtime.stop();
+    }
+  }, 15_000);
 });

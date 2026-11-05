@@ -1481,14 +1481,53 @@ export class PipelineVoiceLoop {
         Date.now() + criticalWriteTimeoutMs,
       );
     }
-    await settleWithinDeadline(
-      () =>
-        this.#options.runtime.endSession(this.#options.session.id, {
-          reason: "failed",
-          error: failure,
-        }),
-      Date.now() + criticalWriteTimeoutMs,
-    );
+    const terminalizationDeadline = Date.now() + criticalWriteTimeoutMs;
+    let terminalizationOutcome: string | undefined;
+    let terminalizationConfirmed = false;
+    while (Date.now() < terminalizationDeadline) {
+      const terminalization = await settleWithinDeadline(
+        () =>
+          this.#options.runtime.endSession(this.#options.session.id, {
+            reason: "failed",
+            error: failure,
+          }),
+        terminalizationDeadline,
+      );
+      if (terminalization.status === "completed") {
+        terminalizationOutcome = terminalization.value.status;
+        terminalizationConfirmed =
+          terminalization.value.status === "failed" &&
+          terminalization.value.error.code === failure.code;
+        break;
+      }
+      if (terminalization.status === "timeout") break;
+      if (
+        isCriticalWriteTimeoutError(terminalization.error) ||
+        !isBackendUnavailableError(terminalization.error)
+      ) {
+        break;
+      }
+      const remainingMs = terminalizationDeadline - Date.now();
+      if (remainingMs <= 0) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, remainingMs)));
+    }
+    if (!terminalizationConfirmed) {
+      this.#emitVoiceEvent({
+        kind: "error",
+        error: {
+          ...failure,
+          message: "The failed session outcome was not confirmed in durable storage",
+          metadata: {
+            ...(failure.metadata ?? {}),
+            sessionTerminalizationConfirmed: false,
+            ...(terminalizationOutcome
+              ? { sessionTerminalizationOutcome: terminalizationOutcome }
+              : {}),
+          },
+        },
+        recoverable: false,
+      });
+    }
   }
 
   #closeCallHandle(): Promise<void> {
