@@ -191,6 +191,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   #inputFinished = false;
   #inputEndReason: StreamEndReason | undefined;
   #remoteHangupSignaled = false;
+  #protocolFailure = false;
   #resolveRemoteHangup!: () => void;
   readonly remoteHangup = new Promise<void>((resolve) => {
     this.#resolveRemoteHangup = resolve;
@@ -245,15 +246,17 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
 
     this.#socket.on("message", (data) => this.#handleRawMessage(data));
     this.#socket.on("close", () => {
-      if (!this.#closed) this.#signalRemoteHangup();
+      if (!this.#closed && !this.#protocolFailure) this.#signalRemoteHangup();
       this.#finishInbound();
       this.#closeEvents();
     });
     this.#socket.on("error", (error) => {
-      if (!this.#closed) this.#signalRemoteHangup();
+      if (!this.#closed && !this.#protocolFailure) {
+        this.#signalRemoteHangup();
+        this.#pushEvent(this.#mediaError(error));
+      }
       this.#inputFinished = true;
       this.#inputPending = new Uint8Array();
-      this.#pushEvent(this.#mediaError(error));
       this.#closeEvents();
     });
   }
@@ -604,6 +607,7 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
 
   #failProtocol(reason: string): void {
     if (this.#closed) return;
+    this.#protocolFailure = true;
     const error = providerError(
       PROVIDER_ERROR_CODES.twilioMedia,
       "Twilio media stream protocol validation failed",
