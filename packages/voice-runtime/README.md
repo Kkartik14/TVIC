@@ -23,7 +23,7 @@ contracts. If you maintain custom durable-store or idempotency-store adapters,
 read the [2.0.0 migration guide](https://github.com/Kkartik14/TVIC/blob/main/docs/migrations/2.0.0.md)
 before upgrading.
 
-The unreleased `2.2.0` source adds provider-aware speech controls, including
+Version `2.2.0` adds provider-aware speech controls, including
 typed Cartesia text operations, an AssemblyAI turn-taking profile, optional
 bounded capability snapshots, and a managed-agent callback for refreshing them
 before each call. Read the [2.2.0 upgrade guide](https://github.com/Kkartik14/TVIC/blob/main/docs/migrations/2.2.0.md)

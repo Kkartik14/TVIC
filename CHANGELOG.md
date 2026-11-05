@@ -60,8 +60,6 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   `tts_speed.unsupported`, and the `tts.language_unsupported` and
   `stt.vocabulary_unsupported` error codes. Exhaustive consumers of
   `ProviderCompatibilityIssueCode` must handle the new issue codes.
-- Added public consumer checks for the new selection, text-control,
-  capability-snapshot, voice-requirement, and turn-profile types and exports.
 - Exported the Cartesia and ElevenLabs capability snapshot loaders through the
   published `voice-runtime` package and added a managed-agent snapshot loader
   callback for refreshing bounded account facts before each call.
@@ -201,11 +199,37 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   with the previous selection error code in `metadata.selectionErrorCode`.
 - Report unsupported cross-field TTS combinations with the public
   `tts.selection_unsupported` provider compatibility issue code.
-- Compile the published README quick-start example as part of the public-package
-  check so its loader contract and TypeScript example remain valid.
+- Validate Twilio start, stop, and DTMF envelopes before changing call state;
+  malformed nested fields fail with a specific protocol reason.
+- Tolerate and count Twilio chunk and timestamp progression anomalies without
+  closing the call, while dropping and counting exact duplicate and outbound
+  media frames.
+- Correct Sarvam documentation to distinguish the legacy streaming adapter
+  from the separate, unimplemented Realtime API.
+- Document capability-snapshot selection rules for wrapper TTS adapters.
+- Correct self-hosting package-manager, persistence, environment, migration,
+  and production-secret guidance.
+
+### Deprecated
+
+- Deprecate `RuntimeOptions.sessionStore`, `turnStore`, and `toolCallStore`;
+  use `durableStore` for atomic lifecycle writes.
 
 ### Fixed
 
+- Prevent default PCM16 16 kHz mono STT reconnect journals from overflowing
+  after about 10 seconds. The replay budget now covers 2U + R + frame:
+  1,600,640 bytes and 5,018 entries by default, up from 320,000 bytes and 512
+  entries. Derived defaults clamp at 16 MiB and 8,192 entries rather than
+  rejecting otherwise-valid opens; overflow errors include the limit,
+  configured cap, and observed size. At 5 ms actual chunks with omitted frame
+  duration, the entry default represents about 25 seconds of input; the
+  10-second uncertain window alone is about 2,000 such chunks. An audio format
+  declaring `frameDurationMs: 5` reaches the 8,192-entry ceiling, about 41
+  seconds. For 500 concurrent default-format calls, the byte cap allows about
+  800 MB of retained audio in the worst case. Shorter-than-assumed chunks can
+  still reach the entry limit before the time window expires; explicit limits
+  remain available.
 - Stream Hindi, Bengali, Urdu, and CJK sentences incrementally to TTS, and keep
   turn timing consistent across STT reconnect recovery.
 - Apply provider-specific language, model, vocabulary, and speed settings or
@@ -246,6 +270,33 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   report the error and continue the call.
 - Close the STT stream cleanly when hangup overlaps a reconnect open, and keep
   replay audio moving if a replayed context write times out.
+- Resume transcript admission after an interruption checkpoint recovers, while
+  preserving degradation from an unrelated durable write failure.
+- Prevent text-only delivery that settles after hangup, cancellation, or STT
+  shutdown from completing the turn or writing it to memory. Preserve a true
+  `delivery.text` transport receipt as `transport_accepted`, and skip delivery
+  when terminal shutdown is already observed.
+- Report unexpected STT EOF as `call_ended.reason = failed` instead of
+  misreporting it as `remote_hangup`.
+- Prevent live calls from remaining connected but unable to process caller
+  input after durable-store failures.
+- Set the default `criticalWriteTimeoutMs` to 2,000 ms; no database schema
+  migration is required.
+- Reject starting a second active turn in a durable session with
+  `turn.already_active`.
+- Report Twilio protocol validation failures as protocol errors instead of
+  caller hangups.
+- Emit final Soniox transcript text received after end-of-audio when the
+  provider closes without its finished marker.
+- Keep ElevenLabs sibling contexts alive when late messages arrive for recently
+  closed contexts after barge-in.
+- Report malformed accumulated OpenAI tool arguments in
+  `response.completed` as a non-retriable `llm.failed` event.
+- Make a stopped managed voice-event iterator reject with the run's original
+  Error, and wait for managed finalization before a rejected iterator read
+  throws the same error as `session.run`.
+- Update the getting-started and voice-agent examples to handle remote hangups
+  without unhandled promise rejections.
 
 ## 2.1.0
 
