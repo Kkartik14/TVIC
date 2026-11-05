@@ -285,6 +285,13 @@ describe("Twilio remote hangup contract", () => {
     if (!fixture) throw new Error("Twilio contract fixture is missing");
 
     const iterator = fixture.handle.events[Symbol.asyncIterator]();
+    const remoteHangup = fixture.handle.remoteHangup;
+    if (!remoteHangup) throw new Error("Twilio handle does not expose remoteHangup");
+    let remoteHangupObserved = false;
+    void remoteHangup.then(() => {
+      remoteHangupObserved = true;
+    });
+
     fixture.start();
     await expect(iterator.next()).resolves.toMatchObject({
       value: { type: "media.stream.started" },
@@ -307,6 +314,8 @@ describe("Twilio remote hangup contract", () => {
       done: false,
     });
     await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+    await Promise.resolve();
+    expect(remoteHangupObserved).toBe(false);
   });
 });
 
