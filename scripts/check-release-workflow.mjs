@@ -163,10 +163,7 @@ assert(
   `release check name ${releaseCheckNameMatch[1]} does not match CI verify job name ${ciCheckName}`,
 );
 for (const [document, contents] of [
-  [
-    "release guide",
-    await readFile(path.join(repositoryRoot, "docs/releasing.md"), "utf8"),
-  ],
+  ["release guide", await readFile(path.join(repositoryRoot, "docs/releasing.md"), "utf8")],
   ["security guide", await readFile(path.join(repositoryRoot, "docs/security.md"), "utf8")],
 ]) {
   assert(
