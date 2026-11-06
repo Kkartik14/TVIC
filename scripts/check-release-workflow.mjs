@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workflow = await readFile(path.join(repositoryRoot, ".github/workflows/release.yml"), "utf8");
+const ciWorkflow = await readFile(path.join(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
 const compose = await readFile(path.join(repositoryRoot, "docker-compose.integration.yml"), "utf8");
 
 function assert(condition, message) {
@@ -63,8 +64,15 @@ assert(
 );
 assert(/sha256sum/u.test(workflow), "release artifact digest is not recorded");
 assert(/--tarball/u.test(workflow), "consumer verification does not receive the exact tarball");
+const packageArtifactStart = workflow.indexOf("  package_artifact:");
+const packageCompatibilityStart = workflow.indexOf("  package_compatibility:");
 assert(
-  /registry\.npmjs\.org[\s\S]*already published/u.test(workflow),
+  packageArtifactStart >= 0 && packageCompatibilityStart > packageArtifactStart,
+  "release package-artifact source check is missing",
+);
+const sourceVerification = workflow.slice(packageArtifactStart, packageCompatibilityStart);
+assert(
+  /registry\.npmjs\.org[\s\S]*already published/u.test(sourceVerification),
   "release does not reject an existing npm version",
 );
 assert(/APPROVED_RELEASE_SHA/u.test(workflow), "release source lacks an explicit approved SHA");
@@ -73,8 +81,37 @@ assert(
   "release does not compare tag and main SHAs",
 );
 assert(
-  /check-runs\?per_page=100/u.test(workflow),
-  "release does not verify the exact Verify check run",
+  /check-runs\?filter=latest&per_page=100/u.test(sourceVerification),
+  "release does not query the exact required CI check run",
+);
+const verifyJobStart = ciWorkflow.search(/^  verify:\s*$/mu);
+assert(verifyJobStart >= 0, "CI workflow is missing the verify job");
+const verifyJob = ciWorkflow.slice(verifyJobStart);
+const nextJob = verifyJob.slice(1).search(/^  [a-z0-9_-]+:\s*$/mu);
+const verifyJobBlock = nextJob < 0 ? verifyJob : verifyJob.slice(0, nextJob + 1);
+const ciCheckNameMatch = /^    name:\s*(.*?)\s*$/mu.exec(verifyJobBlock);
+const ciCheckName = ciCheckNameMatch?.[1]?.replace(/^(?:"([^"]+)"|'([^']+)')$/u, "$1$2");
+assert(ciCheckName, "CI verify job has no static check display name");
+const releaseCheckNameMatch = /const requiredCheckName = ["']([^"']+)["'];/u.exec(
+  sourceVerification,
+);
+assert(releaseCheckNameMatch, "release does not declare its required CI check name");
+assert(
+  releaseCheckNameMatch[1] === ciCheckName,
+  `release check name ${releaseCheckNameMatch[1]} does not match CI verify job name ${ciCheckName}`,
+);
+assert(
+  /check\.name === requiredCheckName\s*&&\s*check\.head_sha === sha/u.test(sourceVerification),
+  "release does not match the required CI check name and exact head SHA",
+);
+assert(
+  /check\.app\?\.slug === "github-actions"/u.test(sourceVerification),
+  "release does not require the required check to come from GitHub Actions",
+);
+assert(
+  /requiredGate\.status !== "completed"/u.test(sourceVerification) &&
+    /requiredGate\.conclusion !== "success"/u.test(sourceVerification),
+  "release does not require the CI check to complete successfully",
 );
 assert(
   /path:\s*\$\{\{\s*runner\.temp\s*\}\}\/voice-runtime-artifact/u.test(workflow),
