@@ -18,7 +18,7 @@ import {
 import { AsyncQueue } from "@tvic/media";
 
 import { getSttRecoveryControl, withSttReconnect } from "../src/resilient-stt.js";
-import { resolveOptions } from "../src/resilient-stt-policy.js";
+import { resolveOptions, resolveStreamOptions } from "../src/resilient-stt-policy.js";
 import { DEFAULT_STT_AGENT_CONTEXT_TIMEOUT_MS } from "../src/stt-agent-context.js";
 import { SessionUsageAccumulator } from "../src/session-usage.js";
 
@@ -44,6 +44,43 @@ describe("withSttReconnect", () => {
     ).toBe(12);
   });
 
+  it("derives default journal limits from the requested audio format and windows", () => {
+    const defaults = resolveOptions({});
+    const sixteenKhz = resolveStreamOptions(defaults, PCM16_16K_MONO);
+    const eightKhz = resolveStreamOptions(defaults, {
+      ...PCM16_16K_MONO,
+      sampleRateHz: 8_000,
+    });
+    const declaredTwentyMsFrames = resolveStreamOptions(defaults, {
+      ...PCM16_16K_MONO,
+      frameDurationMs: 20,
+    });
+
+    expect(sixteenKhz.maxBufferedBytes).toBe(1_600_640);
+    expect(eightKhz.maxBufferedBytes).toBe(800_320);
+    expect(sixteenKhz.maxBufferedCommands).toBe(5_018);
+    expect(eightKhz.maxBufferedCommands).toBe(5_018);
+    expect(declaredTwentyMsFrames.maxBufferedCommands).toBe(2_517);
+
+    const largerRecoveryWindow = resolveStreamOptions(
+      resolveOptions({ maxRecoveryDurationMs: 200_000 }),
+      PCM16_16K_MONO,
+    );
+    const beyondBothCeilings = resolveStreamOptions(
+      resolveOptions({ uncertainWindowMs: 1_000_000 }),
+      PCM16_16K_MONO,
+    );
+    expect(largerRecoveryWindow.maxBufferedCommands).toBe(8_192);
+    expect(beyondBothCeilings.maxBufferedBytes).toBe(16 * 1024 * 1024);
+    expect(beyondBothCeilings.maxBufferedCommands).toBe(8_192);
+    expect(() => resolveOptions({ maxBufferedBytes: 0 })).toThrow(
+      "maxBufferedBytes must be an integer >= 1",
+    );
+    expect(() => resolveOptions({ maxBufferedCommands: 1.5 })).toThrow(
+      "maxBufferedCommands must be an integer >= 1",
+    );
+  });
+
   it("normalizes arbitrary custom-provider open failures at the public boundary", async () => {
     const provider: SpeechToTextProvider = {
       name: "raw-rejection-stt",
@@ -66,6 +103,17 @@ describe("withSttReconnect", () => {
       code: STT_ERROR_CODES.protocolError,
       message: "custom provider exploded",
     });
+  });
+
+  it("clamps oversized derived limits when opening a stream", async () => {
+    const fake = makeProvider();
+    const stream = await withSttReconnect(fake.provider, {
+      uncertainWindowMs: 1_000_000,
+      maxRecoveryDurationMs: 200_000,
+    }).open(openRequest());
+
+    expect(fake.streams).toHaveLength(1);
+    await stream.close();
   });
 
   it("replays ordered audio and commit barriers after a retriable generation failure", async () => {
@@ -108,6 +156,212 @@ describe("withSttReconnect", () => {
     });
     await stream.close();
   });
+
+  it("buffers the full replay tail and default recovery window while reconnect opens", async () => {
+    const fake = makeProvider({ blockReconnectOpen: true });
+    const provider = withSttReconnect(fake.provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+    });
+    const stream = await provider.open(openRequest());
+    const first = fake.streams[0]!;
+
+    try {
+      for (let index = 1; index <= 500; index += 1) {
+        await stream.sendAudio(audioChunk(index, 640, 20));
+      }
+      await waitFor(() => first.order.length === 500);
+
+      first.events.fail(
+        providerError("stt.transport.write_failed", "generation failed", {
+          provider: fake.provider.name,
+          retriable: true,
+        }),
+      );
+      await waitFor(() => fake.openCalls === 2);
+      expect(getSttRecoveryControl(stream)?.state()).toBe("opening");
+
+      for (let index = 501; index <= 2_000; index += 1) {
+        await stream.sendAudio(audioChunk(index, 640, 20));
+      }
+
+      fake.releaseReconnectOpen();
+      await waitFor(() => fake.streams.length === 2);
+      await waitFor(() => fake.streams[1]?.order.length === 2_000);
+      expect(fake.streams[1]?.order).toEqual(
+        Array.from({ length: 2_000 }, (_, index) => `audio:${(index + 1) % 256}`),
+      );
+    } finally {
+      fake.releaseReconnectOpen();
+      await stream.close();
+    }
+  }, 15_000);
+
+  it("retains the replay tail while another uncertain window arrives after a long reopen", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(0);
+
+    const fake = makeProvider({ blockReconnectOpen: true });
+    const stream = await withSttReconnect(fake.provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      connectTimeoutMs: 30_000,
+      maxRecoveryDurationMs: 30_000,
+      stableUptimeMs: 5_000,
+    }).open(openRequest());
+    const first = fake.streams[0]!;
+
+    try {
+      for (let index = 1; index <= 500; index += 1) {
+        await stream.sendAudio(audioChunk(index, 640, 20));
+      }
+      await waitFor(() => first.order.length === 500);
+      vi.setSystemTime(10_000);
+
+      first.events.fail(
+        providerError("stt.transport.write_failed", "generation failed", {
+          provider: fake.provider.name,
+          retriable: true,
+        }),
+      );
+      await waitFor(() => getSttRecoveryControl(stream)?.state() === "recovering");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      vi.advanceTimersByTime(0);
+      await waitFor(() => fake.openCalls === 2);
+
+      for (let index = 501; index <= 1_650; index += 1) {
+        await stream.sendAudio(audioChunk(index, 640, 20));
+      }
+      vi.setSystemTime(33_000);
+
+      fake.releaseReconnectOpen();
+      await waitFor(() => fake.streams.length === 2);
+      await waitFor(() => getSttRecoveryControl(stream)?.state() === "probationary");
+
+      for (let index = 1_651; index <= 2_150; index += 1) {
+        await stream.sendAudio(audioChunk(index, 640, 20));
+        vi.advanceTimersByTime(20);
+      }
+
+      await waitFor(() => fake.streams[1]?.order.length === 2_150);
+      await waitFor(() => getSttRecoveryControl(stream)?.state() === "healthy");
+      expect(getSttRecoveryControl(stream)?.state()).toBe("healthy");
+    } finally {
+      fake.releaseReconnectOpen();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      vi.advanceTimersByTime(0);
+      vi.useRealTimers();
+      await stream.close();
+    }
+  });
+
+  it("fails visibly when shorter chunks reach the derived command bound early", async () => {
+    const fake = makeProvider({ blockReconnectOpen: true });
+    const stream = await withSttReconnect(fake.provider, {
+      jitter: false,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+    }).open(openRequest());
+    const first = fake.streams[0]!;
+
+    try {
+      for (let index = 1; index <= 1_000; index += 1) {
+        await stream.sendAudio(audioChunk(index, 160, 5));
+      }
+      await waitFor(() => first.order.length === 1_000);
+
+      first.events.fail(
+        providerError("stt.transport.write_failed", "generation failed", {
+          provider: fake.provider.name,
+          retriable: true,
+        }),
+      );
+      await waitFor(() => fake.openCalls === 2);
+      expect(getSttRecoveryControl(stream)?.state()).toBe("opening");
+
+      for (let index = 1_001; index <= 5_018; index += 1) {
+        await stream.sendAudio(audioChunk(index, 160, 5));
+      }
+
+      await expect(stream.sendAudio(audioChunk(5_019, 160, 5))).rejects.toMatchObject({
+        code: "stt.reconnect.buffer_overflow",
+        metadata: { limit: "entries", configured: 5_018, observed: 5_019 },
+      });
+      expect(getSttRecoveryControl(stream)?.state()).toBe("failed");
+    } finally {
+      fake.releaseReconnectOpen();
+      await stream.close();
+    }
+  }, 15_000);
+
+  it.each([
+    {
+      limit: "byte",
+      maxBufferedBytes: 1_280,
+      maxBufferedCommands: 8,
+      expectedLimit: "bytes",
+      expectedConfigured: 1_280,
+      expectedObserved: 1_920,
+    },
+    {
+      limit: "command",
+      maxBufferedBytes: 12_800,
+      maxBufferedCommands: 2,
+      expectedLimit: "entries",
+      expectedConfigured: 2,
+      expectedObserved: 3,
+    },
+  ])(
+    "keeps concurrent audio admission within the $limit limit",
+    async ({
+      maxBufferedBytes,
+      maxBufferedCommands,
+      expectedLimit,
+      expectedConfigured,
+      expectedObserved,
+    }) => {
+      const fake = makeProvider({ blockInitialAudio: true });
+      const stream = await withSttReconnect(fake.provider, {
+        jitter: false,
+        initialBackoffMs: 0,
+        maxBackoffMs: 0,
+        maxBufferedBytes,
+        maxBufferedCommands,
+      }).open(openRequest());
+
+      try {
+        const results = await Promise.allSettled(
+          Array.from({ length: 10 }, (_, index) =>
+            stream.sendAudio(audioChunk(index + 1, 640, 20)),
+          ),
+        );
+        const accepted = results.filter((result) => result.status === "fulfilled");
+        const rejected = results.flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
+        );
+
+        expect(accepted).toHaveLength(2);
+        expect(
+          rejected.filter((error) => error?.code === "stt.reconnect.buffer_overflow"),
+        ).toHaveLength(1);
+        expect(
+          rejected.find((error) => error?.code === "stt.reconnect.buffer_overflow"),
+        ).toMatchObject({
+          metadata: {
+            limit: expectedLimit,
+            configured: expectedConfigured,
+            observed: expectedObserved,
+          },
+        });
+        expect(rejected.filter((error) => error?.code === "stt.reconnect.closed")).toHaveLength(7);
+      } finally {
+        fake.releaseReconnectAudio();
+        await stream.close();
+      }
+    },
+  );
 
   it("keeps the original turn profile on reconnect opens", async () => {
     const fake = makeProvider({ failInitialAudio: true });
@@ -1157,6 +1411,7 @@ function makeProvider(
     readonly failReconnectOpen?: "auth" | "transient";
     readonly failOpenCalls?: readonly number[];
     readonly failGenerations?: readonly number[];
+    readonly blockReconnectOpen?: boolean;
     readonly blockCommit?: boolean;
     readonly blockInitialAudio?: boolean;
     readonly blockReconnectAudio?: boolean;
@@ -1168,6 +1423,7 @@ function makeProvider(
   let openCalls = 0;
   let releaseReconnectAudio: (() => void) | undefined;
   let rejectReconnectAudio: ((error: unknown) => void) | undefined;
+  let releaseReconnectOpen: (() => void) | undefined;
   let closingStreams = 0;
   let openWhileClosing = false;
   const provider: SpeechToTextProvider = {
@@ -1178,6 +1434,11 @@ function makeProvider(
     async open(): Promise<SttStream> {
       openCalls += 1;
       openWhileClosing ||= closingStreams > 0;
+      if (options.blockReconnectOpen && openCalls > 1) {
+        await new Promise<void>((resolve) => {
+          releaseReconnectOpen = resolve;
+        });
+      }
       if (
         options.failOpenCalls?.includes(openCalls) ||
         (openCalls > 1 && options.failReconnectOpen)
@@ -1274,6 +1535,10 @@ function makeProvider(
       rejectReconnectAudio = undefined;
       releaseReconnectAudio = undefined;
     },
+    releaseReconnectOpen(): void {
+      releaseReconnectOpen?.();
+      releaseReconnectOpen = undefined;
+    },
   };
 }
 
@@ -1285,7 +1550,7 @@ function openRequest(): SttOpenRequest {
   };
 }
 
-function audioChunk(value: number, byteLength = 2): InputAudioChunk {
+function audioChunk(value: number, byteLength = 2, durationMs = 1): InputAudioChunk {
   return createMediaEvent({
     id: `audio_${value}` as never,
     type: "media.audio.chunk",
@@ -1293,10 +1558,10 @@ function audioChunk(value: number, byteLength = 2): InputAudioChunk {
     sequence: value,
     direction: "input",
     timestamp: TS,
-    monotonicOffsetMs: value,
+    monotonicOffsetMs: value * durationMs,
     audio: {
       format: PCM16_16K_MONO,
-      durationMs: 1,
+      durationMs,
       frameCount: byteLength / 2,
       bytes: new Uint8Array(byteLength).fill(value),
     },
@@ -1339,9 +1604,9 @@ function endpointTranscript(): TranscriptEvent {
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = performance.now() + timeoutMs;
   while (!predicate()) {
-    if (Date.now() >= deadline) {
+    if (performance.now() >= deadline) {
       throw new Error("timed out waiting for resilient STT state");
     }
     await new Promise<void>((resolve) => setImmediate(resolve));

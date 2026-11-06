@@ -1,4 +1,4 @@
-import type { NormalizedError, SttTimestampOrigin, TranscriptEvent } from "@tvic/core";
+import type { AudioFormat, NormalizedError, SttTimestampOrigin, TranscriptEvent } from "@tvic/core";
 import {
   normalizeUnknownError,
   providerError,
@@ -27,7 +27,9 @@ export interface ResolvedSttReconnectOptions {
   readonly maxQuickFailures: number;
   readonly uncertainWindowMs: number;
   readonly maxBufferedBytes: number;
+  readonly maxBufferedBytesExplicit: boolean;
   readonly maxBufferedCommands: number;
+  readonly maxBufferedCommandsExplicit: boolean;
   readonly sendTimeoutMs: number;
   readonly contextUpdateTimeoutMs: number;
   readonly audioWriteTimeoutMs: number;
@@ -47,7 +49,9 @@ const DEFAULT_OPTIONS: ResolvedSttReconnectOptions = {
   maxQuickFailures: 3,
   uncertainWindowMs: 10_000,
   maxBufferedBytes: DEFAULT_STT_MAX_BUFFERED_BYTES,
+  maxBufferedBytesExplicit: false,
   maxBufferedCommands: DEFAULT_STT_MAX_BUFFERED_COMMANDS,
+  maxBufferedCommandsExplicit: false,
   sendTimeoutMs: STT_SEND_TIMEOUT_MS,
   contextUpdateTimeoutMs: DEFAULT_STT_AGENT_CONTEXT_TIMEOUT_MS,
   audioWriteTimeoutMs: STT_SEND_TIMEOUT_MS,
@@ -69,7 +73,9 @@ export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconne
     maxQuickFailures: options.maxQuickFailures ?? DEFAULT_OPTIONS.maxQuickFailures,
     uncertainWindowMs: options.uncertainWindowMs ?? DEFAULT_OPTIONS.uncertainWindowMs,
     maxBufferedBytes: options.maxBufferedBytes ?? DEFAULT_OPTIONS.maxBufferedBytes,
+    maxBufferedBytesExplicit: options.maxBufferedBytes !== undefined,
     maxBufferedCommands: options.maxBufferedCommands ?? DEFAULT_OPTIONS.maxBufferedCommands,
+    maxBufferedCommandsExplicit: options.maxBufferedCommands !== undefined,
     sendTimeoutMs,
     contextUpdateTimeoutMs:
       options.contextUpdateTimeoutMs ?? DEFAULT_OPTIONS.contextUpdateTimeoutMs,
@@ -115,6 +121,50 @@ export function resolveOptions(options: SttReconnectOptions): ResolvedSttReconne
     );
   }
   return resolved;
+}
+
+const DEFAULT_STT_FRAME_DURATION_MS = 20;
+const DEFAULT_STT_COMMAND_FRAME_DURATION_MS = 10;
+const DEFAULT_STT_CONTROL_COMMAND_HEADROOM = 16;
+const MAX_DERIVED_STT_BUFFERED_BYTES = 16 * 1024 * 1024;
+const MAX_DERIVED_STT_BUFFERED_COMMANDS = 8_192;
+
+export function resolveStreamOptions(
+  options: ResolvedSttReconnectOptions,
+  format: AudioFormat,
+): ResolvedSttReconnectOptions {
+  const frameDurationMs = format.frameDurationMs ?? DEFAULT_STT_FRAME_DURATION_MS;
+  const commandFrameDurationMs = format.frameDurationMs ?? DEFAULT_STT_COMMAND_FRAME_DURATION_MS;
+  validateInteger(format.sampleRateHz, "format.sampleRateHz", 1);
+  validateInteger(format.channels, "format.channels", 1);
+  validatePositive(frameDurationMs, "format.frameDurationMs");
+  validatePositive(commandFrameDurationMs, "format.frameDurationMs");
+
+  const bufferedDurationMs =
+    2 * options.uncertainWindowMs + options.maxRecoveryDurationMs + frameDurationMs;
+  const bytesPerSample = format.encoding === "pcm_f32le" ? 4 : 2;
+  const derivedBytes = clampDerivedLimit(
+    Math.ceil(
+      (format.sampleRateHz * format.channels * bytesPerSample * bufferedDurationMs) / 1_000,
+    ),
+    MAX_DERIVED_STT_BUFFERED_BYTES,
+  );
+  const derivedCommands = clampDerivedLimit(
+    Math.ceil(bufferedDurationMs / commandFrameDurationMs) + DEFAULT_STT_CONTROL_COMMAND_HEADROOM,
+    MAX_DERIVED_STT_BUFFERED_COMMANDS,
+  );
+
+  return {
+    ...options,
+    maxBufferedBytes: options.maxBufferedBytesExplicit ? options.maxBufferedBytes : derivedBytes,
+    maxBufferedCommands: options.maxBufferedCommandsExplicit
+      ? options.maxBufferedCommands
+      : derivedCommands,
+  };
+}
+
+function clampDerivedLimit(value: number, ceiling: number): number {
+  return Number.isFinite(value) && value > 0 ? Math.min(Math.ceil(value), ceiling) : ceiling;
 }
 
 function validateInteger(value: number, name: string, minimum: number): void {
@@ -201,9 +251,16 @@ export function normalizeAudioOffsets(
   };
 }
 
-export function bufferOverflowError(): NormalizedError {
+export type SttBufferOverflowLimit = "bytes" | "entries";
+
+export function bufferOverflowError(
+  limit: SttBufferOverflowLimit,
+  configured: number,
+  observed: number,
+): NormalizedError {
   return providerError(STT_ERROR_CODES.bufferOverflow, "The bounded STT replay journal is full", {
     retriable: false,
+    metadata: { limit, configured, observed },
   });
 }
 

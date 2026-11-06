@@ -10,6 +10,7 @@ export { STT_RECOVERY_CONTROL, getSttRecoveryControl } from "./resilient-stt-con
 export type { SttRecoveryControl, SttRecoveryState } from "./resilient-stt-control.js";
 import {
   normalizeGenerationError,
+  resolveStreamOptions,
   resolveOptions,
   sameOptions,
   type ResolvedSttReconnectOptions,
@@ -26,7 +27,19 @@ export interface SttReconnectOptions {
   readonly stableUptimeMs?: number;
   readonly maxQuickFailures?: number;
   readonly uncertainWindowMs?: number;
+  /**
+   * Maximum bytes retained for replay and pending audio. The default is derived
+   * from the requested audio format and `2 * uncertainWindowMs + maxRecoveryDurationMs`
+   * plus one input frame of headroom, up to a 16 MiB default ceiling. Set this
+   * explicitly for a smaller fail-fast budget or when that ceiling is insufficient.
+   */
   readonly maxBufferedBytes?: number;
+  /**
+   * Maximum journal entries. The default is derived from `2 * uncertainWindowMs +
+   * maxRecoveryDurationMs`, the format's frameDurationMs (or an assumed 10 ms
+   * when unspecified), and control-command headroom, up to an 8,192-entry ceiling.
+   * Shorter actual frames can reach this bound before the time windows expire.
+   */
   readonly maxBufferedCommands?: number;
   readonly sendTimeoutMs?: number;
   /** Deadline for context updates; defaults to 2 seconds independently of sendTimeoutMs. */
@@ -124,6 +137,7 @@ class ResilientSttProvider implements SpeechToTextProvider {
   }
 
   async open(request: SttOpenRequest): Promise<SttStream> {
+    const streamOptions = resolveStreamOptions(this.#options, request.format);
     let stream: SttStream | undefined;
     try {
       stream = await this.#provider.open(request);
@@ -140,7 +154,7 @@ class ResilientSttProvider implements SpeechToTextProvider {
           ),
         );
       }
-      const wrapped = new ResilientSttStream(this.#provider, request, stream, this.#options);
+      const wrapped = new ResilientSttStream(this.#provider, request, stream, streamOptions);
       stream = undefined;
       return wrapped;
     } catch (error) {
