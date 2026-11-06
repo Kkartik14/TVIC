@@ -169,6 +169,33 @@ and surface the failure through the host's call-control or operations path. The
 managed facade shares one close attempt between pipeline failure handling and
 session finalization.
 
+### Terminal-write deadlines and ordering
+
+The built-in `Runtime.endTurn()` uses one `criticalWriteTimeoutMs` deadline for
+the complete operation, including the session lookup before its terminal
+transaction. A timeout does not cancel that transaction, so its result can still
+settle or commit later. The pipeline recovery path keeps the late-settlement
+signal and waits for it before inspecting or retrying the failed turn. If the
+write is still pending when the bounded recovery window ends, the call follows
+the fatal persistence path without starting an overlapping terminal write.
+
+Before the built-in `Runtime.endSession()` starts its terminal transaction, it
+waits for tracked turn, status, interruption-checkpoint, and earlier session-end
+writes for that session to settle. Its caller's wait for those writes and the
+pre-write session lookup is bounded by `criticalWriteTimeoutMs`; the terminal
+transaction has its own `criticalWriteTimeoutMs` deadline. A timeout before the
+terminal transaction does not cancel the tracked terminalizer. Once the earlier
+work or read settles, the session may become terminal later. If shutdown releases
+the session lease before a late continuation reaches its write, the stale
+continuation is fenced from committing.
+
+Custom `Runtime` implementations used by `PipelineVoiceLoop` must give
+`endTurn()` one deadline for the complete operation, including reads, and must
+not reject while a store write can still commit later unless it is cancelled,
+fenced, or tracked until settlement. Their session-end operation must serialize
+behind earlier same-session turn, status, interruption-checkpoint, and
+session-terminal writes.
+
 ### Known limitations
 
 - A turn start can commit after its timeout. If a later durable write then fails
