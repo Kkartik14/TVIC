@@ -664,6 +664,18 @@ Multi-context dialogue currently supports ElevenLabs v3 models only; v4 and v4
 Turbo are rejected for this route. It enforces the provider's five-context
 connection limit and v3's voice-registration rules.
 
+For multi-context TTS and dialogue, assign a fresh, unique ID to each context
+for the lifetime of its connection. TVIC rejects an ID that is already active.
+After `cancel()`, late output for that context is discarded so it cannot be
+delivered to a sibling context. The canceled ID remains reserved until TVIC
+discards a late final message (`is_final: true` or `isFinal: true`) or evicts
+that ID after 32 newer contexts have closed; `openContext()` rejects reuse while
+the ID is retained. After eviction, a late response for an ID with no active
+context is treated as unknown and fails the shared connection.
+Cancellation sends a `close_context` frame. If the WebSocket cannot send that
+frame, TVIC fails and closes the shared connection, which also fails any
+remaining active contexts.
+
 ElevenLabs also offers MP3, Opus, μ-law, A-law, and WAV output. They are not
 silently mislabeled as TVIC PCM: the provider-neutral media boundary is PCM-only,
 so this adapter requests PCM and rejects callers asking for another normalized
