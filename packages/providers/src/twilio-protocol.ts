@@ -102,8 +102,10 @@ export function validateTwilioMessage(
     if (media.track !== "inbound" && media.track !== "outbound") {
       return "media.track must be inbound or outbound";
     }
-    if (!strictSequence(media.chunk)) return "media.chunk must be a positive decimal integer";
-    if (!nonNegativeSequence(media.timestamp)) {
+    const chunk = strictSequence(media.chunk);
+    if (chunk === null) return "media.chunk must be a positive decimal integer";
+    const timestamp = nonNegativeSequence(media.timestamp);
+    if (timestamp === null) {
       return "media.timestamp must be a non-negative decimal integer";
     }
     if (!isCanonicalBase64(media.payload)) return "media.payload must be non-empty base64";
