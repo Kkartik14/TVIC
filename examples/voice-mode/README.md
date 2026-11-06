@@ -14,9 +14,9 @@ pnpm install --frozen-lockfile
 pnpm --filter @tvic/example-voice-mode start
 ```
 
-If a root `.env` already exists, merge the `VOICE_*` settings into it instead
-of overwriting it. The root file is shared with the live-call example and
-provider smoke scripts.
+If a root `.env` already exists, merge the `VOICE_*`, `PORT`, and
+`ALLOWED_ORIGINS` settings into it instead of overwriting it. The root file is
+shared with the live-call example and provider smoke scripts.
 
 Open <http://localhost:8090>, generate a local application token in another terminal,
 and paste it into the client:

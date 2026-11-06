@@ -34,26 +34,34 @@ Event errors are JSON-safe `NormalizedError` values:
 ```ts
 import { isNormalizedError, isTvicError, TvicThrowableError } from "voice-runtime";
 
-for await (const event of session.run) {
-  if (event.kind !== "error") continue;
-  console.error({
-    code: event.error.code,
-    category: event.error.category,
-    retriable: event.error.retriable,
-    recoverable: event.recoverable,
-  });
-}
+const eventsFinished = (async () => {
+  for await (const event of session.run) {
+    if (event.kind !== "error") continue;
+    console.error({
+      code: event.error.code,
+      category: event.error.category,
+      retriable: event.error.retriable,
+      recoverable: event.recoverable,
+    });
+  }
+})();
 
 try {
-  await session.run;
-} catch (error) {
-  if (isTvicError(error)) {
-    console.error(error.error.code, error.error.message);
-  } else if (isNormalizedError(error)) {
-    console.error(error.code, error.message);
-  } else {
-    console.error("unknown failure", error);
+  const [runOutcome, eventsOutcome] = await Promise.allSettled([session.run, eventsFinished]);
+  if (runOutcome.status === "rejected") {
+    const error = runOutcome.reason;
+    if (isTvicError(error)) {
+      console.error(error.error.code, error.error.message);
+    } else if (isNormalizedError(error)) {
+      console.error(error.code, error.message);
+    } else {
+      console.error("unknown failure", error);
+    }
+  } else if (eventsOutcome.status === "rejected") {
+    console.error("event stream failed:", eventsOutcome.reason);
   }
+} finally {
+  await agent.stop();
 }
 ```
 

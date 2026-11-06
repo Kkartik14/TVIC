@@ -80,7 +80,7 @@ rule is the difference between a runtime you can debug and one that quietly lies
 | Telephony | Twilio Media Streams                                                                              | mu-law edge conversion, buffer clear, mark acknowledgement                                               |
 | Telephony | Browser WebSocket audio                                                                           | PCM16 framing, push-to-talk, text delivery, playout acknowledgement                                      |
 | STT       | Deepgram                                                                                          | partial and final segments, speech start, explicit endpoint                                              |
-| STT       | Sarvam                                                                                            | partial and final segments, VAD signals, manual flush                                                    |
+| STT       | Sarvam                                                                                            | final transcripts per utterance (legacy WebSocket), VAD signals, manual flush                            |
 | STT       | Cartesia Ink                                                                                      | realtime streaming and batch transcription                                                               |
 | STT       | ElevenLabs Scribe                                                                                 | realtime Scribe plus batch Scribe v2/Medical transcription                                               |
 | STT       | AssemblyAI                                                                                        | realtime WebSocket, pre-recorded submit/poll, and Sync HTTP STT                                          |
@@ -230,9 +230,9 @@ pnpm install --frozen-lockfile
 pnpm --filter @tvic/example-voice-mode start
 ```
 
-If a root `.env` already exists, merge the `VOICE_*` settings into it instead
-of overwriting it. The root file is shared with the live-call example and
-provider smoke scripts.
+If a root `.env` already exists, merge the `VOICE_*`, `PORT`, and
+`ALLOWED_ORIGINS` settings into it instead of overwriting it. The root file is
+shared with the live-call example and provider smoke scripts.
 
 Open <http://localhost:8090>, then generate and paste a local app token:
 

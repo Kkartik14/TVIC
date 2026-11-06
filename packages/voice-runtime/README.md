@@ -118,14 +118,26 @@ const session = await agent.start({
   channel: "web_audio",
 });
 
-for await (const event of session.run) {
-  if (event.kind === "transcript_delta") console.log("caller:", event.text);
-  if (event.kind === "error") console.error(event.error);
-}
+const eventsFinished = (async () => {
+  for await (const event of session.run) {
+    if (event.kind === "transcript_delta") console.log("caller:", event.text);
+    if (event.kind === "error") console.error(event.error);
+  }
+})();
 
-const result = await session.run;
-console.log(result.turnsHandled);
-await agent.stop();
+try {
+  const [runOutcome, eventsOutcome] = await Promise.allSettled([session.run, eventsFinished]);
+  if (runOutcome.status === "rejected") {
+    console.error("call failed:", runOutcome.reason);
+  } else {
+    if (eventsOutcome.status === "rejected") {
+      console.error("event stream failed:", eventsOutcome.reason);
+    }
+    console.log(runOutcome.value.turnsHandled);
+  }
+} finally {
+  await agent.stop();
+}
 ```
 
 `agent.start()` returns `{ sessionId, run }`. The `run` value is both an async

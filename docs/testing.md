@@ -422,9 +422,9 @@ test -e .env || cp examples/voice-mode/.env.example .env
 pnpm --filter @tvic/example-voice-mode start
 ```
 
-If a root `.env` already exists, merge the `VOICE_*` settings into it instead
-of overwriting it. The root file is shared with the live-call example and
-provider smoke scripts.
+If a root `.env` already exists, merge the `VOICE_*`, `PORT`, and
+`ALLOWED_ORIGINS` settings into it instead of overwriting it. The root file is
+shared with the live-call example and provider smoke scripts.
 
 Then open <http://localhost:8090>, mint a token, connect, speak, interrupt a
 reply, switch between push-to-talk and continuous mode, and end the session.
