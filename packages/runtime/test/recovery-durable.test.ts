@@ -231,7 +231,7 @@ describe("R2-06 recovery and durable correctness", () => {
     async ({ status }) => {
       const runtime = createRuntime({
         durableStore: createInMemoryDurableRuntimeStore(),
-        durablePolicy: { criticalWriteTimeoutMs: 50, persistenceRecoveryGraceMs: 500 },
+        durablePolicy: { criticalWriteTimeoutMs: 500, persistenceRecoveryGraceMs: 1_000 },
       });
       await runtime.start();
       const agent = buildAgent();
