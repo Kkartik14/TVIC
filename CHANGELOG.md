@@ -73,14 +73,16 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 - Raise the default `criticalWriteTimeoutMs` from 75 ms to 2,000 ms; no database
   schema migration is required.
-- Allow at most one active turn per session in every runtime configuration.
-  Starting another while one is active rejects with `turn.already_active`.
+- Within each `Runtime` instance, allow at most one active turn per session in
+  every runtime configuration. A second start rejects with
+  `turn.already_active`; a shared `durableStore` serializes this check across
+  runtime instances.
 - Require custom durable-store adapters to serialize transactions per session
   or reject stale snapshots with `RecordConflictError` without committing
   writes.
-- Require the documented Twilio `<Connect><Stream>` envelope and its
-  bidirectional `start` and `stop` fields. Protocol validation errors fail as
-  protocol errors rather than caller hangups.
+- Document the required Twilio `<Connect><Stream>` setup and validate the
+  documented bidirectional `start`, `stop`, and DTMF message fields in the
+  media WebSocket protocol.
 - Keep capability snapshot enforcement opt-in for compatibility: when snapshots
   are supplied, stale, missing, or unsupported facts reject dependent selections;
   omitting snapshots preserves existing configured voice behavior. Managed
@@ -230,16 +232,19 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 ### Fixed
 
-- Fix the 2.1.0 failure where every call with STT reconnect enabled ended after
-  about 10 seconds, even without a provider fault. The default PCM16 16 kHz mono
-  replay journal now holds up to 1,600,640 bytes and 5,018 commands per stream,
+- Fix the 2.1.0 failure where calls sending sustained audio with STT reconnect
+  enabled ended after about 10 seconds, even without a provider fault. The
+  default PCM16 16 kHz mono replay journal now holds up to 1,600,640 bytes and
+  5,018 commands per stream,
   up from 320,000 bytes and 512 commands. A stream survives an outage for about
   4–5 seconds with 5 ms frames that omit their duration, about 20 seconds with
   declared 5 ms frames, and about 25 seconds nominally with frames of 10 ms or
   more; the last limit is a timer tie. Derived limits clamp at 16 MiB and 8,192
   commands instead of rejecting otherwise-valid opens. Short-chunk hosts should
   coalesce frames or set `maxBufferedCommands`; retained audio uses roughly
-  twice its payload size on the heap. Overflow errors report the limiting unit,
+  twice its payload size on the heap. Limits are per stream, not process-wide:
+  500 concurrent default-format calls could retain about 800 MB of audio payload
+  (roughly 1.6 GB on the heap). Overflow errors report the limiting unit,
   configured cap, and observed size.
 - Stream Hindi, Bengali, Urdu, and CJK sentences incrementally to TTS, and keep
   turn timing consistent across STT reconnect recovery.
@@ -297,12 +302,13 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   their code.
 - Report Twilio protocol validation failures as protocol errors instead of
   caller hangups.
-- Emit final Soniox transcript text received after end-of-audio when the
-  provider closes without its finished marker.
+- Emit final text received after end-of-audio from the Soniox adapter stream
+  when the provider closes without its finished marker.
 - Discard late ElevenLabs output for cancelled contexts while preserving other
   active contexts. A cancelled ID stays reserved until its late final arrives or
-  32 newer contexts close; use unique IDs per connection. If TVIC cannot send
-  `close_context`, it fails the shared connection.
+  TVIC retains 32 newer cancelled or failed context IDs; use unique IDs per
+  connection. If TVIC cannot send `close_context`, it fails the shared
+  connection.
 - Report malformed accumulated OpenAI tool arguments in
   `response.completed` as a non-retriable `llm.failed` event.
 - Make a stopped managed voice-event iterator reject with the run's original
