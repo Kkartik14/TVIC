@@ -806,6 +806,107 @@ describe("R2-06 recovery and durable correctness", () => {
     }
   }, 15_000);
 
+  it("does not recover a failed start from a host-created terminal turn", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+    let putTurnCalls = 0;
+    let writesBroken = false;
+    durableStore.runSessionTransaction = async <T>(
+      sessionId: SessionId,
+      lease: SessionLease,
+      operation: (transaction: DurableSessionTransaction) => Promise<T>,
+    ) =>
+      runSessionTransaction(sessionId, lease, async (transaction) => {
+        const wrapped = new Proxy(transaction, {
+          get(target, property, receiver) {
+            if (property === "putTurn") {
+              return async (...args: Parameters<DurableSessionTransaction["putTurn"]>) => {
+                putTurnCalls += 1;
+                if (writesBroken) throw new BackendUnavailableError("injected write-only outage");
+                return target.putTurn(...args);
+              };
+            }
+            const value = Reflect.get(target, property, receiver) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        return operation(wrapped);
+      });
+
+    const runtime = createRuntime({
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 75, persistenceRecoveryGraceMs: 100 },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const session = attachment.session;
+    const call = makeCallHandle();
+    const closeCall = vi.spyOn(call.handle, "close");
+    const stt = makeStt();
+    let llmCalls = 0;
+    const llm = makeLlm((request) => {
+      llmCalls += 1;
+      return [
+        llmEvent(request, llmCalls, { type: "llm.completed", text: "unexpected", toolCalls: [] }),
+      ];
+    });
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      attachment,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.start();
+    const seen: VoiceEvent[] = [];
+    const draining = (async () => {
+      for await (const event of running) seen.push(event);
+    })();
+
+    try {
+      call.push(streamStarted(session.id));
+      const hostTurn = await runtime.startTurn({
+        sessionId: session.id,
+        input: { transcript: "host-created turn", mediaEventIds: [] },
+      });
+      await runtime.endTurn(session.id, hostTurn.id, { reason: "completed" });
+      writesBroken = true;
+      stt.pushFinal(session.id, "caller speaks after the host turn");
+      await until(() => putTurnCalls === 2, "failed pipeline startTurn");
+      await until(
+        () => closeCall.mock.calls.length > 0,
+        "call closure after the write-only outage",
+      );
+      await running.catch(() => undefined);
+      await draining;
+
+      const snapshot = await runtime.inspectSession(session.id);
+      expect(closeCall).toHaveBeenCalledWith("error");
+      expect(snapshot.session).toMatchObject({
+        status: "failed",
+        error: { code: "durable.write.failure" },
+      });
+      expect(snapshot.turns).toHaveLength(1);
+      expect(snapshot.turns[0]).toMatchObject({
+        sequence: 1,
+        status: "completed",
+        input: { transcript: "host-created turn" },
+      });
+      expect(llmCalls).toBe(0);
+      expect(seen.some((event) => event.kind === "call_ended" && event.reason === "failed")).toBe(
+        true,
+      );
+    } finally {
+      call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+      await draining;
+      await runtime.stop();
+    }
+  }, 15_000);
+
   it("holds a barge-in final through a short store outage and resumes after terminal persistence", async () => {
     const durableStore = createInMemoryDurableRuntimeStore();
     const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);

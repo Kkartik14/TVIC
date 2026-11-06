@@ -38,7 +38,7 @@ export class DurableWriteRecovery {
   #nonCheckpointPersistenceGeneration = 0;
   #lastPersistenceFailure: NormalizedError | undefined;
   #persistenceSessionEnding = false;
-  readonly #pendingPersistenceWriteSettlements = new Set<Promise<void>>();
+  readonly #pendingPersistenceWriteSettlements = new Set<Promise<unknown>>();
   #persistenceRecoveryStartedAtMs: number | undefined;
   #persistenceRecoveryDeadlineMs: number | undefined;
   #persistenceGate: Promise<boolean> = Promise.resolve(true);
@@ -139,9 +139,9 @@ export class DurableWriteRecovery {
   async recoverFailedTurn(
     failure: NormalizedError,
     turnId: TurnId | undefined,
-    afterSequence: number,
     recoveryDeadline: number,
     expectedStatus?: Turn["status"],
+    lateTurnId?: Promise<TurnId | undefined>,
   ): Promise<TerminalTurn | null> {
     const deadline = recoveryDeadline;
     const criticalWriteTimeoutMs =
@@ -151,6 +151,13 @@ export class DurableWriteRecovery {
       deadline - criticalWriteTimeoutMs,
     );
     let candidateTurnId = turnId;
+    if (!candidateTurnId && lateTurnId) {
+      const lateStart = await settleBy(() => lateTurnId, deadline);
+      if (lateStart.status === "timeout") return null;
+      if (lateStart.status === "completed") candidateTurnId = lateStart.value;
+    }
+    if (!candidateTurnId) return null;
+
     let nextTerminalWriteAttemptAt = terminalWriteCutoff;
     let terminalWriteRetryDisabled = false;
 
@@ -174,16 +181,6 @@ export class DurableWriteRecovery {
       );
       if (inspection.status === "completed") snapshot = inspection.value;
       if (inspection.status === "timeout") break;
-
-      if (!candidateTurnId && snapshot) {
-        const currentTurnId = snapshot.session.state.currentTurnId;
-        const lateTurn = currentTurnId
-          ? snapshot.turns.find(
-              (candidate) => candidate.id === currentTurnId && candidate.sequence > afterSequence,
-            )
-          : snapshot.turns.find((candidate) => candidate.sequence > afterSequence);
-        if (lateTurn) candidateTurnId = lateTurn.id;
-      }
 
       if (candidateTurnId) {
         const persisted = snapshot?.turns.find((candidate) => candidate.id === candidateTurnId);

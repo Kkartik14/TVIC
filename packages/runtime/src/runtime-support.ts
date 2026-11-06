@@ -34,15 +34,20 @@ class CriticalWriteTimeoutError extends BackendUnavailableError {
   }
 }
 
-const criticalWriteLateSettlements = new WeakMap<CriticalWriteTimeoutError, Promise<void>>();
+const criticalWriteLateSettlements = new WeakMap<
+  CriticalWriteTimeoutError,
+  Promise<LateWriteOutcome<unknown>>
+>();
 
 export function isCriticalWriteTimeoutError(error: unknown): error is BackendUnavailableError {
   return error instanceof CriticalWriteTimeoutError;
 }
 
-export function criticalWriteLateSettlement(error: unknown): Promise<void> | undefined {
+export function criticalWriteLateSettlement<T = unknown>(
+  error: unknown,
+): Promise<LateWriteOutcome<T>> | undefined {
   return error instanceof CriticalWriteTimeoutError
-    ? criticalWriteLateSettlements.get(error)
+    ? (criticalWriteLateSettlements.get(error) as Promise<LateWriteOutcome<T>> | undefined)
     : undefined;
 }
 
@@ -429,7 +434,7 @@ export async function criticalWrite<T>(
   emitMetric: (name: string, value: number) => void,
   onLate?: (outcome: LateWriteOutcome<T>) => void | Promise<void>,
   onTimeout?: () => void,
-  trackLate?: (pending: Promise<void>) => void,
+  trackLate?: (pending: Promise<LateWriteOutcome<T>>) => void,
 ): Promise<T> {
   const deadlineMs = policy.criticalWriteTimeoutMs;
   const startedAt = clock.monotonicMs();
@@ -440,8 +445,8 @@ export async function criticalWrite<T>(
   };
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let settleLate!: () => void;
-  const lateCompletion = new Promise<void>((resolve) => {
+  let settleLate!: (outcome: LateWriteOutcome<T>) => void;
+  const lateCompletion = new Promise<LateWriteOutcome<T>>((resolve) => {
     settleLate = resolve;
   });
   trackLate?.(lateCompletion);
@@ -454,12 +459,15 @@ export async function criticalWrite<T>(
           void Promise.resolve()
             .then(() => onLate({ result }))
             .catch(() => undefined)
-            .then(settleLate, settleLate);
+            .then(
+              () => settleLate({ result }),
+              () => settleLate({ result }),
+            );
         } else {
-          settleLate();
+          settleLate({ result });
         }
       } else {
-        settleLate();
+        settleLate({ result });
       }
     },
     (error: unknown) => {
@@ -469,12 +477,15 @@ export async function criticalWrite<T>(
           void Promise.resolve()
             .then(() => onLate({ error }))
             .catch(() => undefined)
-            .then(settleLate, settleLate);
+            .then(
+              () => settleLate({ error }),
+              () => settleLate({ error }),
+            );
         } else {
-          settleLate();
+          settleLate({ error });
         }
       } else {
-        settleLate();
+        settleLate({ error });
       }
     },
   );
