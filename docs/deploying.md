@@ -17,8 +17,11 @@ authenticated Node gateway
           |
           +--> voice-runtime session
           +--> STT, LLM, and TTS providers
-          +--> PostgreSQL and Redis when durable state is enabled
+          +--> durable-store adapter and backing services when enabled
 ```
+
+Your application chooses the durable-store adapter and its backing services;
+see [Persistence](./persistence.md) for the available options.
 
 Keep the gateway and runtime in the same process when the transport accepts a
 handle directly. If the gateway and runtime are separate services, define an
@@ -26,8 +29,10 @@ explicit authenticated handoff and durable session lookup.
 
 ## Environment configuration
 
-Store credentials in the deployment secret manager and expose only the required
-variables to the server process:
+The names below are used by the examples and provider integrations. The
+`voice-runtime` package does not load `.env` files. Your application controls
+local environment loading and should set only the variables its configuration
+uses; pass secrets through the deployment secret manager at runtime.
 
 ```text
 DEEPGRAM_API_KEY
@@ -39,13 +44,17 @@ CARTESIA_VOICE_ID
 OPENAI_API_KEY
 ASSEMBLYAI_API_KEY
 SARVAM_API_KEY
+SARVAM_TTS_VOICE_ID
 SONIOX_API_KEY
 ELEVENLABS_API_KEY
 ELEVENLABS_VOICE_ID
 
-# Durable state
+# Durable state used by the application
 DATABASE_URL
 REDIS_URL
+
+# Optional: DDL-capable credentials for the deployment migration job only
+MIGRATION_DATABASE_URL
 ```
 
 Never put provider credentials in browser bundles, container images, Git
@@ -166,10 +175,14 @@ twice. It is not provider failover or exactly-once delivery.
 Build the application in a reproducible environment:
 
 ```bash
-npm ci
-pnpm build
-pnpm test
+npm ci && npm run build && npm test
+# or, for a pnpm application:
+pnpm install --frozen-lockfile && pnpm build && pnpm test
 ```
+
+Use the package manager and lockfile for your application. To build the TVIC
+repository itself, use the pinned pnpm 9.12.0 toolchain and repository
+instructions in [Contributing](../CONTRIBUTING.md).
 
 The production image should contain the compiled application and production
 dependencies only. Inject secrets at runtime. Run database migrations as a
