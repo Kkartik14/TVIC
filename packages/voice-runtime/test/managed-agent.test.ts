@@ -5329,6 +5329,265 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("recovers a managed call after a speaking write failure and accepts a later utterance", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+    const recoveryGraceMs = 200;
+    let failedSpeakingWrite = false;
+    let failedSpeakingWriteAtMs: number | undefined;
+    let failedTurnPersistedAtMs: number | undefined;
+    let firstFailedTurnResolved = false;
+    let secondCompletedTurnResolved = false;
+    let resolveFirstFailedTurn!: () => void;
+    let resolveSecondCompletedTurn!: () => void;
+    const firstFailedTurnPersisted = new Promise<void>((resolve) => {
+      resolveFirstFailedTurn = resolve;
+    });
+    const secondTurnCompleted = new Promise<void>((resolve) => {
+      resolveSecondCompletedTurn = resolve;
+    });
+    durableStore.runSessionTransaction = async <T>(
+      sessionId: SessionId,
+      lease: SessionLease,
+      operation: (transaction: DurableSessionTransaction) => Promise<T>,
+    ) => {
+      const result = await runSessionTransaction(sessionId, lease, async (transaction) => {
+        const wrapped = new Proxy(transaction, {
+          get(target, property, receiver) {
+            if (property === "updateTurn") {
+              return async (
+                turnSessionId: SessionId,
+                turnId: Parameters<DurableSessionTransaction["updateTurn"]>[1],
+                updater: Parameters<DurableSessionTransaction["updateTurn"]>[2],
+              ) =>
+                target.updateTurn(turnSessionId, turnId, (record) => {
+                  const next = updater(record);
+                  if (!failedSpeakingWrite && next.turn.status === "speaking") {
+                    failedSpeakingWrite = true;
+                    failedSpeakingWriteAtMs = Date.now();
+                    throw new BackendUnavailableError("injected managed speaking write failure");
+                  }
+                  return next;
+                });
+            }
+            const value = Reflect.get(target, property, receiver) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        return operation(wrapped);
+      });
+
+      const turns = await durableStore.turns.listBySession(sessionId);
+      if (
+        failedSpeakingWrite &&
+        !firstFailedTurnResolved &&
+        turns.some((turn) => turn.turn.status === "failed")
+      ) {
+        firstFailedTurnResolved = true;
+        failedTurnPersistedAtMs = Date.now();
+        resolveFirstFailedTurn();
+      }
+      if (
+        !secondCompletedTurnResolved &&
+        turns.length >= 2 &&
+        turns.some((turn) => turn.turn.status === "completed")
+      ) {
+        secondCompletedTurnResolved = true;
+        resolveSecondCompletedTurn();
+      }
+      return result;
+    };
+
+    let llmCalls = 0;
+    const harness = createLifecycleHarness({
+      runtime: {
+        durableStore,
+        durablePolicy: {
+          criticalWriteTimeoutMs: 500,
+          persistenceRecoveryGraceMs: recoveryGraceMs,
+        },
+      },
+      completeLlm: async (request) => {
+        llmCalls += 1;
+        const events = new AsyncQueue<LlmStreamEvent>();
+        const timestamp = nowTimestamp();
+        events.push({
+          id: `managed-speaking-llm-started-${llmCalls}` as ProviderEventId,
+          type: "llm.started",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          provider: "lifecycle-llm",
+          timestamp,
+          model: request.model,
+        });
+        events.push({
+          id: `managed-speaking-llm-completed-${llmCalls}` as ProviderEventId,
+          type: "llm.completed",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 2,
+          provider: "lifecycle-llm",
+          timestamp,
+          text: `response ${llmCalls}`,
+          toolCalls: [],
+        });
+        events.close();
+        return { events, async cancel() {} };
+      },
+      synthesizeTts: async (request) => {
+        const events = new AsyncQueue<TtsEvent>();
+        const audio = createMediaEvent({
+          id: `managed-speaking-audio-${request.turnId}` as never,
+          type: "media.audio.chunk",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          direction: "output",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          provider: "lifecycle-tts",
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        });
+        events.push(audio as OutputAudioChunk);
+        events.push(
+          createMediaEvent({
+            id: `managed-speaking-committed-${request.turnId}` as never,
+            type: "media.audio.committed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            direction: "output",
+            timestamp: nowTimestamp(),
+            monotonicOffsetMs: 20,
+            provider: "lifecycle-tts",
+            durationMs: 20,
+            frameCount: 320,
+            sequenceRange: [1, 1],
+            chunkIds: [audio.id],
+          }),
+        );
+        events.close();
+        return { events, async cancel() {} } satisfies TtsStream;
+      },
+    });
+
+    const waitWithin = async (
+      promise: Promise<void>,
+      timeoutMs: number,
+      description: string,
+    ): Promise<void> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          promise,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error(`Timed out waiting for ${description}`)),
+              timeoutMs,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    };
+
+    const pushUtterance = (sessionId: SessionId, text: string, sequence: number): void => {
+      const timestamp = nowTimestamp();
+      harness.transcripts.push({
+        id: `managed-speaking-final-${sequence}` as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId,
+        sequence,
+        provider: "lifecycle-stt",
+        text,
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      harness.transcripts.push({
+        id: `managed-speaking-endpoint-${sequence + 1}` as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId,
+        sequence: sequence + 1,
+        provider: "lifecycle-stt",
+        reason: "provider",
+        timestamp,
+      });
+    };
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      let eventStreamSettled = false;
+      const events: VoiceEvent[] = [];
+      const observed = (async () => {
+        try {
+          for await (const event of session.run) events.push(event);
+        } catch {
+          // Assertions below inspect emitted errors and the final run outcome.
+        }
+      })();
+      void observed.then(() => {
+        eventStreamSettled = true;
+      });
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      pushUtterance(session.sessionId, "first managed utterance", 1);
+      await waitWithin(firstFailedTurnPersisted, 2_000, "bounded speaking-write recovery");
+
+      expect(failedSpeakingWrite).toBe(true);
+      expect(failedTurnPersistedAtMs! - failedSpeakingWriteAtMs!).toBeLessThan(
+        recoveryGraceMs + 500,
+      );
+      const silentMs = Math.max(0, 1_500 - (Date.now() - failedSpeakingWriteAtMs!));
+      await new Promise<void>((resolve) => setTimeout(resolve, silentMs));
+      expect(eventStreamSettled).toBe(false);
+      expect(harness.closeReasons).toEqual([]);
+      expect(
+        events.some(
+          (event) => event.kind === "error" && event.error.code === "tts.delivery_failed",
+        ),
+      ).toBe(false);
+
+      pushUtterance(session.sessionId, "second managed utterance", 3);
+      await waitWithin(secondTurnCompleted, 5_000, "the later managed utterance to complete");
+      await waitWithin(harness.committed, 2_000, "the later utterance audio commit");
+      harness.inbound.push(streamEndedEvent(session.sessionId));
+      const result = await session.run;
+      await observed;
+
+      const turns = await durableStore.turns.listBySession(session.sessionId);
+      expect(result.turnsHandled).toBe(2);
+      expect(llmCalls).toBe(2);
+      expect(turns.map((turn) => turn.turn.status)).toEqual(["failed", "completed"]);
+      expect(
+        events.some(
+          (event) =>
+            event.kind === "error" &&
+            event.error.code === "durable.write.failure" &&
+            event.recoverable === true,
+        ),
+      ).toBe(true);
+      expect(
+        events.some(
+          (event) => event.kind === "error" && event.error.code === "tts.delivery_failed",
+        ),
+      ).toBe(false);
+    } finally {
+      await harness.agent.stop();
+    }
+  }, 10_000);
+
   it("keeps cleanup failure visible instead of reporting a false successful run", async () => {
     const harness = createLifecycleHarness({
       closeCall: async () => {
