@@ -1264,6 +1264,7 @@ export class PipelineVoiceLoop {
   async #persistTurnStatus(
     turnId: Turn["id"],
     status: "thinking" | "calling_tool" | "speaking",
+    recoverabilityForError?: (error: unknown) => boolean,
   ): Promise<void> {
     try {
       await this.#options.runtime.updateTurnStatus(this.#options.session.id, turnId, status);
@@ -1271,7 +1272,7 @@ export class PipelineVoiceLoop {
       this.#durableWriteRecovery.onWriteFailure(
         "turn_status",
         error,
-        isBackendUnavailableError(error),
+        recoverabilityForError?.(error),
       );
       throw error;
     }
@@ -1327,7 +1328,7 @@ export class PipelineVoiceLoop {
         sessionId: this.#options.session.id,
         input: { transcript, mediaEventIds: [] },
       });
-      await this.#persistTurnStatus(turn.id, "thinking");
+      await this.#persistTurnStatus(turn.id, "thinking", isBackendUnavailableError);
     } catch (error) {
       const lateTurnId = turn ? undefined : lateStartedTurnId(error);
       const canRecover =
