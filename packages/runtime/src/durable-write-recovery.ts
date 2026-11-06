@@ -1,8 +1,10 @@
 import {
   BackendUnavailableError,
   DurableError,
+  internalError,
   isNormalizedError,
   isTerminalTurn,
+  normalizedError,
   normalizeUnknownError,
   timeoutError,
 } from "@tvic/core";
@@ -85,7 +87,12 @@ export class DurableWriteRecovery {
     this.#trackPendingPersistenceWrite(error);
     this.#lastPersistenceFailure = this.failure(error, source);
     this.#syncPersistenceHealth();
-    if (!wasDegraded) this.#emitPersistenceFailure(this.#lastPersistenceFailure);
+    if (!wasDegraded) {
+      this.#emitPersistenceFailure(
+        this.#lastPersistenceFailure,
+        isRetryablePersistenceFailure(error),
+      );
+    }
     return this.#nonCheckpointPersistenceGeneration;
   }
 
@@ -107,12 +114,22 @@ export class DurableWriteRecovery {
       category: "internal",
       retriable: true,
     });
-    return {
-      ...normalized,
-      code: "durable.write.failure",
-      category: "internal",
-      metadata: { ...(normalized.metadata ?? {}), degraded: true, source },
-    };
+    const metadata = { ...(normalized.metadata ?? {}), degraded: true, source };
+    const timeoutFailure = isNormalizedError(error) && error.category === "timeout";
+    if (!isBackendUnavailableError(error) && !timeoutFailure) {
+      if (isNormalizedError(error)) return error;
+      return normalizedError(normalized.code, normalized.message, {
+        category: normalized.category,
+        retriable: normalized.retriable,
+        ...(normalized.provider ? { provider: normalized.provider } : {}),
+        cause: normalized.cause ?? error,
+        metadata,
+      });
+    }
+    return internalError("durable.write.failure", normalized.message, {
+      cause: error,
+      metadata,
+    });
   }
 
   onInterrupt(turnId: TurnId, cause: TurnCancellationReason): Promise<boolean> {
@@ -341,7 +358,12 @@ export class DurableWriteRecovery {
     this.#checkpointPersistenceDegraded = true;
     this.#lastPersistenceFailure = this.failure(error, "interruption_checkpoint");
     this.#syncPersistenceHealth();
-    if (!wasDegraded) this.#emitPersistenceFailure(this.#lastPersistenceFailure);
+    if (!wasDegraded) {
+      this.#emitPersistenceFailure(
+        this.#lastPersistenceFailure,
+        isRetryablePersistenceFailure(error),
+      );
+    }
   }
 
   #recoverCheckpointPersistence(): void {
@@ -349,8 +371,8 @@ export class DurableWriteRecovery {
     this.#syncPersistenceHealth();
   }
 
-  #emitPersistenceFailure(error: NormalizedError): void {
-    this.#options.emitError(error, error.retriable);
+  #emitPersistenceFailure(error: NormalizedError, recoverable: boolean): void {
+    this.#options.emitError(error, recoverable);
   }
 
   #trackPendingPersistenceWrite(error: unknown): void {

@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { BackendUnavailableError } from "@tvic/core";
+import {
+  BackendUnavailableError,
+  isNormalizedError,
+  timeoutError,
+  validationError,
+} from "@tvic/core";
 import { LeaseLostError } from "@tvic/core";
 import type {
   AgentId,
@@ -18,6 +23,7 @@ import type {
 import { createInMemoryDurableRuntimeStore, InMemorySessionLeaseStore } from "@tvic/dal";
 import { InMemoryToolIdempotencyStore } from "@tvic/tools";
 import { createRuntime, PipelineVoiceLoop, type VoiceEvent } from "../src/index.js";
+import { DurableWriteRecovery } from "../src/durable-write-recovery.js";
 import { SessionRecoveryCoordinator, SessionReaper } from "../src/session-recovery.js";
 import {
   audioChunk,
@@ -36,6 +42,117 @@ import {
 } from "./harness.js";
 
 describe("R2-06 recovery and durable correctness", () => {
+  it("keeps valid errors intact and normalizes timeout persistence failures", () => {
+    const emittedFailures: Array<{ readonly error: unknown; readonly recoverable: boolean }> = [];
+    const recovery = new DurableWriteRecovery({
+      runtime: { setPersistenceHealth() {} } as unknown as Runtime,
+      sessionId: "session_failure_normalization" as SessionId,
+      emitError: (error, recoverable) => emittedFailures.push({ error, recoverable }),
+      onSessionFailure() {},
+      closeCall: async () => {},
+      abortRun() {},
+      abortActiveTurn() {},
+    });
+    const source = "turn_start";
+    const backendError = new BackendUnavailableError("database unavailable");
+    const timeout = timeoutError("runtime.store_timeout", "database operation timed out");
+    const validation = validationError("turn.already_active", "A turn is already active");
+
+    for (const error of [backendError, timeout]) {
+      const failure = recovery.failure(error, source);
+      expect(isNormalizedError(failure)).toBe(true);
+      expect(failure).toMatchObject({
+        name: "InternalError",
+        code: "durable.write.failure",
+        category: "internal",
+        cause: error,
+        metadata: { degraded: true, source },
+      });
+    }
+
+    const failure = recovery.failure(validation, source);
+    expect(isNormalizedError(failure)).toBe(true);
+    expect(failure).toBe(validation);
+    expect(failure).toMatchObject({
+      code: "turn.already_active",
+      category: "validation",
+      name: "ValidationError",
+    });
+
+    recovery.onWriteFailure(source, backendError);
+    expect(emittedFailures).toHaveLength(1);
+    expect(isNormalizedError(emittedFailures[0]?.error)).toBe(true);
+    expect(emittedFailures[0]?.recoverable).toBe(true);
+  });
+
+  it("persists the original validation error when a host turn blocks pipeline start", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = createRuntime({
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 75, persistenceRecoveryGraceMs: 100 },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const session = attachment.session;
+    const call = makeCallHandle();
+    const closeCall = vi.spyOn(call.handle, "close");
+    const stt = makeStt();
+    let llmCalls = 0;
+    const llm = makeLlm((request) => {
+      llmCalls += 1;
+      return [
+        llmEvent(request, llmCalls, { type: "llm.completed", text: "unexpected", toolCalls: [] }),
+      ];
+    });
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      attachment,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const hostTurn = await runtime.startTurn({
+      sessionId: session.id,
+      input: { transcript: "host-created turn", mediaEventIds: [] },
+    });
+    const running = loop.start();
+    const seen: VoiceEvent[] = [];
+    const draining = (async () => {
+      for await (const event of running) seen.push(event);
+    })();
+
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "caller speaks while a host turn is active");
+      await until(() => closeCall.mock.calls.length > 0, "call closure after turn.already_active");
+      await running.catch(() => undefined);
+      await draining;
+
+      const snapshot = await runtime.inspectSession(session.id);
+      expect(closeCall).toHaveBeenCalledWith("error");
+      expect(snapshot.session).toMatchObject({
+        status: "failed",
+        error: { code: "turn.already_active", category: "validation" },
+      });
+      expect(
+        isNormalizedError(snapshot.session.status === "failed" ? snapshot.session.error : null),
+      ).toBe(true);
+      expect(snapshot.turns).toMatchObject([{ id: hostTurn.id, status: "failed" }]);
+      expect(llmCalls).toBe(0);
+      expect(
+        seen.some((event) => event.kind === "error" && event.error.code === "turn.already_active"),
+      ).toBe(true);
+    } finally {
+      call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+      await draining;
+      await runtime.stop();
+    }
+  }, 15_000);
+
   it("reports when coordinator stop times out before an in-flight poll drains", async () => {
     vi.useFakeTimers();
     const store = createInMemoryDurableRuntimeStore();
