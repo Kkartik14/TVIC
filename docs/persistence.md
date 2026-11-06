@@ -147,6 +147,11 @@ session finalization is idempotent. The recovery window bounds retries and
 inspection; after recovery ends, call closure and terminal session persistence
 use separate bounded cleanup attempts.
 
+These deadline timers are unreferenced. If no other event-loop handles remain,
+Node may exit before a pending persistence cleanup timeout is reported. A host
+that needs to observe the failed-call outcome or shutdown error should keep an
+active handle until cleanup settles.
+
 If `CallHandle.close()` rejects or does not settle within
 `criticalWriteTimeoutMs`, the event stream also emits
 `voice_runtime.call_close_failed` or `voice_runtime.call_close_timeout`, and the
