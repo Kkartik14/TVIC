@@ -162,12 +162,25 @@ export class DurableWriteRecovery {
       if (persisted.status === status) return true;
       if (persisted.status !== "started") return false;
 
-      const statusWrite = await settleBy(
-        () => this.#options.runtime.updateTurnStatus(this.#options.sessionId, turnId, status),
-        recoveryDeadline,
+      const statusWriteOperation = this.#options.runtime.updateTurnStatus(
+        this.#options.sessionId,
+        turnId,
+        status,
       );
+      const statusWrite = await settleBy(() => statusWriteOperation, recoveryDeadline);
       if (statusWrite.status === "completed") return statusWrite.value.status === status;
-      if (statusWrite.status === "timeout") return false;
+      if (statusWrite.status === "timeout") {
+        const pendingSettlement = statusWriteOperation.then(
+          () => undefined,
+          async (error: unknown) => {
+            this.onWriteFailure("turn_status_recovery", error);
+            const lateSettlement = criticalWriteLateSettlement(error);
+            if (lateSettlement) await lateSettlement;
+          },
+        );
+        this.#trackPendingPersistenceSettlement(pendingSettlement);
+        return false;
+      }
       this.onWriteFailure("turn_status_recovery", statusWrite.error);
       if (!isRetryablePersistenceFailure(statusWrite.error)) return false;
 
@@ -425,7 +438,12 @@ export class DurableWriteRecovery {
 
   #trackPendingPersistenceWrite(error: unknown): void {
     const pendingWrite = criticalWriteLateSettlement(error);
-    if (!pendingWrite || this.#pendingPersistenceWriteSettlements.has(pendingWrite)) return;
+    if (!pendingWrite) return;
+    this.#trackPendingPersistenceSettlement(pendingWrite);
+  }
+
+  #trackPendingPersistenceSettlement(pendingWrite: Promise<unknown>): void {
+    if (this.#pendingPersistenceWriteSettlements.has(pendingWrite)) return;
     this.#pendingPersistenceWriteSettlements.add(pendingWrite);
     void pendingWrite.then(
       () => this.#pendingPersistenceWriteSettlements.delete(pendingWrite),

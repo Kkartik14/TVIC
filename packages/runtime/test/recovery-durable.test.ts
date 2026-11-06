@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BackendUnavailableError,
   isNormalizedError,
+  RecordConflictError,
   timeoutError,
   validationError,
 } from "@tvic/core";
@@ -1732,6 +1733,124 @@ describe("R2-06 recovery and durable correctness", () => {
       await runtime.stop();
     }
   }, 15_000);
+
+  it.each([
+    { criticalWriteTimeoutMs: 75, outcome: "critical timeout followed by late commit" },
+    { criticalWriteTimeoutMs: 200, outcome: "normal late success" },
+  ])(
+    "waits for the status retry before terminalizing the failed session ($outcome)",
+    async ({ criticalWriteTimeoutMs }) => {
+      const durableStore = createInMemoryDurableRuntimeStore();
+      const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+      let thinkingWriteAttempts = 0;
+      let statusRetryInFlight = false;
+      let delayedStatusRetryCommitted = false;
+      durableStore.runSessionTransaction = async <T>(
+        sessionId: SessionId,
+        lease: SessionLease,
+        operation: (transaction: DurableSessionTransaction) => Promise<T>,
+      ) =>
+        runSessionTransaction(sessionId, lease, async (transaction) => {
+          const wrapped = new Proxy(transaction, {
+            get(target, property, receiver) {
+              if (property === "updateTurn") {
+                return async (
+                  turnSessionId: SessionId,
+                  turnId: Parameters<DurableSessionTransaction["updateTurn"]>[1],
+                  updater: Parameters<DurableSessionTransaction["updateTurn"]>[2],
+                ) => {
+                  const current = await target.getTurn(turnSessionId, turnId);
+                  if (!current) throw new Error(`missing turn during injection: ${turnId}`);
+                  const next = updater(current);
+                  if (next.turn.status === "thinking") {
+                    thinkingWriteAttempts += 1;
+                    if (thinkingWriteAttempts === 1) {
+                      throw new BackendUnavailableError("injected initial status failure");
+                    }
+                    if (thinkingWriteAttempts === 2) {
+                      statusRetryInFlight = true;
+                      await new Promise<void>((resolve) => setTimeout(resolve, 120));
+                      const updated = await target.updateTurn(turnSessionId, turnId, () => next);
+                      delayedStatusRetryCommitted = updated.turn.status === "thinking";
+                      statusRetryInFlight = false;
+                      return updated;
+                    }
+                  }
+                  return target.updateTurn(turnSessionId, turnId, () => next);
+                };
+              }
+              const value = Reflect.get(target, property, receiver) as unknown;
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+          return operation(wrapped);
+        });
+
+      const runtime = createRuntime({
+        durableStore,
+        durablePolicy: { criticalWriteTimeoutMs, persistenceRecoveryGraceMs: 50 },
+      });
+      await runtime.start();
+      const agent = buildAgent();
+      const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+      const session = attachment.session;
+      const call = makeCallHandle();
+      const closeCall = vi.spyOn(call.handle, "close");
+      const originalEndSession = runtime.endSession.bind(runtime);
+      let terminalizationConflicts = 0;
+      runtime.endSession = async (sessionId, request) => {
+        if (statusRetryInFlight) {
+          terminalizationConflicts += 1;
+          throw new RecordConflictError(`session:${sessionId}`);
+        }
+        return originalEndSession(sessionId, request);
+      };
+      const stt = makeStt();
+      const llm = makeLlm(() => {
+        throw new Error("the caller must not reach the model after the recovery deadline");
+      });
+      const tts = makeTts(() => [], { endStream: true });
+      const loop = new PipelineVoiceLoop({
+        runtime,
+        session,
+        attachment,
+        agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      });
+      const running = loop.start();
+      const draining = (async () => {
+        for await (const _event of running) {
+        }
+      })();
+
+      try {
+        call.push(streamStarted(session.id));
+        stt.pushFinal(session.id, "status retry outlives recovery grace");
+        await until(() => closeCall.mock.calls.length > 0, "call closure at the recovery deadline");
+        await running.catch(() => undefined);
+        await draining;
+        await until(() => delayedStatusRetryCommitted, "late status retry commits");
+        const snapshot = await runtime.inspectSession(session.id);
+
+        expect(thinkingWriteAttempts).toBe(2);
+        expect(delayedStatusRetryCommitted).toBe(true);
+        expect(terminalizationConflicts).toBe(0);
+        expect(closeCall).toHaveBeenCalledWith("error");
+        expect(snapshot.session).toMatchObject({
+          status: "failed",
+          error: { code: "durable.write.failure" },
+        });
+        expect(snapshot.turns[0]).toMatchObject({ status: "failed" });
+      } finally {
+        call.push(streamEnded(session.id, "completed"));
+        await running.catch(() => undefined);
+        await draining;
+        await runtime.stop();
+      }
+    },
+    15_000,
+  );
 
   it("recovers a single slow transaction after it commits instead of leaving the call degraded", async () => {
     const durableStore = createInMemoryDurableRuntimeStore();
