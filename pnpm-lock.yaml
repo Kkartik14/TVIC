@@ -9,22 +9,22 @@ importers:
   .:
     devDependencies:
       '@types/node':
-        specifier: ^22.10.0
+        specifier: 22.19.19
         version: 22.19.19
       prettier:
-        specifier: ^3.4.2
+        specifier: 3.8.3
         version: 3.8.3
       tsx:
-        specifier: ^4.19.2
+        specifier: 4.22.3
         version: 4.22.3
       turbo:
-        specifier: ^2.3.3
+        specifier: 2.9.14
         version: 2.9.14
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
   examples/call-recording:
@@ -34,16 +34,16 @@ importers:
         version: link:../../packages/voice-runtime
     devDependencies:
       '@types/node':
-        specifier: ^22.19.19
+        specifier: 22.19.19
         version: 22.19.19
       tsx:
-        specifier: ^4.19.2
+        specifier: 4.22.3
         version: 4.22.3
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
   examples/live-call:
@@ -73,32 +73,32 @@ importers:
         specifier: workspace:*
         version: link:../../packages/runtime
       pg:
-        specifier: ^8.13.1
+        specifier: 8.23.0
         version: 8.23.0
       redis:
-        specifier: ^4.7.0
+        specifier: 4.7.1
         version: 4.7.1
       voice-runtime:
         specifier: workspace:*
         version: link:../../packages/voice-runtime
     devDependencies:
       '@types/pg':
-        specifier: ^8.11.10
+        specifier: 8.23.1
         version: 8.23.1
       '@types/ws':
-        specifier: ^8.18.1
+        specifier: 8.18.1
         version: 8.18.1
       tsx:
-        specifier: ^4.19.2
+        specifier: 4.22.3
         version: 4.22.3
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
       ws:
-        specifier: ^8.21.0
+        specifier: 8.21.1
         version: 8.21.1
 
   examples/memory-demo:
@@ -120,19 +120,19 @@ importers:
         version: link:../../packages/runtime
     devDependencies:
       '@types/pg':
-        specifier: ^8.11.10
+        specifier: 8.23.1
         version: 8.23.1
       pg:
-        specifier: ^8.13.1
+        specifier: 8.23.0
         version: 8.23.0
       tsx:
-        specifier: ^4.19.2
+        specifier: 4.22.3
         version: 4.22.3
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
   examples/persona:
@@ -148,13 +148,13 @@ importers:
         version: link:../../packages/runtime
     devDependencies:
       tsx:
-        specifier: ^4.19.2
+        specifier: 4.22.3
         version: 4.22.3
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
   examples/post-call-summarization:
@@ -170,16 +170,16 @@ importers:
         version: link:../../packages/runtime
     devDependencies:
       tsx:
-        specifier: ^4.19.2
+        specifier: 4.22.3
         version: 4.22.3
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
       zod:
-        specifier: ^3.23.0
+        specifier: 3.25.76
         version: 3.25.76
 
   examples/reconnect:
@@ -195,13 +195,13 @@ importers:
         version: link:../../packages/runtime
     devDependencies:
       tsx:
-        specifier: ^4.19.2
+        specifier: 4.22.3
         version: 4.22.3
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
   examples/stt-only:
@@ -220,13 +220,13 @@ importers:
         version: link:../../packages/runtime
     devDependencies:
       tsx:
-        specifier: ^4.19.2
+        specifier: 4.22.3
         version: 4.22.3
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
   examples/tts-failover:
@@ -236,50 +236,50 @@ importers:
         version: link:../../packages/voice-runtime
     devDependencies:
       tsx:
-        specifier: ^4.19.2
+        specifier: 4.22.3
         version: 4.22.3
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
   examples/voice-mode:
     dependencies:
       pg:
-        specifier: ^8.13.1
+        specifier: 8.23.0
         version: 8.23.0
       redis:
-        specifier: ^4.7.0
+        specifier: 4.7.1
         version: 4.7.1
       voice-runtime:
         specifier: workspace:*
         version: link:../../packages/voice-runtime
     devDependencies:
       '@types/pg':
-        specifier: ^8.11.10
+        specifier: 8.23.1
         version: 8.23.1
       '@types/ws':
-        specifier: ^8.18.1
+        specifier: 8.18.1
         version: 8.18.1
       tsx:
-        specifier: ^4.19.2
+        specifier: 4.22.3
         version: 4.22.3
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
       ws:
-        specifier: ^8.21.0
+        specifier: 8.21.1
         version: 8.21.1
 
   packages/core:
     devDependencies:
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
 
   packages/dal:
@@ -292,7 +292,7 @@ importers:
         version: link:../dal-codec
     devDependencies:
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
 
   packages/dal-codec:
@@ -302,10 +302,10 @@ importers:
         version: link:../core
     devDependencies:
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
   packages/dal-composite:
@@ -327,19 +327,19 @@ importers:
         specifier: workspace:*
         version: link:../tools
       '@types/pg':
-        specifier: ^8.11.10
+        specifier: 8.23.1
         version: 8.23.1
       pg:
-        specifier: ^8.13.1
+        specifier: 8.23.0
         version: 8.23.0
       redis:
-        specifier: ^4.7.0
+        specifier: 4.7.1
         version: 4.7.1
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
   packages/dal-memory-validation:
@@ -355,16 +355,16 @@ importers:
         specifier: workspace:*
         version: link:../dal-postgres-memory
       '@types/pg':
-        specifier: ^8.11.10
+        specifier: 8.23.1
         version: 8.23.1
       pg:
-        specifier: ^8.13.1
+        specifier: 8.23.0
         version: 8.23.0
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
   packages/dal-postgres:
@@ -377,10 +377,10 @@ importers:
         version: link:../dal-codec
     devDependencies:
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
   packages/dal-postgres-memory:
@@ -393,16 +393,16 @@ importers:
         version: link:../dal-codec
     devDependencies:
       '@types/pg':
-        specifier: ^8.11.10
+        specifier: 8.23.1
         version: 8.23.1
       pg:
-        specifier: ^8.13.1
+        specifier: 8.23.0
         version: 8.23.0
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
   packages/dal-redis:
@@ -415,10 +415,10 @@ importers:
         version: link:../dal-codec
     devDependencies:
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
   packages/dal-vector-adapter-skeleton:
@@ -431,10 +431,10 @@ importers:
         specifier: workspace:*
         version: link:../dal
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
   packages/media:
@@ -444,7 +444,7 @@ importers:
         version: link:../core
     devDependencies:
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
 
   packages/memory:
@@ -457,7 +457,7 @@ importers:
         version: link:../dal
     devDependencies:
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
 
   packages/providers:
@@ -473,10 +473,10 @@ importers:
         version: 8.21.1
     devDependencies:
       '@types/ws':
-        specifier: ^8.18.1
+        specifier: 8.18.1
         version: 8.18.1
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
 
   packages/runtime:
@@ -501,10 +501,10 @@ importers:
         version: 8.21.1
     devDependencies:
       '@types/ws':
-        specifier: ^8.18.1
+        specifier: 8.18.1
         version: 8.18.1
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
 
   packages/tools:
@@ -514,7 +514,7 @@ importers:
         version: link:../core
     devDependencies:
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
 
   packages/voice-runtime:
@@ -560,19 +560,19 @@ importers:
         specifier: workspace:*
         version: link:../tools
       esbuild:
-        specifier: ^0.28.0
+        specifier: 0.28.0
         version: 0.28.0
       rollup:
-        specifier: ^4.60.4
+        specifier: 4.60.4
         version: 4.60.4
       rollup-plugin-dts:
-        specifier: ^6.3.0
+        specifier: 6.5.1
         version: 6.5.1(rollup@4.60.4)(typescript@5.9.3)
       typescript:
-        specifier: ^5.7.2
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^2.1.8
+        specifier: 2.1.9
         version: 2.1.9(@types/node@22.19.19)
 
 packages:
