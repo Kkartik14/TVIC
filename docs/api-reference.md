@@ -150,6 +150,11 @@ shutdown deadline. If cleanup remains pending, it rejects with
 `voice_runtime.shutdown_failed`; the host should keep runtime dependencies open
 until cleanup settles or the process is restarted.
 
+The managed agent's persistence-cleanup deadline timer is unreferenced. If no
+other referenced handles or requests keep Node alive, it may exit before cleanup settles or
+`agent.stop()` reports its failure; keep a host handle active while awaiting
+shutdown when its result must be observed.
+
 ### `agent.healthCheck()`
 
 Returns a health snapshot. Cleanup failures and pending shutdown work are visible
