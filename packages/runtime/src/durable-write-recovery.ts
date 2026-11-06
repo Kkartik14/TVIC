@@ -197,7 +197,6 @@ export class DurableWriteRecovery {
       sessionId: this.#options.sessionId,
       turnId,
       cause,
-      recoveryDeadlineMs: this.beginRecoveryWindow(),
       onDegraded: (error) => this.#markCheckpointPersistenceDegraded(error),
       onRecovered: () => this.#recoverCheckpointPersistence(),
       onFatal: (error, pendingWrite) =>
@@ -406,15 +405,21 @@ export class DurableWriteRecovery {
   beginRecoveryWindow(): number {
     if (this.#persistenceRecoveryDeadlineMs === undefined) {
       this.#persistenceRecoveryStartedAtMs = Date.now();
-      const graceMs = this.#options.runtime.durablePolicy?.persistenceRecoveryGraceMs ?? 2_000;
+      const policy = this.#options.runtime.durablePolicy;
+      const criticalWriteTimeoutMs = policy?.criticalWriteTimeoutMs ?? 2_000;
+      const probeBudgetMs = policy?.bargeCheckpointRetryBudgetMs ?? 500;
+      const graceMs = Math.max(
+        policy?.persistenceRecoveryGraceMs ?? 2_000,
+        criticalWriteTimeoutMs + probeBudgetMs,
+      );
       this.#persistenceRecoveryDeadlineMs = this.#persistenceRecoveryStartedAtMs + graceMs;
     }
     return this.#persistenceRecoveryDeadlineMs;
   }
 
-  #markCheckpointPersistenceDegraded(error: unknown): void {
+  #markCheckpointPersistenceDegraded(error: unknown): number {
     const wasDegraded = this.#persistenceDegraded;
-    this.beginRecoveryWindow();
+    const recoveryDeadlineMs = this.beginRecoveryWindow();
     this.#trackPendingPersistenceWrite(error);
     this.#checkpointPersistenceDegraded = true;
     this.#lastPersistenceFailure = this.failure(error, "interruption_checkpoint");
@@ -425,6 +430,7 @@ export class DurableWriteRecovery {
         isRetryablePersistenceFailure(error),
       );
     }
+    return recoveryDeadlineMs;
   }
 
   #recoverCheckpointPersistence(): void {
@@ -481,28 +487,71 @@ export async function persistInterruptionCheckpoint(input: {
   readonly sessionId: SessionId;
   readonly turnId: TurnId;
   readonly cause: TurnCancellationReason;
-  readonly recoveryDeadlineMs: number;
-  readonly onDegraded: (error: unknown) => void;
+  readonly onDegraded: (error: unknown) => number;
   readonly onRecovered: () => void;
   readonly onFatal: (error: unknown, pendingWrite?: Promise<unknown>) => void | Promise<void>;
 }): Promise<boolean> {
   const policy = input.runtime.durablePolicy;
+  const criticalWriteTimeoutMs = policy?.criticalWriteTimeoutMs ?? 2_000;
   const maxAttempts = policy?.bargeCheckpointMaxAttempts ?? 3;
   const retryBudgetMs = policy?.bargeCheckpointRetryBudgetMs ?? 500;
   const startedAt = Date.now();
-  const initialRetryDeadline = Math.min(startedAt + retryBudgetMs, input.recoveryDeadlineMs);
+  const initialRetryDeadline = startedAt + retryBudgetMs;
   let lastError: unknown;
   let pendingCheckpointWrite: Promise<unknown> | undefined;
+  let recoveryDeadlineMs: number | undefined;
 
   const checkpoint = (): Promise<unknown> =>
     input.runtime.checkpointTurnInterruption(input.sessionId, input.turnId, input.cause);
-  const attemptCheckpoint = async (): Promise<PromiseOutcome<unknown>> => {
-    if (Date.now() >= input.recoveryDeadlineMs) return Promise.resolve({ status: "timeout" });
-    const pending = checkpoint();
-    const result = await settleBy(() => pending, input.recoveryDeadlineMs);
+  const markDegraded = (error: unknown): number => {
+    recoveryDeadlineMs ??= input.onDegraded(error);
+    return recoveryDeadlineMs;
+  };
+  const attemptCheckpoint = async (deadlineMs?: number): Promise<PromiseOutcome<unknown>> => {
+    const attemptDeadlineMs = deadlineMs ?? Date.now() + criticalWriteTimeoutMs;
+    let pending: Promise<unknown>;
+    try {
+      pending = checkpoint();
+    } catch (error) {
+      return { status: "rejected", error };
+    }
+    const result = await settleBy(() => pending, attemptDeadlineMs);
     if (result.status !== "timeout") return result;
-    void pending.catch((error: unknown) => input.onDegraded(error));
     return { status: "timeout", pending };
+  };
+
+  const waitForLateCheckpoint = async (
+    error: unknown,
+    pendingCheckpoint?: Promise<unknown>,
+  ): Promise<"none" | "settled" | "timed_out" | "recovered"> => {
+    const deadline = recoveryDeadlineMs ?? markDegraded(error);
+    if (pendingCheckpoint) {
+      pendingCheckpointWrite = pendingCheckpoint;
+      const checkpointSettlement = await settleBy(() => pendingCheckpoint, deadline);
+      if (checkpointSettlement.status === "timeout") return "timed_out";
+      pendingCheckpointWrite = undefined;
+      if (checkpointSettlement.status === "completed") {
+        input.onRecovered();
+        return "recovered";
+      }
+      error = checkpointSettlement.error;
+      lastError = error;
+    }
+
+    const pendingWrite = criticalWriteLateSettlement(error);
+    if (!pendingWrite) return "none";
+    pendingCheckpointWrite = pendingWrite;
+    const settlement = await settleBy(() => pendingWrite, deadline);
+    if (settlement.status === "timeout") return "timed_out";
+    pendingCheckpointWrite = undefined;
+    const outcome =
+      settlement.status === "completed" ? settlement.value : { error: settlement.error };
+    if (!("error" in outcome)) {
+      input.onRecovered();
+      return "recovered";
+    }
+    lastError = outcome.error;
+    return "settled";
   };
 
   let attempts = 0;
@@ -522,22 +571,22 @@ export async function persistInterruptionCheckpoint(input: {
     }
     if (result.status === "timeout") {
       lastError = new BackendUnavailableError(
-        "Interruption checkpoint did not settle before the persistence recovery deadline",
+        "Interruption checkpoint did not settle before the critical write timeout",
       );
       pendingCheckpointWrite = result.pending;
-      input.onDegraded(lastError);
-      break;
+      markDegraded(lastError);
+      const lateCheckpoint = await waitForLateCheckpoint(lastError, result.pending);
+      if (lateCheckpoint === "recovered") return true;
+      if (lateCheckpoint === "timed_out" || !isRetryablePersistenceFailure(lastError)) break;
+      continue;
     }
 
     lastError = result.error;
-    input.onDegraded(lastError);
+    markDegraded(lastError);
     if (!isRetryablePersistenceFailure(lastError)) break;
-
-    const pendingWrite = criticalWriteLateSettlement(lastError);
-    if (pendingWrite) {
-      const settlement = await settleBy(() => pendingWrite, input.recoveryDeadlineMs);
-      if (settlement.status !== "completed") break;
-    }
+    const lateCheckpoint = await waitForLateCheckpoint(lastError);
+    if (lateCheckpoint === "recovered") return true;
+    if (lateCheckpoint === "timed_out" || !isRetryablePersistenceFailure(lastError)) break;
   }
 
   if (lastError === undefined) {
@@ -552,12 +601,13 @@ export async function persistInterruptionCheckpoint(input: {
 
   // Keep the transport alive during the recovery grace period, but never start a
   // second checkpoint while a timed-out transaction is still in flight.
-  while (Date.now() < input.recoveryDeadlineMs) {
-    const remaining = input.recoveryDeadlineMs - Date.now();
+  const deadline = recoveryDeadlineMs ?? markDegraded(lastError);
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now();
     await waitMs(Math.min(50, Math.max(1, remaining)));
-    if (Date.now() >= input.recoveryDeadlineMs) break;
+    if (Date.now() >= deadline) break;
 
-    const result = await attemptCheckpoint();
+    const result = await attemptCheckpoint(deadline);
     if (result.status === "completed") {
       input.onRecovered();
       return true;
@@ -572,11 +622,9 @@ export async function persistInterruptionCheckpoint(input: {
 
     lastError = result.error;
     if (!isRetryablePersistenceFailure(lastError)) break;
-    const pendingWrite = criticalWriteLateSettlement(lastError);
-    if (pendingWrite) {
-      const settlement = await settleBy(() => pendingWrite, input.recoveryDeadlineMs);
-      if (settlement.status !== "completed") break;
-    }
+    const lateCheckpoint = await waitForLateCheckpoint(lastError);
+    if (lateCheckpoint === "recovered") return true;
+    if (lateCheckpoint === "timed_out" || !isRetryablePersistenceFailure(lastError)) break;
   }
 
   await input.onFatal(lastError, pendingCheckpointWrite);

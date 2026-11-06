@@ -500,6 +500,14 @@ export interface Runtime extends RuntimeServiceLifecycle {
   startToolCall(toolCall: QueuedToolCall): Promise<RunningToolCall>;
   finishToolCall(toolCall: TerminalToolCall): Promise<TerminalToolCall>;
   recoverToolCalls(sessionId: SessionId): Promise<readonly ToolCall[]>;
+  /**
+   * Persist an interruption checkpoint. Custom Runtime implementations must
+   * return a promise that covers settlement of the underlying write; do not
+   * race it against an internal timeout while leaving the write able to commit
+   * later. TVIC's built-in Runtime has private late-settlement tracking for its
+   * own critical-write timeout path. TVIC also applies a bounded wait around
+   * this operation.
+   */
   checkpointTurnInterruption(
     sessionId: SessionId,
     turnId: TurnId,
