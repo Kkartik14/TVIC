@@ -431,6 +431,17 @@ export class PipelineVoiceLoop {
       maxDurationMs: this.#turnMaxDurationMs,
       now: () => this.#monotonicMs(),
       getActive: () => this.#active,
+      onMediaEnd: (endReason, streamError) => {
+        this.#runEndReason = endReason;
+        const source = this.#terminal.sourceForEndReason(endReason, streamError);
+        if (source !== "normal_completion") {
+          this.#terminal.offerTerminal({
+            source,
+            ...(streamError ? { error: streamError } : {}),
+          });
+        }
+        this.#latchInputShutdown(endReason);
+      },
       onTranscript: (transcript, timing) => {
         if (this.#inputEnded) return;
         const runTurn = (): Promise<void> => this.#handleTranscript(transcript, timing);
@@ -945,6 +956,9 @@ export class PipelineVoiceLoop {
         retriable: false,
       });
       sttError ??= failure;
+      if (this.#runEndReason === undefined || this.#runEndReason === "completed") {
+        this.#latchInputShutdown("stt_error");
+      }
       this.#terminal.offerTerminal({
         source: "provider_runtime",
         error: failure,
@@ -956,10 +970,14 @@ export class PipelineVoiceLoop {
     transcriptTask.then(
       () => {
         sttEnded = true;
+        if (this.#runEndReason === undefined) this.#latchInputShutdown("stt_ended");
         supervisor.abort();
       },
       (error) => {
         sttError = error;
+        if (this.#runEndReason === undefined || this.#runEndReason === "completed") {
+          this.#latchInputShutdown("stt_error");
+        }
         this.#terminal.offerTerminal({
           source: "provider_runtime",
           error: normalizeUnknownError(error, {
@@ -979,15 +997,17 @@ export class PipelineVoiceLoop {
     try {
       const input = await this.#sttInput.consumeInput(stt, commandController, supervisor.signal);
       endReason = input.endReason;
-      this.#runEndReason = endReason;
       streamError = input.streamError;
       mediaEnded = input.mediaEnded;
-      const source = this.#terminal.sourceForEndReason(endReason, streamError);
-      if (source !== "normal_completion") {
-        this.#terminal.offerTerminal({
-          source,
-          ...(streamError ? { error: streamError } : {}),
-        });
+      if (mediaEnded) {
+        this.#runEndReason = endReason;
+        const source = this.#terminal.sourceForEndReason(endReason, streamError);
+        if (source !== "normal_completion") {
+          this.#terminal.offerTerminal({
+            source,
+            ...(streamError ? { error: streamError } : {}),
+          });
+        }
       }
     } catch (error) {
       endReason = "media_error";
@@ -1008,15 +1028,16 @@ export class PipelineVoiceLoop {
       this.#inputEnded = true;
     }
 
-    this.#shutdownReason =
+    this.#recordShutdownReason(
       attachmentAbortReason(this.#options.attachment?.signal) ??
-      (this.#runCancelled || this.#effectiveSignal()?.aborted
-        ? "explicit"
-        : sttError
-          ? "stt_error"
-          : sttEnded
-            ? "stt_ended"
-            : endReason);
+        (this.#runCancelled || this.#effectiveSignal()?.aborted
+          ? "explicit"
+          : sttError
+            ? "stt_error"
+            : sttEnded
+              ? "stt_ended"
+              : endReason),
+    );
 
     if (gracefulEnd && !sttEnded) {
       const terminalFlush = this.#sttInput.commitAndFlush(stt, commandController);
@@ -1077,10 +1098,10 @@ export class PipelineVoiceLoop {
     }
 
     if (sttError) {
-      this.#shutdownReason = "stt_error";
+      this.#recordShutdownReason("stt_error");
     }
     if (!gracefulEnd || sttError) {
-      this.#abortActive(this.#shutdownReason);
+      this.#abortActive(this.#shutdownReason ?? (sttError ? "stt_error" : endReason));
     }
     this.#sttInput.cancelBargeInCandidate();
     this.#removeRecoveryListener?.();
@@ -1162,6 +1183,38 @@ export class PipelineVoiceLoop {
     if (this.#runEndReason === "timeout" || this.#runEndReason === "error") return "failed";
     if (this.#runEndReason === "cancelled") return "cancelled";
     return "completed";
+  }
+
+  #hasTerminalShutdown(): boolean {
+    return (
+      this.#runCancelled ||
+      this.#effectiveSignal()?.aborted === true ||
+      (this.#runEndReason !== undefined && this.#runEndReason !== "completed") ||
+      (this.#shutdownReason !== null &&
+        this.#shutdownReason !== "completed" &&
+        (this.#shutdownReason !== "stt_ended" || this.#runEndReason !== "completed"))
+    );
+  }
+
+  #latchInputShutdown(reason: string): void {
+    const shutdownReason =
+      attachmentAbortReason(this.#options.attachment?.signal) ??
+      (this.#runCancelled || this.#effectiveSignal()?.aborted ? "explicit" : reason);
+    this.#recordShutdownReason(shutdownReason);
+    const latchedReason = this.#shutdownReason ?? shutdownReason;
+    if (latchedReason === "completed") return;
+    this.#inputEnded = true;
+    this.#abortActive(latchedReason);
+  }
+
+  #recordShutdownReason(reason: string): void {
+    if (
+      this.#shutdownReason === null ||
+      this.#shutdownReason === "completed" ||
+      this.#shutdownReason === "stt_ended"
+    ) {
+      this.#shutdownReason = reason;
+    }
   }
 
   #abortActive(reason: string): void {
@@ -1466,7 +1519,8 @@ export class PipelineVoiceLoop {
       const cancelledByBargeIn =
         control.interruptedAtMs !== null && control.cancelReason === "barge_in";
       textDelivered =
-        !control.abort.signal.aborted || cancelledByBargeIn || audioError !== null
+        !this.#hasTerminalShutdown() &&
+        (!control.abort.signal.aborted || cancelledByBargeIn || audioError !== null)
           ? await deliverAssistantText({
               callHandle: this.#options.callHandle,
               turn,
@@ -1476,10 +1530,14 @@ export class PipelineVoiceLoop {
               cancelledByBargeIn,
             })
           : undefined;
+      const acceptedAfterTerminalShutdown =
+        textDelivered === true && !audioDelivered && this.#hasTerminalShutdown();
       control.outputDelivered = audioDelivered || textDelivered === true;
       latency.totalMs = this.#durationSince(startedAtMs);
 
-      if (!control.outputDelivered) {
+      // Keep the transport receipt truthful, but never let a late acceptance
+      // revive a turn after the run has terminally shut down.
+      if (!control.outputDelivered || acceptedAfterTerminalShutdown) {
         const interruptedText =
           control.interruptedAtMs !== null && control.cancelReason === "barge_in"
             ? control.alignedDurationMs > 0
