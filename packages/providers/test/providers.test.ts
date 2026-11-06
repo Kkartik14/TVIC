@@ -2768,6 +2768,43 @@ describe("provider utilities", () => {
     expect(socket.binarySent.at(-1)).not.toEqual(Buffer.alloc(0));
   });
 
+  it("flushes Soniox final tokens received after end-of-audio when the socket closes without finished", async () => {
+    const socket = new FakeSocket();
+    socket.send = (data: string | Buffer, callback?: (error?: Error) => void): void => {
+      if (data === "") {
+        socket.sent.push(data);
+        socket.receive(
+          JSON.stringify({
+            tokens: [{ text: " final words", is_final: true, start_ms: 900, end_ms: 1200 }],
+          }),
+        );
+        socket.close();
+      } else if (typeof data === "string") {
+        socket.sent.push(data);
+      } else {
+        socket.binarySent.push(Buffer.from(data));
+      }
+      callback?.();
+    };
+    const stream = await new SonioxSttProvider({
+      apiKey: "soniox-key",
+      webSocketFactory: () => socket as never,
+    }).open({
+      sessionId: "session_soniox_late_final" as SessionId,
+      format: PCM16_16K_MONO,
+      interimResults: false,
+    });
+    const iterator = stream.events[Symbol.asyncIterator]();
+
+    await expect(stream.close()).resolves.toBeUndefined();
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: "stt.final", text: "final words" },
+    });
+    await expect(iterator.next()).resolves.toEqual({ value: undefined, done: true });
+    expect(socket.sent).toContain("");
+  });
+
   it("keeps an idle Soniox socket alive and stops after close", async () => {
     vi.useFakeTimers();
     try {
