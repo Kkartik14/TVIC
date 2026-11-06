@@ -1377,13 +1377,16 @@ export class PipelineVoiceLoop {
           ? (this.#durableWriteRecovery.recoveryDeadlineMs ??
             this.#durableWriteRecovery.beginRecoveryWindow())
           : Date.now();
-      if (
+      const noTurnWasCreated =
         canRetryTurnStart &&
         Date.now() < recoveryDeadline &&
-        (await this.#noTurnWasCreatedBeforeRetry(recoveryDeadline))
-      ) {
+        (await this.#noTurnWasCreatedBeforeRetry(recoveryDeadline));
+      if (canRetryTurnStart && this.#hasTerminalShutdown()) {
+        if (noTurnWasCreated) this.#durableWriteRecovery.recoverNonCheckpoint(generation);
+        return;
+      }
+      if (noTurnWasCreated) {
         this.#durableWriteRecovery.recoverNonCheckpoint(generation);
-        if (this.#hasTerminalShutdown()) return;
         if (Date.now() < recoveryDeadline) {
           return this.#handleTranscript(transcript, timing, true);
         }
