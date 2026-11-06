@@ -29,6 +29,7 @@ import type {
   TurnStore,
 } from "@tvic/core";
 import {
+  criticalWriteLateSettlement,
   durableEvent,
   type LateWriteOutcome as RuntimeLateWriteOutcome,
 } from "./runtime-support.js";
@@ -37,6 +38,12 @@ import type { AttachmentAdmission } from "./attachment-admission.js";
 type TurnStartTransactionResult =
   | { readonly kind: "started"; readonly turn: ActiveTurn }
   | { readonly kind: "already_active" };
+
+export function lateStartedTurnId(error: unknown): Promise<TurnId | undefined> | undefined {
+  return criticalWriteLateSettlement<TurnStartTransactionResult>(error)?.then(({ result }) =>
+    result?.kind === "started" ? result.turn.id : undefined,
+  );
+}
 
 export interface RuntimeTurnContext {
   readonly clock: Clock;

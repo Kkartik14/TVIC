@@ -691,6 +691,239 @@ describe("R2-06 recovery and durable correctness", () => {
     await runtime.stop();
   });
 
+  it("ends the call when write failures follow a late committed and cancelled turn", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+    let putTurnCalls = 0;
+    let writesBroken = false;
+    let signalFirstPutEntered!: () => void;
+    let releaseFirstPut!: () => void;
+    const firstPutEntered = new Promise<void>((resolve) => {
+      signalFirstPutEntered = resolve;
+    });
+    const firstPutRelease = new Promise<void>((resolve) => {
+      releaseFirstPut = resolve;
+    });
+    durableStore.runSessionTransaction = async <T>(
+      sessionId: SessionId,
+      lease: SessionLease,
+      operation: (transaction: DurableSessionTransaction) => Promise<T>,
+    ) =>
+      runSessionTransaction(sessionId, lease, async (transaction) => {
+        const wrapped = new Proxy(transaction, {
+          get(target, property, receiver) {
+            if (property === "putTurn") {
+              return async (...args: Parameters<DurableSessionTransaction["putTurn"]>) => {
+                putTurnCalls += 1;
+                if (putTurnCalls === 1) {
+                  signalFirstPutEntered();
+                  await firstPutRelease;
+                }
+                if (writesBroken) throw new BackendUnavailableError("injected write-only outage");
+                return target.putTurn(...args);
+              };
+            }
+            const value = Reflect.get(target, property, receiver) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        return operation(wrapped);
+      });
+
+    const runtime = createRuntime({
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 75, persistenceRecoveryGraceMs: 500 },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const session = attachment.session;
+    const call = makeCallHandle();
+    const closeCall = vi.spyOn(call.handle, "close");
+    const stt = makeStt();
+    let llmCalls = 0;
+    const llm = makeLlm((request) => {
+      llmCalls += 1;
+      return [
+        llmEvent(request, llmCalls, { type: "llm.completed", text: "unexpected", toolCalls: [] }),
+      ];
+    });
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      attachment,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.start();
+    const seen: VoiceEvent[] = [];
+    const draining = (async () => {
+      for await (const event of running) seen.push(event);
+    })();
+
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "the first turn commits after its timeout");
+      await firstPutEntered;
+      await until(() => attachment.health === "persistence_degraded", "first write timeout");
+      releaseFirstPut();
+      await until(() => attachment.health === "healthy", "late first write recovery");
+      await until(async () => {
+        const snapshot = await runtime.inspectSession(session.id);
+        return snapshot.turns.some((turn) => turn.status === "cancelled");
+      }, "late turn cancellation");
+
+      writesBroken = true;
+      stt.pushFinal(session.id, "the next turn cannot be written");
+      await until(
+        () => closeCall.mock.calls.length > 0,
+        "call closure after the write-only outage",
+      );
+      await running.catch(() => undefined);
+      await draining;
+
+      const snapshot = await runtime.inspectSession(session.id);
+      expect(putTurnCalls).toBe(2);
+      expect(closeCall).toHaveBeenCalledWith("error");
+      expect(snapshot.session).toMatchObject({
+        status: "failed",
+        error: { code: "durable.write.failure" },
+      });
+      expect(snapshot.turns).toHaveLength(1);
+      expect(snapshot.turns[0]).toMatchObject({ sequence: 1, status: "cancelled" });
+      expect(llmCalls).toBe(0);
+      expect(seen.some((event) => event.kind === "call_ended" && event.reason === "failed")).toBe(
+        true,
+      );
+    } finally {
+      releaseFirstPut();
+      call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+      await draining;
+      await runtime.stop();
+    }
+  }, 15_000);
+
+  it.each(["immediate", "late"] as const)(
+    "does not recover a host-created terminal turn after a %s pipeline start failure",
+    async (failureMode) => {
+      const durableStore = createInMemoryDurableRuntimeStore();
+      const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+      let putTurnCalls = 0;
+      let writesBroken = false;
+      let releasePipelinePut!: () => void;
+      const pipelinePutRelease = new Promise<void>((resolve) => {
+        releasePipelinePut = resolve;
+      });
+      durableStore.runSessionTransaction = async <T>(
+        sessionId: SessionId,
+        lease: SessionLease,
+        operation: (transaction: DurableSessionTransaction) => Promise<T>,
+      ) =>
+        runSessionTransaction(sessionId, lease, async (transaction) => {
+          const wrapped = new Proxy(transaction, {
+            get(target, property, receiver) {
+              if (property === "putTurn") {
+                return async (...args: Parameters<DurableSessionTransaction["putTurn"]>) => {
+                  putTurnCalls += 1;
+                  if (failureMode === "late" && putTurnCalls === 2) {
+                    await pipelinePutRelease;
+                  }
+                  if (writesBroken) throw new BackendUnavailableError("injected write-only outage");
+                  return target.putTurn(...args);
+                };
+              }
+              const value = Reflect.get(target, property, receiver) as unknown;
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+          return operation(wrapped);
+        });
+
+      const runtime = createRuntime({
+        durableStore,
+        durablePolicy: { criticalWriteTimeoutMs: 75, persistenceRecoveryGraceMs: 100 },
+      });
+      await runtime.start();
+      const agent = buildAgent();
+      const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+      const session = attachment.session;
+      const call = makeCallHandle();
+      const closeCall = vi.spyOn(call.handle, "close");
+      const stt = makeStt();
+      let llmCalls = 0;
+      const llm = makeLlm((request) => {
+        llmCalls += 1;
+        return [
+          llmEvent(request, llmCalls, { type: "llm.completed", text: "unexpected", toolCalls: [] }),
+        ];
+      });
+      const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+      const loop = new PipelineVoiceLoop({
+        runtime,
+        session,
+        attachment,
+        agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      });
+      const running = loop.start();
+      const seen: VoiceEvent[] = [];
+      const draining = (async () => {
+        for await (const event of running) seen.push(event);
+      })();
+
+      try {
+        call.push(streamStarted(session.id));
+        const hostTurn = await runtime.startTurn({
+          sessionId: session.id,
+          input: { transcript: "host-created turn", mediaEventIds: [] },
+        });
+        await runtime.endTurn(session.id, hostTurn.id, { reason: "completed" });
+        if (failureMode === "immediate") writesBroken = true;
+        stt.pushFinal(session.id, "caller speaks after the host turn");
+        await until(() => putTurnCalls === 2, "pipeline startTurn");
+        if (failureMode === "late") {
+          await until(() => attachment.health === "persistence_degraded", "pipeline write timeout");
+          writesBroken = true;
+          releasePipelinePut();
+        }
+        await until(
+          () => closeCall.mock.calls.length > 0,
+          "call closure after the write-only outage",
+        );
+        await running.catch(() => undefined);
+        await draining;
+
+        const snapshot = await runtime.inspectSession(session.id);
+        expect(closeCall).toHaveBeenCalledWith("error");
+        expect(snapshot.session).toMatchObject({
+          status: "failed",
+          error: { code: "durable.write.failure" },
+        });
+        expect(snapshot.turns).toHaveLength(1);
+        expect(snapshot.turns[0]).toMatchObject({
+          sequence: 1,
+          status: "completed",
+          input: { transcript: "host-created turn" },
+        });
+        expect(llmCalls).toBe(0);
+        expect(seen.some((event) => event.kind === "call_ended" && event.reason === "failed")).toBe(
+          true,
+        );
+      } finally {
+        call.push(streamEnded(session.id, "completed"));
+        releasePipelinePut();
+        await running.catch(() => undefined);
+        await draining;
+        await runtime.stop();
+      }
+    },
+    15_000,
+  );
+
   it("holds a barge-in final through a short store outage and resumes after terminal persistence", async () => {
     const durableStore = createInMemoryDurableRuntimeStore();
     const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);

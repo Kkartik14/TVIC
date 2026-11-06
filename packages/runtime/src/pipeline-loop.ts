@@ -90,6 +90,7 @@ import type { DualProtocolResult, VoiceEvent } from "./voice-event.js";
 import { drainAsyncIterator } from "./pipeline-loop-boundary.js";
 import { PipelineTerminalCoordinator } from "./pipeline-terminal-boundary.js";
 import { recordRuntimePipelineObservation } from "./runtime-observation-capability.js";
+import { lateStartedTurnId } from "./runtime-turns.js";
 import type { LiveTerminalSource } from "./terminal-arbitration.js";
 import type {
   ActiveTurnControl,
@@ -224,7 +225,6 @@ export class PipelineVoiceLoop {
   #removeRecoveryContextErrorListener: (() => void) | undefined;
   readonly #sttInput: PipelineSttInput;
   #callClosePromise: Promise<void> | undefined;
-  #lastTurnSequence: number;
   readonly #memoryUserId: UserId | undefined;
   readonly #organizationId: OrganizationId | undefined;
   readonly #workflowId: WorkflowId | undefined;
@@ -244,7 +244,6 @@ export class PipelineVoiceLoop {
   #lastAudioTapTimestampMs = 0;
   #lastAudioTapClockObservationMs = globalThis.performance.now();
   constructor(options: PipelineVoiceLoopOptions) {
-    this.#lastTurnSequence = options.session.state.turnSequence;
     if (options.turnProfile !== undefined) {
       const provider = options.agent.providers.stt;
       const compatibility = evaluateProviderCompatibility(provider, {
@@ -1318,32 +1317,34 @@ export class PipelineVoiceLoop {
       await this.#durableWriteRecovery.endSessionAfterPersistenceFailure(failure);
       return;
     }
-    const sequenceBeforeStart = this.#lastTurnSequence;
     let turn: Turn | undefined;
     try {
       turn = await this.#options.runtime.startTurn({
         sessionId: this.#options.session.id,
         input: { transcript, mediaEventIds: [] },
       });
-      this.#lastTurnSequence = turn.sequence;
       await this.#persistTurnStatus(turn.id, "thinking");
     } catch (error) {
       const generation = this.#durableWriteRecovery.onWriteFailure("turn_start", error);
       const failure = this.#durableWriteRecovery.lastFailure!;
       this.#turnsFailed += 1;
       this.#firstTurnError ??= failure;
+      const recoveryDeadline = isBackendUnavailableError(error)
+        ? (this.#durableWriteRecovery.recoveryDeadlineMs ??
+          this.#durableWriteRecovery.beginRecoveryWindow())
+        : Date.now();
       const terminal = await this.#durableWriteRecovery.recoverFailedTurn(
         failure,
         turn?.id,
-        sequenceBeforeStart,
-        isBackendUnavailableError(error)
-          ? (this.#durableWriteRecovery.recoveryDeadlineMs ??
-              this.#durableWriteRecovery.beginRecoveryWindow())
-          : Date.now(),
+        recoveryDeadline,
         turn ? "thinking" : undefined,
+        turn ? undefined : lateStartedTurnId(error),
       );
-      if (terminal) this.#durableWriteRecovery.recoverNonCheckpoint(generation);
-      else await this.#durableWriteRecovery.endSessionAfterPersistenceFailure(failure);
+      if (terminal) {
+        this.#durableWriteRecovery.recoverNonCheckpoint(generation);
+      } else {
+        await this.#durableWriteRecovery.endSessionAfterPersistenceFailure(failure);
+      }
       return;
     }
     this.#turnsHandled += 1;
@@ -1707,7 +1708,6 @@ export class PipelineVoiceLoop {
             (await this.#durableWriteRecovery.recoverFailedTurn(
               turnError,
               turn.id,
-              turn.sequence - 1,
               this.#durableWriteRecovery.recoveryDeadlineMs ??
                 this.#durableWriteRecovery.beginRecoveryWindow(),
             )) ?? undefined;
@@ -1745,7 +1745,6 @@ export class PipelineVoiceLoop {
               (await this.#durableWriteRecovery.recoverFailedTurn(
                 persistenceFailure,
                 turn.id,
-                turn.sequence - 1,
                 this.#durableWriteRecovery.recoveryDeadlineMs ??
                   this.#durableWriteRecovery.beginRecoveryWindow(),
               )) ?? undefined;
