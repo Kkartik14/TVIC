@@ -69,4 +69,57 @@ describe("async control", () => {
     ).resolves.toBeNull();
     expect(attempt).not.toHaveBeenCalled();
   });
+
+  it("stops waiting for an attempt when the absolute deadline expires", async () => {
+    vi.useFakeTimers();
+    try {
+      const attempt = vi.fn(() => new Promise<string | null>(() => undefined));
+      const result = pollUntil({
+        deadlineMs: Date.now() + 20,
+        attempt,
+        nextDelayMs: () => 1,
+      });
+
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(result).resolves.toBeNull();
+      expect(attempt).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops waiting for an attempt when aborted and observes its late rejection", async () => {
+    const controller = new AbortController();
+    let rejectAttempt: ((error: Error) => void) | undefined;
+    const attempt = vi.fn(
+      () =>
+        new Promise<string | null>((_resolve, reject) => {
+          rejectAttempt = reject;
+        }),
+    );
+    const result = pollUntil({
+      deadlineMs: Date.now() + 1_000,
+      signal: controller.signal,
+      attempt,
+      nextDelayMs: () => 1,
+    });
+
+    await Promise.resolve();
+    controller.abort();
+    await expect(result).resolves.toBeNull();
+    expect(attempt).toHaveBeenCalledOnce();
+    rejectAttempt?.(new Error("late attempt failure"));
+    await Promise.resolve();
+  });
+
+  it("propagates an attempt failure", async () => {
+    const failure = new Error("inspection failed");
+    await expect(
+      pollUntil({
+        deadlineMs: Date.now() + 1_000,
+        attempt: async () => Promise.reject(failure),
+        nextDelayMs: () => 1,
+      }),
+    ).rejects.toBe(failure);
+  });
 });

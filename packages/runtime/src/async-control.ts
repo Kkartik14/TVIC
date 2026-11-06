@@ -43,13 +43,29 @@ export async function pollUntil<T>(input: {
   readonly attempt: () => Promise<T | null>;
   readonly nextDelayMs: (attempt: number) => number;
 }): Promise<T | null> {
+  const deadlineExpired = Symbol("tvic.poll-deadline");
+  const aborted = Symbol("tvic.poll-aborted");
   let attempt = 0;
   while (!input.signal?.aborted && Date.now() < input.deadlineMs) {
-    const result = await input.attempt();
+    const attemptRemainingMs = input.deadlineMs - Date.now();
+    let result: T | null;
+    try {
+      result = await withTimeout(
+        Promise.resolve().then(input.attempt),
+        attemptRemainingMs,
+        deadlineExpired,
+        input.signal,
+        aborted,
+      );
+    } catch (error) {
+      if (error === deadlineExpired || error === aborted) return null;
+      throw error;
+    }
     if (result !== null) return result;
     const remainingMs = input.deadlineMs - Date.now();
     if (remainingMs <= 0 || input.signal?.aborted) break;
-    const delayMs = Math.max(1, input.nextDelayMs(attempt));
+    const requestedDelayMs = input.nextDelayMs(attempt);
+    const delayMs = Number.isFinite(requestedDelayMs) ? Math.max(1, requestedDelayMs) : remainingMs;
     const boundedDelayMs = Math.min(delayMs, remainingMs);
     if (input.signal) {
       await sleepWithAbort(input.signal, boundedDelayMs);
