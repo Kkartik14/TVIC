@@ -2,7 +2,18 @@ import { describe, expect, it, vi } from "vitest";
 
 import { BackendUnavailableError } from "@tvic/core";
 import { LeaseLostError } from "@tvic/core";
-import type { AgentId, Clock, SessionId, StoredSessionRecord, Timestamp } from "@tvic/core";
+import type {
+  AgentId,
+  Clock,
+  DurableSessionTransaction,
+  Runtime,
+  SessionLease,
+  SessionId,
+  StoredSessionRecord,
+  Timestamp,
+  TextToSpeechProvider,
+  TtsStream,
+} from "@tvic/core";
 import { createInMemoryDurableRuntimeStore, InMemorySessionLeaseStore } from "@tvic/dal";
 import { InMemoryToolIdempotencyStore } from "@tvic/tools";
 import { createRuntime, PipelineVoiceLoop, type VoiceEvent } from "../src/index.js";
@@ -15,8 +26,11 @@ import {
   makeLlm,
   makeStt,
   makeTts,
+  pushable,
   streamEnded,
   streamStarted,
+  TEST_PROVIDER_CAPABILITIES,
+  until,
   withPipelineProviders,
 } from "./harness.js";
 
@@ -675,4 +689,270 @@ describe("R2-06 recovery and durable correctness", () => {
     }
     await runtime.stop();
   });
+
+  it.each([
+    {
+      scenario: "the checkpoint is the only failed write",
+      failIndependentWrite: false,
+      expectedHealth: false,
+    },
+    {
+      scenario: "an unrelated terminal write also fails",
+      failIndependentWrite: true,
+      expectedHealth: true,
+    },
+  ])(
+    "recovers transcript admission after checkpoint recovery when $scenario",
+    async ({ failIndependentWrite, expectedHealth }) => {
+      const health: boolean[] = [];
+      const durableStore = createInMemoryDurableRuntimeStore();
+      let checkpointAttempts = 0;
+      let resolveCheckpointRecoveryStarted!: () => void;
+      const checkpointRecoveryStarted = new Promise<void>((resolve) => {
+        resolveCheckpointRecoveryStarted = resolve;
+      });
+      let allowCheckpointRecovery!: () => void;
+      const checkpointRecoveryAllowed = new Promise<void>((resolve) => {
+        allowCheckpointRecovery = resolve;
+      });
+      let resolveCheckpointRecoveryFinished!: () => void;
+      const checkpointRecoveryFinished = new Promise<void>((resolve) => {
+        resolveCheckpointRecoveryFinished = resolve;
+      });
+      const originalRunSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+      durableStore.runSessionTransaction = async <T>(
+        sessionId: SessionId,
+        lease: SessionLease,
+        operation: (transaction: DurableSessionTransaction) => Promise<T>,
+      ) => {
+        let interruptionCheckpoint = false;
+        let holdCheckpointRecovery = false;
+        const result = await originalRunSessionTransaction(
+          sessionId,
+          lease,
+          async (transaction) => {
+            const instrumented = new Proxy(transaction, {
+              get(target, property, receiver) {
+                if (property === "updateTurn") {
+                  return async (...args: Parameters<DurableSessionTransaction["updateTurn"]>) => {
+                    const updated = await target.updateTurn(...args);
+                    if (updated.turn.status === "interrupted") interruptionCheckpoint = true;
+                    return updated;
+                  };
+                }
+                const value = Reflect.get(target, property, receiver) as unknown;
+                return typeof value === "function" ? value.bind(target) : value;
+              },
+            });
+            const value = await operation(instrumented);
+            if (interruptionCheckpoint) {
+              checkpointAttempts += 1;
+              if (checkpointAttempts <= 3) {
+                throw new BackendUnavailableError("transient checkpoint transaction outage");
+              }
+              if (checkpointAttempts === 4) {
+                holdCheckpointRecovery = true;
+              }
+            }
+            return value;
+          },
+        );
+        if (holdCheckpointRecovery) {
+          // Keep the checkpoint promise pending while releasing the store's
+          // per-session transaction queue so the cancelled turn can finish.
+          resolveCheckpointRecoveryStarted();
+          await checkpointRecoveryAllowed;
+          resolveCheckpointRecoveryFinished();
+        }
+        return result;
+      };
+      const runtime = createRuntime({ durableStore });
+      await runtime.start();
+      const agent = buildAgent({
+        interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+      });
+      const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+      const session = attachment.session;
+      const call = makeCallHandle();
+      const stt = makeStt();
+      const runtimeWithProbe = runtime as Runtime & {
+        endTurn: Runtime["endTurn"];
+        setPersistenceHealth: Runtime["setPersistenceHealth"];
+      };
+      const originalSetPersistenceHealth = runtimeWithProbe.setPersistenceHealth.bind(runtime);
+      runtimeWithProbe.setPersistenceHealth = (sessionId, degraded) => {
+        health.push(degraded);
+        originalSetPersistenceHealth(sessionId, degraded);
+      };
+      let independentWriteFailed = false;
+      let resolveInterruptedTurnPersisted!: () => void;
+      const interruptedTurnPersisted = new Promise<void>((resolve) => {
+        resolveInterruptedTurnPersisted = resolve;
+      });
+      const originalEndTurn = runtimeWithProbe.endTurn.bind(runtime);
+      runtimeWithProbe.endTurn = async (sessionId, turnId, request) => {
+        if (failIndependentWrite && !independentWriteFailed && request.reason === "cancelled") {
+          independentWriteFailed = true;
+          throw new BackendUnavailableError("independent terminal write outage");
+        }
+        const result = await originalEndTurn(sessionId, turnId, request);
+        if (
+          request.reason === "cancelled" ||
+          (failIndependentWrite && request.reason === "failed")
+        ) {
+          resolveInterruptedTurnPersisted();
+        }
+        return result;
+      };
+
+      let llmCalls = 0;
+      let resolveSecondTurn!: () => void;
+      const secondTurnStarted = new Promise<void>((resolve) => {
+        resolveSecondTurn = resolve;
+      });
+      const llm = makeLlm((request) => {
+        llmCalls += 1;
+        if (llmCalls === 2) resolveSecondTurn();
+        return [llmEvent(request, 1, { type: "llm.completed", text: "hello", toolCalls: [] })];
+      });
+      let ttsCalls = 0;
+      let releaseTtsCancellation!: () => void;
+      const ttsCancellationReleased = new Promise<void>((resolve) => {
+        releaseTtsCancellation = resolve;
+      });
+      let resolveTtsCancellationStarted!: () => void;
+      const ttsCancellationStarted = new Promise<void>((resolve) => {
+        resolveTtsCancellationStarted = resolve;
+      });
+      const tts: TextToSpeechProvider = {
+        name: "controlled-recovery-tts",
+        kind: "tts",
+        version: "0.1.0",
+        capabilities: TEST_PROVIDER_CAPABILITIES,
+        supportsTtsLanguage: () => true,
+        supportsTtsSpeed: () => true,
+        async synthesize(request): Promise<TtsStream> {
+          ttsCalls += 1;
+          const queue = pushable<ReturnType<typeof audioChunk>>();
+          queue.push(audioChunk(request, ttsCalls));
+          if (ttsCalls > 1) queue.end();
+          return {
+            events: queue.iterable as TtsStream["events"],
+            async cancel() {
+              if (ttsCalls === 1) {
+                resolveTtsCancellationStarted();
+                await ttsCancellationReleased;
+              }
+              queue.end();
+            },
+          };
+        },
+      };
+      const loop = new PipelineVoiceLoop({
+        runtime,
+        session,
+        attachment,
+        agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      });
+      const running = loop.start();
+      const seen: VoiceEvent[] = [];
+      const draining = (async () => {
+        for await (const event of running) seen.push(event);
+      })();
+      let streamEndedSent = false;
+      const endStream = () => {
+        if (streamEndedSent) return;
+        streamEndedSent = true;
+        call.push(streamEnded(session.id, "completed"));
+      };
+
+      try {
+        call.push(streamStarted(session.id));
+        stt.pushFinal(session.id, "first turn");
+        await until(
+          () => call.sent.some((event) => event.type === "media.audio.chunk"),
+          "first audio",
+        );
+        stt.pushSpeechStarted(session.id);
+        await Promise.all([
+          until(() => checkpointAttempts === 4, "fourth checkpoint transaction"),
+          ttsCancellationStarted,
+        ]);
+        releaseTtsCancellation();
+        await until(
+          () => !failIndependentWrite || independentWriteFailed,
+          "independent terminal write failure",
+        );
+        await until(
+          () => attachment.health === "persistence_degraded",
+          "checkpoint degradation during recovery grace",
+        );
+        await checkpointRecoveryStarted;
+        await interruptedTurnPersisted;
+        await until(
+          () => seen.some((event) => event.kind === "turn_completed"),
+          "interrupted turn completion event",
+        );
+        const deliveredBeforeSecondFinal = stt.deliveredEvents;
+        stt.pushFinal(session.id, "second turn");
+        await until(
+          () => stt.deliveredEvents >= deliveredBeforeSecondFinal + 2,
+          "barge-in final consumed during checkpoint recovery",
+        );
+        if (!failIndependentWrite) {
+          // Let the transcript callback run while the checkpoint promise is
+          // deliberately held. The checkpoint-only failure must wait at the
+          // persistence gate instead of dropping this final.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(
+            seen.some(
+              (event) => event.kind === "error" && event.error.code === "durable.write.failure",
+            ),
+          ).toBe(false);
+        }
+        expect(llmCalls).toBe(1);
+        allowCheckpointRecovery();
+        await checkpointRecoveryFinished;
+        if (!failIndependentWrite) {
+          await until(() => attachment.health === "healthy", "checkpoint health recovery");
+          await until(() => llmCalls === 2, "second turn after checkpoint recovery");
+        }
+
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const resumed = await Promise.race([
+          secondTurnStarted.then(() => true),
+          new Promise<boolean>((resolve) => {
+            timeout = setTimeout(() => resolve(false), 1_000);
+          }),
+        ]);
+        if (timeout) clearTimeout(timeout);
+        endStream();
+        const result = await running;
+        await draining;
+
+        expect(checkpointAttempts).toBe(4);
+        expect(health).toContain(true);
+        expect(health.at(-1)).toBe(expectedHealth);
+        expect(resumed).toBe(!failIndependentWrite);
+        expect(llmCalls).toBe(failIndependentWrite ? 1 : 2);
+        expect(result.turnsHandled).toBe(failIndependentWrite ? 1 : 2);
+        expect(result.turnsFailed).toBe(failIndependentWrite ? 2 : 0);
+        expect(
+          seen.some(
+            (event) => event.kind === "error" && event.error.code === "durable.write.failure",
+          ),
+        ).toBe(failIndependentWrite);
+      } finally {
+        releaseTtsCancellation();
+        allowCheckpointRecovery();
+        endStream();
+        await running.catch(() => undefined);
+        await draining;
+        await runtime.stop();
+      }
+    },
+    15_000,
+  );
 });

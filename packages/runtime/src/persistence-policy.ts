@@ -13,6 +13,7 @@ export async function persistInterruptionCheckpoint(input: {
   readonly turnId: TurnId;
   readonly cause: TurnCancellationReason;
   readonly onDegraded: () => void;
+  readonly onRecovered: () => void;
 }): Promise<boolean> {
   const policy = input.runtime.durablePolicy;
   const maxAttempts = policy?.bargeCheckpointMaxAttempts ?? 3;
@@ -24,7 +25,7 @@ export async function persistInterruptionCheckpoint(input: {
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       await input.runtime.checkpointTurnInterruption(input.sessionId, input.turnId, input.cause);
-      input.runtime.setPersistenceHealth(input.sessionId, false);
+      input.onRecovered();
       return true;
     } catch (error) {
       lastError = error;
@@ -43,7 +44,6 @@ export async function persistInterruptionCheckpoint(input: {
   }
 
   input.onDegraded();
-  input.runtime.setPersistenceHealth(input.sessionId, true);
 
   // Keep the transport alive during the recovery grace period, but continue
   // probing the checkpoint. A database outage that heals during this window
@@ -55,7 +55,7 @@ export async function persistInterruptionCheckpoint(input: {
     await waitMs(Math.min(50, Math.max(1, remaining)));
     try {
       await input.runtime.checkpointTurnInterruption(input.sessionId, input.turnId, input.cause);
-      input.runtime.setPersistenceHealth(input.sessionId, false);
+      input.onRecovered();
       return true;
     } catch (error) {
       lastError = error;
