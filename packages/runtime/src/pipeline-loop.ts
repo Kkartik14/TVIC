@@ -1348,6 +1348,7 @@ export class PipelineVoiceLoop {
       await this.#durableWriteRecovery.endSessionAfterPersistenceFailure(failure);
       return;
     }
+    if (this.#hasTerminalShutdown()) return;
     let turn: Turn | undefined;
     try {
       turn = await this.#options.runtime.startTurn({
@@ -1382,7 +1383,10 @@ export class PipelineVoiceLoop {
         (await this.#noTurnWasCreatedBeforeRetry(recoveryDeadline))
       ) {
         this.#durableWriteRecovery.recoverNonCheckpoint(generation);
-        return this.#handleTranscript(transcript, timing, true);
+        if (this.#hasTerminalShutdown()) return;
+        if (Date.now() < recoveryDeadline) {
+          return this.#handleTranscript(transcript, timing, true);
+        }
       }
       const recoveredStatus =
         turn && canRecover

@@ -10,6 +10,7 @@ import {
 import { LeaseLostError } from "@tvic/core";
 import type {
   AgentId,
+  CallHandle,
   Clock,
   DurableSessionTransaction,
   FailedSession,
@@ -390,6 +391,99 @@ describe("R2-06 recovery and durable correctness", () => {
       call.push(streamEnded(session.id, "completed"));
       await running.catch(() => undefined);
       await draining;
+      await runtime.stop();
+    }
+  }, 15_000);
+
+  it("does not retry a confirmed-empty turn start after remote hangup", async () => {
+    const runtime = createRuntime({ durableStore: createInMemoryDurableRuntimeStore() });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const session = attachment.session;
+    const call = makeCallHandle();
+    let signalInputShutdown!: () => void;
+    const inputShutdown = new Promise<void>((resolve) => {
+      signalInputShutdown = resolve;
+    });
+    const callHandle: CallHandle = {
+      ...call.handle,
+      events: {
+        [Symbol.asyncIterator]() {
+          const iterator = call.handle.events[Symbol.asyncIterator]();
+          return {
+            next: () => iterator.next(),
+            async return() {
+              signalInputShutdown();
+              if (iterator.return) return iterator.return();
+              return { done: true, value: undefined as never };
+            },
+          };
+        },
+      },
+    };
+    const closeCall = vi.spyOn(callHandle, "close");
+    const startTurn = vi
+      .spyOn(runtime, "startTurn")
+      .mockRejectedValueOnce(new BackendUnavailableError("injected transient start failure"));
+    const originalInspectSession = runtime.inspectSession.bind(runtime);
+    let releaseInspection!: () => void;
+    const inspectionRelease = new Promise<void>((resolve) => {
+      releaseInspection = resolve;
+    });
+    let signalInspectionStarted!: () => void;
+    const inspectionStarted = new Promise<void>((resolve) => {
+      signalInspectionStarted = resolve;
+    });
+    vi.spyOn(runtime, "inspectSession").mockImplementation(async (sessionId) => {
+      signalInspectionStarted();
+      await inspectionRelease;
+      return originalInspectSession(sessionId);
+    });
+    const stt = makeStt();
+    let llmCalls = 0;
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      attachment,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: makeLlm((request) => {
+          llmCalls += 1;
+          return [
+            llmEvent(request, llmCalls, {
+              type: "llm.completed",
+              text: "This must not be generated after hangup.",
+              toolCalls: [],
+            }),
+          ];
+        }),
+        tts: makeTts((request) => [audioChunk(request, 1)], { endStream: true }),
+      }),
+      callHandle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.run();
+
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "the caller hangs up during recovery inspection");
+      await inspectionStarted;
+      call.push(streamEnded(session.id, "remote_hangup"));
+      await inputShutdown;
+      releaseInspection();
+
+      const result = await running;
+      const snapshot = await runtime.inspectSession(session.id);
+      expect(result.terminalReason).toBe("remote_hangup");
+      expect(startTurn).toHaveBeenCalledTimes(1);
+      expect(llmCalls).toBe(0);
+      expect(snapshot.turns).toHaveLength(0);
+      expect(closeCall).not.toHaveBeenCalledWith("error");
+    } finally {
+      releaseInspection();
+      call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
       await runtime.stop();
     }
   }, 15_000);
