@@ -88,15 +88,15 @@ assert(
   "artifact and publish jobs must each install the pinned npm CLI",
 );
 assert(
-  npmInstallVersions.every((version) => version === "11.21.1"),
-  "artifact and publish jobs must use npm@11.21.1",
+  npmInstallVersions.every((version) => version === "12.2.1"),
+  "artifact and publish jobs must use npm@12.2.1",
 );
 assert(
-  /npm install -g npm@11\.21\.1[\s\S]*?npm --version/u.test(sourceVerification),
+  /npm install -g npm@12\.2\.1[\s\S]*?npm --version/u.test(sourceVerification),
   "artifact job does not report its pinned npm version",
 );
 assert(
-  /test "\$NPM_VERSION" = "11\.21\.1"/u.test(sourceVerification),
+  /test "\$NPM_VERSION" = "12\.2\.1"/u.test(sourceVerification),
   "artifact job does not enforce its pinned npm version",
 );
 assert(
@@ -281,11 +281,11 @@ assert(
 );
 const publishJob = workflow.slice(workflow.indexOf("  publish:"));
 assert(
-  /npm install -g npm@11\.21\.1[\s\S]*?npm --version/u.test(publishJob),
+  /npm install -g npm@12\.2\.1[\s\S]*?npm --version/u.test(publishJob),
   "publish job does not install and report the pinned npm version",
 );
 assert(
-  /test "\$NPM_VERSION" = "11\.21\.1"/u.test(publishJob),
+  /test "\$NPM_VERSION" = "12\.2\.1"/u.test(publishJob),
   "publish job does not enforce its pinned npm version",
 );
 assert(!/pnpm\s+(?:build|install)/u.test(publishJob), "publish rebuilds or installs the workspace");
