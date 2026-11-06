@@ -322,7 +322,7 @@ export interface DurableRuntimePolicy {
 }
 
 export const DEFAULT_DURABLE_RUNTIME_POLICY: DurableRuntimePolicy = {
-  criticalWriteTimeoutMs: 75,
+  criticalWriteTimeoutMs: 2_000,
   criticalSessionP50BudgetMs: 10,
   criticalSessionP95BudgetMs: 25,
   criticalSessionP99BudgetMs: 50,

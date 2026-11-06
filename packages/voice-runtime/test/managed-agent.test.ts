@@ -71,6 +71,7 @@ import {
 import { validateRunOptions } from "../src/managed-agent-validation.js";
 import {
   createProviderCapabilitySnapshot,
+  BackendUnavailableError,
   isTerminalSession,
   PROVIDER_CAPABILITY_FEATURES,
   type ProviderCapabilitySnapshot,
@@ -4401,17 +4402,21 @@ describe("managed voice agent", () => {
   });
 
   it("completes and finalizes through the public session handle", async () => {
-    const harness = createLifecycleHarness();
+    const inputEndReasons: string[] = [];
+    let harness!: LifecycleHarness;
+    let sessionId!: SessionId;
+    harness = createLifecycleHarness({
+      endInput: async (reason) => {
+        inputEndReasons.push(reason);
+        harness.inbound.push(streamEndedEvent(sessionId));
+      },
+    });
     try {
       const session = await harness.agent.start({
         callHandle: harness.callHandle,
         channel: "simulated",
       });
-      const inputEndReasons: string[] = [];
-      harness.callHandle.endInput = async (reason) => {
-        inputEndReasons.push(reason);
-        harness.inbound.push(streamEndedEvent(session.sessionId));
-      };
+      sessionId = session.sessionId;
       const run = session.run;
       void run.catch(() => undefined);
       harness.inbound.push(streamStartedEvent(session.sessionId));
@@ -4438,22 +4443,23 @@ describe("managed voice agent", () => {
   });
 
   it("lets a concurrent stop determine the persisted and final transport reason", async () => {
-    const harness = createLifecycleHarness();
+    const inputEndReasons: string[] = [];
+    let resolveInputEndStarted!: () => void;
+    const inputEndStarted = new Promise<void>((resolve) => {
+      resolveInputEndStarted = resolve;
+    });
+    const harness = createLifecycleHarness({
+      endInput: async (reason) => {
+        inputEndReasons.push(reason);
+        resolveInputEndStarted();
+        await new Promise<void>(() => undefined);
+      },
+    });
     try {
       const session = await harness.agent.start({
         callHandle: harness.callHandle,
         channel: "simulated",
       });
-      const inputEndReasons: string[] = [];
-      let resolveInputEndStarted!: () => void;
-      const inputEndStarted = new Promise<void>((resolve) => {
-        resolveInputEndStarted = resolve;
-      });
-      harness.callHandle.endInput = async (reason) => {
-        inputEndReasons.push(reason);
-        resolveInputEndStarted();
-        await new Promise<void>(() => undefined);
-      };
       const run = session.run;
       void run.catch(() => undefined);
       harness.inbound.push(streamStartedEvent(session.sessionId));
@@ -4477,16 +4483,17 @@ describe("managed voice agent", () => {
   });
 
   it("does not end transport input when stop wins before completion starts it", async () => {
-    const harness = createLifecycleHarness();
+    let inputEndCalls = 0;
+    const harness = createLifecycleHarness({
+      endInput: async () => {
+        inputEndCalls += 1;
+      },
+    });
     try {
       const session = await harness.agent.start({
         callHandle: harness.callHandle,
         channel: "simulated",
       });
-      let inputEndCalls = 0;
-      harness.callHandle.endInput = async () => {
-        inputEndCalls += 1;
-      };
       const run = session.run;
       void run.catch(() => undefined);
       harness.inbound.push(streamStartedEvent(session.sessionId));
@@ -4507,20 +4514,21 @@ describe("managed voice agent", () => {
 
   it("fails completion with a persisted timeout when transport input shutdown stalls", async () => {
     vi.useFakeTimers();
-    const harness = createLifecycleHarness();
     let resolveInputEndStarted!: () => void;
     const inputEndStarted = new Promise<void>((resolve) => {
       resolveInputEndStarted = resolve;
+    });
+    const harness = createLifecycleHarness({
+      endInput: async () => {
+        resolveInputEndStarted();
+        await new Promise<void>(() => undefined);
+      },
     });
     try {
       const session = await harness.agent.start({
         callHandle: harness.callHandle,
         channel: "simulated",
       });
-      harness.callHandle.endInput = async () => {
-        resolveInputEndStarted();
-        await new Promise<void>(() => undefined);
-      };
       const run = session.run;
       void run.catch(() => undefined);
       harness.inbound.push(streamStartedEvent(session.sessionId));
@@ -5023,6 +5031,142 @@ describe("managed voice agent", () => {
     }
   });
 
+  it("does not invoke optional CallHandle accessors while wrapping the handle", async () => {
+    let optionalGetterReads = 0;
+    const harness = createLifecycleHarness({
+      callHandleFactory: (baseCallHandle) => {
+        const handle: CallHandle = {
+          callId: baseCallHandle.callId,
+          events: baseCallHandle.events,
+          send: (event) => baseCallHandle.send(event),
+          clear: () => baseCallHandle.clear(),
+          close: (reason) => baseCallHandle.close(reason),
+        };
+        for (const property of ["remoteHangup", "deliverText", "endInput", "confirmPlayout"]) {
+          Object.defineProperty(handle, property, {
+            configurable: true,
+            get() {
+              optionalGetterReads += 1;
+              throw new Error(`unexpected access to ${property}`);
+            },
+          });
+        }
+        return handle;
+      },
+    });
+
+    try {
+      await harness.agent.start({ callHandle: harness.callHandle, channel: "simulated" });
+      expect(optionalGetterReads).toBe(0);
+      await harness.agent.stop();
+      expect(optionalGetterReads).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("closes a managed call handle once after durable persistence failure", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+    let failedTurnWrites = 0;
+    durableStore.runSessionTransaction = async <T>(
+      sessionId: SessionId,
+      lease: SessionLease,
+      operation: (transaction: DurableSessionTransaction) => Promise<T>,
+    ) =>
+      runSessionTransaction(sessionId, lease, async (transaction) => {
+        const wrapped = new Proxy(transaction, {
+          get(target, property, receiver) {
+            if (property === "updateTurn") {
+              return async (
+                turnSessionId: SessionId,
+                turnId: Parameters<DurableSessionTransaction["updateTurn"]>[1],
+                updater: Parameters<DurableSessionTransaction["updateTurn"]>[2],
+              ) =>
+                target.updateTurn(turnSessionId, turnId, (record) => {
+                  const next = updater(record);
+                  if (
+                    next.turn.status === "thinking" ||
+                    (next.turn.status === "failed" && failedTurnWrites++ === 0)
+                  ) {
+                    throw new BackendUnavailableError("injected durable store outage");
+                  }
+                  return next;
+                });
+            }
+            const value = Reflect.get(target, property, receiver) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        return operation(wrapped);
+      });
+
+    let rawCloseCalls = 0;
+    const harness = createLifecycleHarness({
+      runtime: {
+        durableStore,
+        durablePolicy: { criticalWriteTimeoutMs: 10, persistenceRecoveryGraceMs: 30 },
+      },
+      callHandleFactory: (baseCallHandle) => ({
+        callId: baseCallHandle.callId,
+        events: baseCallHandle.events,
+        send: (event) => baseCallHandle.send(event),
+        clear: () => baseCallHandle.clear(),
+        async close(reason) {
+          rawCloseCalls += 1;
+          if (rawCloseCalls > 1) throw new Error("CallHandle.close must not be called twice");
+          await baseCallHandle.close(reason);
+        },
+      }),
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      const observed = collectVoiceEvents(session.run);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      const timestamp = nowTimestamp();
+      harness.transcripts.push({
+        id: "durable-close-stt-final" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 1,
+        provider: "lifecycle-stt",
+        text: "Close the call after a durable write failure.",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      harness.transcripts.push({
+        id: "durable-close-stt-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 2,
+        provider: "lifecycle-stt",
+        reason: "provider",
+        timestamp,
+      });
+
+      const runResult = await session.run;
+      const events = await observed;
+      expect(runResult.terminalReason).toBe("failed");
+      expect(rawCloseCalls).toBe(1);
+      expect(harness.closeReasons).toEqual(["error"]);
+      expect(
+        events.some(
+          (event) => event.kind === "error" && event.error.code === "durable.write.failure",
+        ),
+      ).toBe(true);
+      expect(events.at(-1)).toMatchObject({ kind: "call_ended", reason: "failed" });
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
   it("keeps cleanup failure visible instead of reporting a false successful run", async () => {
     const harness = createLifecycleHarness({
       closeCall: async () => {
@@ -5404,6 +5548,7 @@ interface LifecycleHarnessOptions {
   readonly ttsConfiguredModel?: string;
   readonly ttsConfiguredModelSource?: "configured" | "not_reported";
   readonly closeCall?: (reason: Parameters<CallHandle["close"]>[0]) => Promise<void>;
+  readonly endInput?: NonNullable<CallHandle["endInput"]>;
   readonly openStt?: () => Promise<SttStream>;
   readonly onSttOpen?: (request: Parameters<SpeechToTextProvider["open"]>[0]) => void;
   readonly completeLlm?: (
@@ -5438,6 +5583,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
       return true;
     },
     async clear() {},
+    ...(options.endInput ? { endInput: options.endInput } : {}),
     async close(reason) {
       closeReasons.push(reason);
       await options.closeCall?.(reason);
