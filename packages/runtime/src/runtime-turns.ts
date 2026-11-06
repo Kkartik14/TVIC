@@ -1,6 +1,7 @@
 import {
   isTerminalTurn,
   LeaseUnavailableError,
+  RecordConflictError,
   RecordNotFoundError,
   terminalTurnFromRequest,
   validationError,
@@ -32,6 +33,10 @@ import {
   type LateWriteOutcome as RuntimeLateWriteOutcome,
 } from "./runtime-support.js";
 import type { AttachmentAdmission } from "./attachment-admission.js";
+
+type TurnStartTransactionResult =
+  | { readonly kind: "started"; readonly turn: ActiveTurn }
+  | { readonly kind: "already_active" };
 
 export interface RuntimeTurnContext {
   readonly clock: Clock;
@@ -107,11 +112,18 @@ export async function startTurn(
     };
   };
 
-  const persist = async (tx: DurableSessionTransaction, fence: number): Promise<ActiveTurn> => {
+  const persist = async (
+    tx: DurableSessionTransaction,
+    fence: number,
+  ): Promise<TurnStartTransactionResult> => {
     const current = await tx.getSession(request.sessionId);
     if (!current || current.session.status !== "active") {
       throw new Error(`Cannot start turn for ${request.sessionId}`);
     }
+    const activeTurn = (await tx.listTurns(request.sessionId)).find(
+      (record) => !isTerminalTurn(record.turn),
+    );
+    if (activeTurn) return { kind: "already_active" };
     const record = create(current);
     await tx.putTurn(record);
     const updatedSession = await tx.updateSession(request.sessionId, (stored) => ({
@@ -153,24 +165,45 @@ export async function startTurn(
         updatedSession.version,
       ),
     );
-    return record.turn as ActiveTurn;
+    return { kind: "started", turn: record.turn as ActiveTurn };
   };
 
   const abandonLate = ({
     error,
     result,
-  }: RuntimeLateWriteOutcome<ActiveTurn>): void | Promise<void> => {
-    if (!error && result) {
-      return Promise.resolve(context.abandonLateTurn(result)).catch(() => undefined);
+  }: RuntimeLateWriteOutcome<TurnStartTransactionResult>): void | Promise<void> => {
+    if (!error && result?.kind === "started") {
+      return Promise.resolve(context.abandonLateTurn(result.turn)).catch(() => undefined);
     }
   };
+  const retryConflictedStart = async (
+    run: () => Promise<TurnStartTransactionResult>,
+  ): Promise<ActiveTurn> => {
+    let result: TurnStartTransactionResult;
+    try {
+      result = await run();
+    } catch (error) {
+      if (!(error instanceof RecordConflictError)) throw error;
+      // Redis uses optimistic per-session commits. Re-read inside a fresh transaction so a
+      // competing start is reported as turn.already_active instead of a generic record conflict.
+      result = await run();
+    }
+    if (result.kind === "already_active") {
+      throw TvicThrowableError.from(
+        validationError("turn.already_active", "A session can have only one active turn"),
+      );
+    }
+    return result.turn;
+  };
   if (lease) {
-    return context.criticalWrite(
-      () =>
-        context.durableStore.runSessionTransaction(request.sessionId, lease, (tx) =>
-          persist(tx, lease.fence),
-        ),
-      abandonLate,
+    return retryConflictedStart(() =>
+      context.criticalWrite(
+        () =>
+          context.durableStore.runSessionTransaction(request.sessionId, lease, (tx) =>
+            persist(tx, lease.fence),
+          ),
+        abandonLate,
+      ),
     );
   }
   const releaseReservation = context.reserveUnattachedSessionWrite(request.sessionId);
@@ -178,7 +211,9 @@ export async function startTurn(
     throw new LeaseUnavailableError(`Session attachment is starting: ${request.sessionId}`);
   }
   let timedOut = false;
-  const settleLate = async (outcome: RuntimeLateWriteOutcome<ActiveTurn>): Promise<void> => {
+  const settleLate = async (
+    outcome: RuntimeLateWriteOutcome<TurnStartTransactionResult>,
+  ): Promise<void> => {
     try {
       await abandonLate(outcome);
     } finally {
@@ -186,13 +221,15 @@ export async function startTurn(
     }
   };
   try {
-    return await context.runUnfencedSessionTransaction(
-      request.sessionId,
-      (tx) => persist(tx, 0),
-      settleLate,
-      () => {
-        timedOut = true;
-      },
+    return await retryConflictedStart(() =>
+      context.runUnfencedSessionTransaction(
+        request.sessionId,
+        (tx) => persist(tx, 0),
+        settleLate,
+        () => {
+          timedOut = true;
+        },
+      ),
     );
   } finally {
     if (!timedOut) releaseReservation();
