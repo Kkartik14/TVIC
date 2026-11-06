@@ -321,13 +321,14 @@ export async function endTurn(
   };
 
   if (lease) {
-    return context.criticalWrite(() =>
-      context.durableStore.runSessionTransaction(sessionId, lease, (tx) =>
-        persist(tx, lease.fence),
-      ),
+    return context.durableStore.runSessionTransaction(sessionId, lease, (tx) =>
+      persist(tx, lease.fence),
     );
   }
-  return context.runUnfencedSessionTransaction(sessionId, (tx) => persist(tx, 0));
+  if (!context.durableStore.runUnfencedSessionTransaction) {
+    throw new LeaseUnavailableError(`Unfenced compatibility transaction unavailable: ${sessionId}`);
+  }
+  return context.durableStore.runUnfencedSessionTransaction(sessionId, (tx) => persist(tx, 0));
 }
 
 export async function updateTurnStatus(

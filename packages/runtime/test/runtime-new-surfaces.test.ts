@@ -22,6 +22,7 @@ import {
 import { createInMemoryDurableRuntimeStore, createInMemoryMemory } from "@tvic/dal";
 
 import { createRememberFactTool } from "../src/remember-fact-tool.js";
+import { criticalWriteLateSettlement } from "../src/runtime-support.js";
 import {
   formatMemoryContextAsSystemBlock,
   formatPreCallContextAsSystemBlock,
@@ -813,12 +814,18 @@ describe("new runtime surfaces", () => {
       if (readsToHold > 0) {
         readsToHold -= 1;
         heldReads += 1;
-        if (heldReads === 2) markReadsStarted();
+        if (heldReads === 1) markReadsStarted();
         await readGate;
       }
       return readSession(sessionId);
     });
-    const runtime = createRuntime({ durableStore, durableStoreOwnership: "caller" });
+    const runtime = createRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      // Let this test reach the post-drain lease-fencing check before the
+      // endTurn operation's full-operation deadline expires.
+      durablePolicy: { criticalWriteTimeoutMs: 15_000 },
+    });
 
     try {
       await runtime.start();
@@ -832,7 +839,7 @@ describe("new runtime surfaces", () => {
       });
       const originalLease = await durableStore.leases.get(session.id);
       expect(originalLease).not.toBeNull();
-      readsToHold = 2;
+      readsToHold = 1;
       const stopping = runtime.stop();
       const endingTurn = runtime.endTurn(session.id, turn.id, { reason: "completed" });
       const endingSession = runtime.endSession(session.id, { reason: "completed" });
@@ -859,6 +866,119 @@ describe("new runtime surfaces", () => {
       vi.useRealTimers();
     }
   });
+
+  it("keeps a late-start cancellation in flight until its terminal write settles", async () => {
+    let releaseStartWrite!: () => void;
+    let releaseCancellationWrite!: () => void;
+    let markStartWriteStarted!: () => void;
+    let markCancellationWriteStarted!: () => void;
+    const startWriteGate = new Promise<void>((resolve) => {
+      releaseStartWrite = resolve;
+    });
+    const cancellationWriteGate = new Promise<void>((resolve) => {
+      releaseCancellationWrite = resolve;
+    });
+    const startWriteStarted = new Promise<void>((resolve) => {
+      markStartWriteStarted = resolve;
+    });
+    const cancellationWriteStarted = new Promise<void>((resolve) => {
+      markCancellationWriteStarted = resolve;
+    });
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+    let holdStartWrite = false;
+    let holdCancellationWrite = false;
+    durableStore.runSessionTransaction = async <T>(
+      sessionId: SessionId,
+      lease: SessionLease,
+      operation: (tx: DurableSessionTransaction) => Promise<T>,
+    ) => {
+      return runSessionTransaction(sessionId, lease, (transaction) =>
+        operation(
+          new Proxy(transaction, {
+            get(target, property, receiver) {
+              if (property === "putTurn") {
+                return async (record: Parameters<DurableSessionTransaction["putTurn"]>[0]) => {
+                  if (holdStartWrite) {
+                    holdStartWrite = false;
+                    markStartWriteStarted();
+                    await startWriteGate;
+                  }
+                  return target.putTurn(record);
+                };
+              }
+              if (property === "updateTurn") {
+                return async (
+                  turnSessionId: SessionId,
+                  turnId: Parameters<DurableSessionTransaction["updateTurn"]>[1],
+                  updater: Parameters<DurableSessionTransaction["updateTurn"]>[2],
+                ) => {
+                  const current = await target.getTurn(turnSessionId, turnId);
+                  if (!current) throw new Error(`missing turn during injection: ${turnId}`);
+                  const next = updater(current);
+                  if (holdCancellationWrite && next.turn.status === "cancelled") {
+                    holdCancellationWrite = false;
+                    markCancellationWriteStarted();
+                    await cancellationWriteGate;
+                  }
+                  return target.updateTurn(turnSessionId, turnId, () => next);
+                };
+              }
+              const value = Reflect.get(target, property, receiver) as unknown;
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          }),
+        ),
+      );
+    };
+    const runtime = createRuntime({
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 100 },
+    });
+
+    try {
+      await runtime.start();
+      const attachment = await runtime.startAttachedSession(buildRecordingAgent(), {
+        channel: "simulated",
+      });
+      holdStartWrite = true;
+      const startOutcome = runtime
+        .startTurn({
+          sessionId: attachment.session.id,
+          input: { transcript: "late start", mediaEventIds: [] },
+        })
+        .then(
+          () => ({ error: undefined }),
+          (error: unknown) => ({ error }),
+        );
+      await startWriteStarted;
+      const { error } = await startOutcome;
+      expect(error).toBeDefined();
+      const lateSettlement = criticalWriteLateSettlement(error);
+      expect(lateSettlement).toBeDefined();
+      let lateSettlementResolved = false;
+      const lateSettlementResult = lateSettlement!.then(() => {
+        lateSettlementResolved = true;
+      });
+
+      holdCancellationWrite = true;
+      releaseStartWrite();
+      await cancellationWriteStarted;
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+      expect(lateSettlementResolved).toBe(false);
+
+      releaseCancellationWrite();
+      await lateSettlementResult;
+      expect(lateSettlementResolved).toBe(true);
+      await expect(runtime.inspectSession(attachment.session.id)).resolves.toMatchObject({
+        turns: [{ status: "cancelled" }],
+      });
+    } finally {
+      releaseStartWrite();
+      releaseCancellationWrite();
+      await runtime.stop();
+    }
+  }, 15_000);
 
   it("closes terminal-write admission after pipeline drain and defers store close for pending finalizers", async () => {
     vi.useFakeTimers();
