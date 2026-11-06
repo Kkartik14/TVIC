@@ -5119,6 +5119,24 @@
       }
     },
     {
+      "owner": "runtime",
+      "factory": "normalizedError",
+      "classification": "derived_canonical",
+      "expression": "normalized.code",
+      "file": "packages/runtime/src/durable-write-recovery.ts",
+      "line": 122,
+      "column": 14,
+      "status": "derived_canonical",
+      "sourceField": "derived code expression",
+      "maxUtf8Bytes": 128,
+      "mappingKey": "core.factory_passthrough",
+      "compatibilityTest": {
+        "file": "packages/core/test/error-code-evidence.test.ts",
+        "pattern": "[1.1.0:error-code:packages/runtime/src/durable-write-recovery.ts:122:14]",
+        "function": "failure"
+      }
+    },
+    {
       "owner": "tools",
       "factory": "validationError",
       "classification": "derived_canonical",
@@ -5670,6 +5688,10 @@
           {
             "file": "packages/runtime/src/resilient-stt-policy.ts",
             "factories": ["timeoutError"]
+          },
+          {
+            "file": "packages/runtime/src/durable-write-recovery.ts",
+            "factories": ["normalizedError"]
           }
         ]
       },
@@ -5685,6 +5707,10 @@
         {
           "file": "packages/runtime/src/resilient-stt-policy.ts",
           "factories": ["timeoutError"]
+        },
+        {
+          "file": "packages/runtime/src/durable-write-recovery.ts",
+          "factories": ["normalizedError"]
         }
       ],
       "canonicalCodes": [
@@ -5706,7 +5732,8 @@
         "stt.transport.unexpected_eof",
         "tts.transport.unexpected_eof",
         "llm.provider.unexpected_eof",
-        "provider.transport_timeout"
+        "provider.transport_timeout",
+        "durable.write.failure"
       ],
       "canonicalPatterns": ["[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+"],
       "coverage": "observed",

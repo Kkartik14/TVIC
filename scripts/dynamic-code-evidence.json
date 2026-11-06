@@ -290,6 +290,15 @@
       "sourceKey": "packages/runtime/src/resilient-stt-policy.ts#audioWriteTimeoutError#timeoutError"
     },
     {
+      "mappingKey": "core.factory_passthrough",
+      "factory": "normalizedError",
+      "code": "durable.write.failure",
+      "retriable": true,
+      "retryOwner": "factory-declared",
+      "persistedReadPolicy": "accept only a manifest code; unknown persisted code is never retriable",
+      "sourceKey": "packages/runtime/src/durable-write-recovery.ts#failure#normalizedError"
+    },
+    {
       "mappingKey": "tools.serialization_label",
       "factory": "validationError",
       "code": "tool.input_not_serializable",

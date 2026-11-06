@@ -16,6 +16,7 @@ import {
 } from "../src/errors.ts";
 import { normalizeProviderError } from "../../providers/src/common.ts";
 import { audioWriteTimeoutError } from "../../runtime/src/resilient-stt-policy.ts";
+import { DurableWriteRecovery } from "../../runtime/src/durable-write-recovery.ts";
 
 export const evidenceSourceBindings = [
   {
@@ -29,6 +30,10 @@ export const evidenceSourceBindings = [
   {
     file: "packages/runtime/src/resilient-stt-policy.ts",
     factories: ["timeoutError"],
+  },
+  {
+    file: "packages/runtime/src/durable-write-recovery.ts",
+    factories: ["normalizedError"],
   },
 ];
 
@@ -385,6 +390,38 @@ export async function runErrorMigrationEvidence({
     evidenceKey: "packages/core/test/error-code-evidence.test.ts#audioWriteTimeoutError",
     factory: "timeoutError",
     observed: checkedTransportTimeout,
+  });
+
+  const expectedDurableWriteFailure = {
+    code: "durable.write.failure",
+    retriable: true,
+    retryOwner: "factory-declared",
+    persistedReadPolicy: "accept only a manifest code; unknown persisted code is never retriable",
+  };
+  const durableWriteRecovery = new DurableWriteRecovery({
+    runtime: {},
+    sessionId: "evidence",
+    emitError() {},
+    onSessionFailure() {},
+    closeCall: async () => {},
+    abortRun() {},
+    abortActiveTurn() {},
+  });
+  const observedDurableWriteFailure = await recordFactoryCall(
+    "packages/core/test/error-code-evidence.test.ts#failure",
+    "normalizedError",
+    () => durableWriteRecovery.failure(new Error("evidence"), "turn_start"),
+  );
+  const checkedDurableWriteFailure = await assertErrorMigrationEvidence({
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#failure",
+    factory: "normalizedError",
+    exercise: () => observedDurableWriteFailure,
+    expected: expectedDurableWriteFailure,
+  });
+  rows.push({
+    evidenceKey: "packages/core/test/error-code-evidence.test.ts#failure",
+    factory: "normalizedError",
+    observed: checkedDurableWriteFailure,
   });
 
   return rows;
