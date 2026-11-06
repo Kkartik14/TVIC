@@ -36,6 +36,36 @@ describe("async control", () => {
     });
   });
 
+  it("does not accept work that settles after its absolute deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const deadlineMs = Date.now() + 20;
+      await expect(
+        settleBy(async () => {
+          vi.setSystemTime(deadlineMs + 1);
+          return "late";
+        }, deadlineMs),
+      ).resolves.toEqual({ status: "timeout" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats work rejected after its absolute deadline as timed out", async () => {
+    vi.useFakeTimers();
+    try {
+      const deadlineMs = Date.now() + 20;
+      await expect(
+        settleBy(async () => {
+          vi.setSystemTime(deadlineMs + 1);
+          throw new Error("late failure");
+        }, deadlineMs),
+      ).resolves.toEqual({ status: "timeout" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("polls with the requested delay until an attempt returns a value", async () => {
     vi.useFakeTimers();
     try {
@@ -83,6 +113,44 @@ describe("async control", () => {
       await vi.advanceTimersByTimeAsync(20);
       await expect(result).resolves.toBeNull();
       expect(attempt).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not accept a result returned after its absolute deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const deadlineMs = Date.now() + 20;
+      await expect(
+        pollUntil({
+          deadlineMs,
+          attempt: async () => {
+            vi.setSystemTime(deadlineMs + 1);
+            return "late";
+          },
+          nextDelayMs: () => 1,
+        }),
+      ).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats an attempt rejected after its deadline as timed out", async () => {
+    vi.useFakeTimers();
+    try {
+      const deadlineMs = Date.now() + 20;
+      await expect(
+        pollUntil({
+          deadlineMs,
+          attempt: async () => {
+            vi.setSystemTime(deadlineMs + 1);
+            throw new Error("late attempt failure");
+          },
+          nextDelayMs: () => 1,
+        }),
+      ).resolves.toBeNull();
     } finally {
       vi.useRealTimers();
     }

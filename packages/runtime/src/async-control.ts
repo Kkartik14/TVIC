@@ -22,12 +22,15 @@ export function settleBy<T>(work: () => Promise<T>, deadlineMs: number): Promise
   if (remainingMs <= 0) return Promise.resolve({ status: "timeout" });
 
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const settled = Promise.resolve()
-    .then(work)
-    .then(
-      (value): Settlement<T> => ({ status: "completed", value }),
-      (error: unknown): Settlement<T> => ({ status: "rejected", error }),
-    );
+  const settled = Promise.resolve().then(async (): Promise<Settlement<T>> => {
+    if (Date.now() >= deadlineMs) return { status: "timeout" };
+    try {
+      const value = await work();
+      return Date.now() >= deadlineMs ? { status: "timeout" } : { status: "completed", value };
+    } catch (error: unknown) {
+      return Date.now() >= deadlineMs ? { status: "timeout" } : { status: "rejected", error };
+    }
+  });
   const timeout = new Promise<Settlement<T>>((resolve) => {
     timer = setTimeout(() => resolve({ status: "timeout" }), remainingMs);
     timer.unref?.();
@@ -58,9 +61,17 @@ export async function pollUntil<T>(input: {
         aborted,
       );
     } catch (error) {
-      if (error === deadlineExpired || error === aborted) return null;
+      if (
+        error === deadlineExpired ||
+        error === aborted ||
+        input.signal?.aborted ||
+        Date.now() >= input.deadlineMs
+      ) {
+        return null;
+      }
       throw error;
     }
+    if (input.signal?.aborted || Date.now() >= input.deadlineMs) return null;
     if (result !== null) return result;
     const remainingMs = input.deadlineMs - Date.now();
     if (remainingMs <= 0 || input.signal?.aborted) break;
