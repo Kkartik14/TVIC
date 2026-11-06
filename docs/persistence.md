@@ -155,6 +155,26 @@ and surface the failure through the host's call-control or operations path. The
 managed facade shares one close attempt between pipeline failure handling and
 session finalization.
 
+### Known limitations
+
+- A turn start can commit after its timeout. If a later durable write then fails
+  while reads still work, the call can remain connected. Track this in
+  [issue #109](https://github.com/Kkartik14/TVIC/issues/109).
+- A checkpoint write that commits after `criticalWriteTimeoutMs` still ends the
+  call by default. If you raise `criticalWriteTimeoutMs`, set
+  `persistenceRecoveryGraceMs` above it. See
+  [issue #110](https://github.com/Kkartik14/TVIC/issues/110).
+- `criticalWriteTimeoutMs` and `persistenceRecoveryGraceMs` are not validated
+  yet. Set each to a finite positive value; validation is tracked in
+  [issue #111](https://github.com/Kkartik14/TVIC/issues/111).
+- Recovery currently records a recovered turn as `failed`, which can remove an
+  already delivered response from later model history. See
+  [issue #112](https://github.com/Kkartik14/TVIC/issues/112).
+
+The 2,000 ms default suits a database in the same region. For a remote database,
+size the timeout from roughly 16 sequential statements per turn write multiplied
+by the database's p99 round-trip time, plus margin.
+
 Hosts should observe the voice event stream and session health rather than
 treating a connected transport as proof that the runtime can accept turns.
 

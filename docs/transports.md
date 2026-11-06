@@ -300,7 +300,11 @@ const session = await agent.start({
     twilioCallSid,
     accountSid,
   },
-  callHandle: ({ sessionId, call }) => twilio.acceptWebSocket(socket, call.id, sessionId),
+  callHandle: ({ sessionId, call }) =>
+    twilio.acceptWebSocket(socket, call.id, sessionId, {
+      expectedTwilioCallSid: twilioCallSid,
+      expectedAccountSid: accountSid,
+    }),
 });
 ```
 
@@ -320,15 +324,27 @@ unknown event types, invalid or discontinuous `sequenceNumber` values, stream
 identity changes, unsupported media tracks, invalid chunk/timestamp encodings
 or payloads, and a `start` frame that does not describe the expected
 bidirectional stream (one inbound track, mono `audio/x-mulaw` at 8 kHz). It also
-rejects invalid DTMF and stop identity mismatches. Media marked as the
-`outbound` track is dropped and counted.
+rejects invalid DTMF and stop identity mismatches. When supplied,
+`expectedTwilioCallSid` and `expectedAccountSid` bind `start.callSid` and
+`start.accountSid` to the authenticated call; mismatches fail closed. Pass these
+values from the authenticated webhook context as shown above. Media marked as
+the `outbound` track is dropped and counted.
 
-Inbound `media.audio.chunk` metadata may include the per-frame markers
-`twilioChunkGap: true`, `expectedChunk` (the next expected chunk number), and
-`twilioTimestampRegression: true`. The cumulative counters are
-`twilioChunkGapCount`, `twilioDuplicateMediaDroppedCount`,
-`twilioTimestampRegressionCount`, and `twilioOutboundMediaDroppedCount`.
-Treat the counters as authoritative per-call totals. The per-frame markers are
+Inbound `media.audio.chunk` metadata can include these progression fields:
+
+| Key                                | Scope     | Meaning                                                                                       |
+| ---------------------------------- | --------- | --------------------------------------------------------------------------------------------- |
+| `twilioChunkGap`                   | Per frame | The chunk number differed from the expected next number; the nonduplicate frame was accepted. |
+| `expectedChunk`                    | Per frame | The next chunk number expected when this mismatch was detected.                               |
+| `twilioTimestampRegression`        | Per frame | This frame's timestamp went backwards and was clamped.                                        |
+| `twilioChunkGapCount`              | Per call  | Cumulative count of accepted skips, nonduplicate repeats, and out-of-order values.            |
+| `twilioDuplicateMediaDroppedCount` | Per call  | Cumulative count of exact duplicate frames dropped.                                           |
+| `twilioTimestampRegressionCount`   | Per call  | Cumulative count of timestamp regressions.                                                    |
+| `twilioOutboundMediaDroppedCount`  | Per call  | Cumulative count of outbound-track frames dropped.                                            |
+
+Each emitted counter snapshot is an authoritative cumulative per-call total.
+The adapter attaches snapshots to normalized audio and normal stream-end events;
+a protocol-error close may not emit a final snapshot. Per-frame markers are
 best-effort: media normalization and buffering can defer which normalized audio
 event carries metadata from a Twilio frame.
 

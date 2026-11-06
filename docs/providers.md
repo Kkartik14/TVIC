@@ -673,8 +673,9 @@ that ID after 32 newer contexts have closed; `openContext()` rejects reuse while
 the ID is retained. After eviction, a late response for an ID with no active
 context is treated as unknown and fails the shared connection.
 Cancellation sends a `close_context` frame. If the WebSocket cannot send that
-frame, TVIC fails and closes the shared connection, which also fails any
-remaining active contexts.
+frame, `cancel()` still resolves after local cleanup, but TVIC fails and closes
+the shared connection, which also fails any remaining active contexts; observe
+the sibling streams for the connection error.
 
 ElevenLabs also offers MP3, Opus, μ-law, A-law, and WAV output. They are not
 silently mislabeled as TVIC PCM: the provider-neutral media boundary is PCM-only,

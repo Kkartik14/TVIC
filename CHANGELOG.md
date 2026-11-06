@@ -3,7 +3,7 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
-## 2.2.0 (Unreleased)
+## 2.2.0
 
 ### Added
 
@@ -71,6 +71,16 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 ### Changed
 
+- Raise the default `criticalWriteTimeoutMs` from 75 ms to 2,000 ms; no database
+  schema migration is required.
+- Allow at most one active turn per session in every runtime configuration.
+  Starting another while one is active rejects with `turn.already_active`.
+- Require custom durable-store adapters to serialize transactions per session
+  or reject stale snapshots with `RecordConflictError` without committing
+  writes.
+- Require the documented Twilio `<Connect><Stream>` envelope and its
+  bidirectional `start` and `stop` fields. Protocol validation errors fail as
+  protocol errors rather than caller hangups.
 - Keep capability snapshot enforcement opt-in for compatibility: when snapshots
   are supplied, stale, missing, or unsupported facts reject dependent selections;
   omitting snapshots preserves existing configured voice behavior. Managed
@@ -90,10 +100,10 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Require model-scoped voice availability facts for model-specific snapshot
   checks. A model-independent voice fact no longer satisfies a selected-model
   query; the ElevenLabs snapshot loader emits one fact per requested model ID.
-- Keep non-empty `sttLanguage` values as legacy raw provider values, including
-  host-specific tags such as `hi_IN` and `multi`; the managed API rejects an
-  empty string. Use `sttLanguagePolicy` when TVIC should normalize and preflight
-  a fixed, automatic, or hinted policy.
+- Continue passing non-empty `sttLanguage` values as raw provider hints,
+  including host-specific tags such as `hi_IN` and `multi`. Use
+  `sttLanguagePolicy` when TVIC should normalize and preflight a fixed,
+  automatic, or hinted policy.
 - Exclude tool names from STT vocabulary by default. Set
   `includeToolNamesInSttVocabulary: true` to include them. The 256-term
   vocabulary limit applies before trimming and de-duplication.
@@ -140,9 +150,10 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Disable ElevenLabs SSML parsing by default on regular WebSocket routes.
   `enableSsmlParsing: true` remains an explicit opt-in that sends
   `enable_ssml_parsing=true`. The HTTP routes always interpret tags on non-v3
-  models, so they accept `true` without sending it and reject `false`. Untyped normalization settings are removed from
-  custom URLs, and configured phoneme dictionaries remain an explicit host
-  opt-in that may activate the vendor parser.
+  models, so they accept `true` without sending it and reject `false`. Untyped
+  normalization settings are removed from custom URLs, and configured phoneme
+  dictionaries remain an explicit host opt-in that may activate the vendor
+  parser.
 - Preserve ElevenLabs text exactly on every adapter route. Text-to-Dialogue
   bracket tags and SSML-shaped text with phoneme dictionaries may still be
   interpreted by the vendor; TVIC does not claim those strings are spoken literally.
@@ -214,22 +225,22 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 - Deprecate `RuntimeOptions.sessionStore`, `turnStore`, and `toolCallStore`;
   use `durableStore` for atomic lifecycle writes.
+- Deprecate the per-store overrides to `createInMemoryDurableRuntimeStore()`;
+  use the default transactional store or a custom `durableStore` instead.
 
 ### Fixed
 
-- Prevent default PCM16 16 kHz mono STT reconnect journals from overflowing
-  after about 10 seconds. The replay budget now covers 2U + R + frame:
-  1,600,640 bytes and 5,018 entries by default, up from 320,000 bytes and 512
-  entries. Derived defaults clamp at 16 MiB and 8,192 entries rather than
-  rejecting otherwise-valid opens; overflow errors include the limit,
-  configured cap, and observed size. At 5 ms actual chunks with omitted frame
-  duration, the entry default represents about 25 seconds of input; the
-  10-second uncertain window alone is about 2,000 such chunks. An audio format
-  declaring `frameDurationMs: 5` reaches the 8,192-entry ceiling, about 41
-  seconds. For 500 concurrent default-format calls, the byte cap allows about
-  800 MB of retained audio in the worst case. Shorter-than-assumed chunks can
-  still reach the entry limit before the time window expires; explicit limits
-  remain available.
+- Fix the 2.1.0 failure where every call with STT reconnect enabled ended after
+  about 10 seconds, even without a provider fault. The default PCM16 16 kHz mono
+  replay journal now holds up to 1,600,640 bytes and 5,018 commands per stream,
+  up from 320,000 bytes and 512 commands. A stream survives an outage for about
+  4–5 seconds with 5 ms frames that omit their duration, about 20 seconds with
+  declared 5 ms frames, and about 25 seconds nominally with frames of 10 ms or
+  more; the last limit is a timer tie. Derived limits clamp at 16 MiB and 8,192
+  commands instead of rejecting otherwise-valid opens. Short-chunk hosts should
+  coalesce frames or set `maxBufferedCommands`; retained audio uses roughly
+  twice its payload size on the heap. Overflow errors report the limiting unit,
+  configured cap, and observed size.
 - Stream Hindi, Bengali, Urdu, and CJK sentences incrementally to TTS, and keep
   turn timing consistent across STT reconnect recovery.
 - Apply provider-specific language, model, vocabulary, and speed settings or
@@ -278,18 +289,20 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   when terminal shutdown is already observed.
 - Report unexpected STT EOF as `call_ended.reason = failed` instead of
   misreporting it as `remote_hangup`.
-- Prevent live calls from remaining connected but unable to process caller
-  input after durable-store failures.
-- Set the default `criticalWriteTimeoutMs` to 2,000 ms; no database schema
-  migration is required.
-- Reject starting a second active turn in a durable session with
-  `turn.already_active`.
+- Make most durable-write failures end the call cleanly instead of leaving it
+  connected and unable to process caller input.
+- Classify call-close failures with `voice_runtime.call_close_failed` and
+  `voice_runtime.call_close_timeout`; a timeout uses the timeout code, a plain
+  `Error` rejection uses the failed code, and existing TVIC-coded errors retain
+  their code.
 - Report Twilio protocol validation failures as protocol errors instead of
   caller hangups.
 - Emit final Soniox transcript text received after end-of-audio when the
   provider closes without its finished marker.
-- Keep ElevenLabs sibling contexts alive when late messages arrive for recently
-  closed contexts after barge-in.
+- Discard late ElevenLabs output for cancelled contexts while preserving other
+  active contexts. A cancelled ID stays reserved until its late final arrives or
+  32 newer contexts close; use unique IDs per connection. If TVIC cannot send
+  `close_context`, it fails the shared connection.
 - Report malformed accumulated OpenAI tool arguments in
   `response.completed` as a non-retriable `llm.failed` event.
 - Make a stopped managed voice-event iterator reject with the run's original
