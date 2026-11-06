@@ -66,6 +66,28 @@ describe("async control", () => {
     }
   });
 
+  it("keeps a far-future settlement deadline from overflowing the timer delay", async () => {
+    vi.useFakeTimers();
+    try {
+      const maximumTimerDelayMs = 2_147_483_647;
+      const deadlineMs = Date.now() + maximumTimerDelayMs + 10;
+      let settled = false;
+      const pending = settleBy(() => new Promise<string>(() => undefined), deadlineMs).then(
+        (result) => {
+          settled = true;
+          return result;
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(maximumTimerDelayMs);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(pending).resolves.toEqual({ status: "timeout" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("polls with the requested delay until an attempt returns a value", async () => {
     vi.useFakeTimers();
     try {
@@ -79,6 +101,31 @@ describe("async control", () => {
       await vi.advanceTimersByTimeAsync(20);
       await expect(result).resolves.toBe("ready");
       expect(attempts).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("chunks a backoff longer than the maximum timer delay", async () => {
+    vi.useFakeTimers();
+    try {
+      const maximumTimerDelayMs = 2_147_483_647;
+      const attempt = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce("ready");
+      const result = pollUntil({
+        deadlineMs: Date.now() + maximumTimerDelayMs + 200,
+        attempt,
+        nextDelayMs: () => maximumTimerDelayMs + 100,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attempt).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(maximumTimerDelayMs);
+      expect(attempt).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(99);
+      expect(attempt).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(result).resolves.toBe("ready");
+      expect(attempt).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }
@@ -98,6 +145,40 @@ describe("async control", () => {
       }),
     ).resolves.toBeNull();
     expect(attempt).not.toHaveBeenCalled();
+  });
+
+  it("does not invoke an attempt when abort precedes its queued callback", async () => {
+    const controller = new AbortController();
+    const attempt = vi.fn(async () => "too late");
+    const result = pollUntil({
+      deadlineMs: Date.now() + 1_000,
+      signal: controller.signal,
+      attempt,
+      nextDelayMs: () => 1,
+    });
+
+    controller.abort();
+    await expect(result).resolves.toBeNull();
+    expect(attempt).not.toHaveBeenCalled();
+  });
+
+  it("does not invoke an attempt when the deadline passes before its queued callback", async () => {
+    vi.useFakeTimers();
+    try {
+      const deadlineMs = Date.now() + 20;
+      const attempt = vi.fn(async () => "too late");
+      const result = pollUntil({
+        deadlineMs,
+        attempt,
+        nextDelayMs: () => 1,
+      });
+
+      vi.setSystemTime(deadlineMs + 1);
+      await expect(result).resolves.toBeNull();
+      expect(attempt).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stops waiting for an attempt when the absolute deadline expires", async () => {

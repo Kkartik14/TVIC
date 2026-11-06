@@ -1,6 +1,8 @@
 import { CANCELLATION_TIMEOUT_MS } from "./pipeline-constants.js";
 import type { NormalizedError } from "@tvic/core";
 
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 export function stallTimer(ms: number): {
   readonly promise: Promise<void>;
   cancel: () => void;
@@ -19,7 +21,9 @@ export type Settlement<T> =
 
 export function settleBy<T>(work: () => Promise<T>, deadlineMs: number): Promise<Settlement<T>> {
   const remainingMs = deadlineMs - Date.now();
-  if (remainingMs <= 0) return Promise.resolve({ status: "timeout" });
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+    return Promise.resolve({ status: "timeout" });
+  }
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const settled = Promise.resolve().then(async (): Promise<Settlement<T>> => {
@@ -32,8 +36,25 @@ export function settleBy<T>(work: () => Promise<T>, deadlineMs: number): Promise
     }
   });
   const timeout = new Promise<Settlement<T>>((resolve) => {
-    timer = setTimeout(() => resolve({ status: "timeout" }), remainingMs);
-    timer.unref?.();
+    const scheduleTimeout = (): void => {
+      const remaining = deadlineMs - Date.now();
+      if (!Number.isFinite(remaining) || remaining <= 0) {
+        resolve({ status: "timeout" });
+        return;
+      }
+      timer = setTimeout(
+        () => {
+          if (Date.now() >= deadlineMs) {
+            resolve({ status: "timeout" });
+          } else {
+            scheduleTimeout();
+          }
+        },
+        Math.min(remaining, MAX_TIMER_DELAY_MS),
+      );
+      timer.unref?.();
+    };
+    scheduleTimeout();
   });
   return Promise.race([settled, timeout]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);
@@ -46,30 +67,46 @@ export async function pollUntil<T>(input: {
   readonly attempt: () => Promise<T | null>;
   readonly nextDelayMs: (attempt: number) => number;
 }): Promise<T | null> {
-  const deadlineExpired = Symbol("tvic.poll-deadline");
+  if (!Number.isFinite(input.deadlineMs)) return null;
+  const timerChunkElapsed = Symbol("tvic.poll-timer-chunk");
   const aborted = Symbol("tvic.poll-aborted");
   let attempt = 0;
   while (!input.signal?.aborted && Date.now() < input.deadlineMs) {
-    const attemptRemainingMs = input.deadlineMs - Date.now();
+    const attemptPromise = Promise.resolve().then(() => {
+      if (input.signal?.aborted || Date.now() >= input.deadlineMs) return null;
+      return input.attempt();
+    });
     let result: T | null;
-    try {
-      result = await withTimeout(
-        Promise.resolve().then(input.attempt),
-        attemptRemainingMs,
-        deadlineExpired,
-        input.signal,
-        aborted,
-      );
-    } catch (error) {
-      if (
-        error === deadlineExpired ||
-        error === aborted ||
-        input.signal?.aborted ||
-        Date.now() >= input.deadlineMs
-      ) {
-        return null;
+    while (true) {
+      const attemptRemainingMs = input.deadlineMs - Date.now();
+      if (attemptRemainingMs <= 0 || input.signal?.aborted) return null;
+      try {
+        result = await withTimeout(
+          attemptPromise,
+          Math.min(attemptRemainingMs, MAX_TIMER_DELAY_MS),
+          timerChunkElapsed,
+          input.signal,
+          aborted,
+        );
+        break;
+      } catch (error) {
+        if (
+          error === timerChunkElapsed &&
+          Date.now() < input.deadlineMs &&
+          !input.signal?.aborted
+        ) {
+          continue;
+        }
+        if (
+          error === timerChunkElapsed ||
+          error === aborted ||
+          input.signal?.aborted ||
+          Date.now() >= input.deadlineMs
+        ) {
+          return null;
+        }
+        throw error;
       }
-      throw error;
     }
     if (input.signal?.aborted || Date.now() >= input.deadlineMs) return null;
     if (result !== null) return result;
@@ -77,15 +114,24 @@ export async function pollUntil<T>(input: {
     if (remainingMs <= 0 || input.signal?.aborted) break;
     const requestedDelayMs = input.nextDelayMs(attempt);
     const delayMs = Number.isFinite(requestedDelayMs) ? Math.max(1, requestedDelayMs) : remainingMs;
-    const boundedDelayMs = Math.min(delayMs, remainingMs);
-    if (input.signal) {
-      await sleepWithAbort(input.signal, boundedDelayMs);
-    } else {
-      await new Promise<void>((resolve) => setTimeout(resolve, boundedDelayMs));
-    }
+    const nextAttemptAtMs = Math.min(Date.now() + delayMs, input.deadlineMs);
+    await sleepUntil(input.signal, nextAttemptAtMs);
     attempt += 1;
   }
   return null;
+}
+
+async function sleepUntil(signal: AbortSignal | undefined, deadlineMs: number): Promise<void> {
+  while (!signal?.aborted) {
+    const remainingMs = deadlineMs - Date.now();
+    if (remainingMs <= 0) return;
+    const delayMs = Math.min(remainingMs, MAX_TIMER_DELAY_MS);
+    if (signal) {
+      await sleepWithAbort(signal, delayMs);
+    } else {
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
 }
 
 export function abortPromise(signal: AbortSignal): Promise<void> {
