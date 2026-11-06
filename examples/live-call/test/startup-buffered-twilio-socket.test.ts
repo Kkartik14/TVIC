@@ -30,7 +30,18 @@ describe("StartupBufferedTwilioSocket", () => {
       const buffered = new StartupBufferedTwilioSocket(serverSocket);
       const frames = [
         JSON.stringify({ event: "connected", protocol: "Call", version: "1.0.0" }),
-        JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZ-test" }),
+        JSON.stringify({
+          event: "start",
+          sequenceNumber: "1",
+          streamSid: "MZ-test",
+          start: {
+            streamSid: "MZ-test",
+            accountSid: "AC-test",
+            callSid: "CA-test",
+            tracks: ["inbound"],
+            mediaFormat: { encoding: "audio/x-mulaw", sampleRate: 8000, channels: 1 },
+          },
+        }),
         JSON.stringify({
           event: "media",
           sequenceNumber: "2",

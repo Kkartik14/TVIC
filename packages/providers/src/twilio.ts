@@ -84,10 +84,16 @@ type TwilioInboundMessage =
       readonly event: "start";
       readonly sequenceNumber?: string;
       readonly streamSid: string;
-      readonly start?: {
-        readonly streamSid?: string;
-        readonly accountSid?: string;
-        readonly callSid?: string;
+      readonly start: {
+        readonly streamSid: string;
+        readonly accountSid: string;
+        readonly callSid: string;
+        readonly tracks: readonly "inbound"[];
+        readonly mediaFormat: {
+          readonly encoding: "audio/x-mulaw";
+          readonly sampleRate: 8000;
+          readonly channels: 1;
+        };
         readonly customParameters?: Readonly<Record<string, string>>;
       };
     }
@@ -106,7 +112,7 @@ type TwilioInboundMessage =
       readonly event: "dtmf";
       readonly sequenceNumber?: string;
       readonly streamSid: string;
-      readonly dtmf?: { readonly digit?: string };
+      readonly dtmf: { readonly track: "inbound"; readonly digit: string };
     }
   | {
       readonly event: "mark";
@@ -118,7 +124,7 @@ type TwilioInboundMessage =
       readonly event: "stop";
       readonly sequenceNumber?: string;
       readonly streamSid: string;
-      readonly stop?: { readonly callSid?: string };
+      readonly stop: { readonly accountSid: string; readonly callSid: string };
     };
 
 type MarkStatus = "pending" | "acked" | "cleared" | "undelivered";
@@ -174,6 +180,8 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
   });
   #accepting = true;
   #streamSid: string | null = null;
+  #twilioCallSid: string | null = null;
+  #accountSid: string | null = null;
   #lastSequenceNumber: number | null = null;
   #closed = false;
   #closeNotified = false;
@@ -327,19 +335,21 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
       case "start":
         if (
           this.options.expectedTwilioCallSid !== undefined &&
-          message.start?.callSid !== this.options.expectedTwilioCallSid
+          message.start.callSid !== this.options.expectedTwilioCallSid
         ) {
           this.#failProtocol("start.callSid does not match the authenticated call");
           return;
         }
         if (
           this.options.expectedAccountSid !== undefined &&
-          message.start?.accountSid !== this.options.expectedAccountSid
+          message.start.accountSid !== this.options.expectedAccountSid
         ) {
           this.#failProtocol("start.accountSid does not match the authenticated account");
           return;
         }
-        this.#streamSid = message.streamSid || message.start?.streamSid || null;
+        this.#streamSid = message.streamSid;
+        this.#twilioCallSid = message.start.callSid;
+        this.#accountSid = message.start.accountSid;
         this.#pushEvent(
           createMediaEvent({
             id: this.#mediaEventId("stream_started", message.sequenceNumber),
@@ -353,9 +363,9 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
             provider: PROVIDER_NAMES.twilio,
             format: this.#inputFormat,
             metadata: {
-              accountSid: message.start?.accountSid,
-              twilioCallSid: message.start?.callSid,
-              customParameters: message.start?.customParameters,
+              accountSid: message.start.accountSid,
+              twilioCallSid: message.start.callSid,
+              customParameters: message.start.customParameters,
             },
           }),
         );
@@ -387,6 +397,14 @@ export class TwilioMediaStreamCallHandle implements CallHandle {
         }
         return;
       case "stop":
+        if (message.stop.callSid !== this.#twilioCallSid) {
+          this.#failProtocol("stop.callSid does not match start.callSid");
+          return;
+        }
+        if (message.stop.accountSid !== this.#accountSid) {
+          this.#failProtocol("stop.accountSid does not match start.accountSid");
+          return;
+        }
         this.#signalRemoteHangup();
         if (!this.#inputFinished) {
           void this.endInput("remote_hangup");

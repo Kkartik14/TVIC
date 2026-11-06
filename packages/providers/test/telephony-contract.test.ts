@@ -37,7 +37,20 @@ const adapters: ReadonlyArray<{
           clock: { now: () => TS, monotonicNowMs: () => 0 },
         }),
         start: () =>
-          socket.text(JSON.stringify({ event: "start", sequenceNumber: "1", streamSid: "MZ1" })),
+          socket.text(
+            JSON.stringify({
+              event: "start",
+              sequenceNumber: "1",
+              streamSid: "MZ1",
+              start: {
+                streamSid: "MZ1",
+                accountSid: "AC123",
+                callSid: "CA123",
+                tracks: ["inbound"],
+                mediaFormat: { encoding: "audio/x-mulaw", sampleRate: 8000, channels: 1 },
+              },
+            }),
+          ),
         drop: () => socket.drop(),
       };
     },
@@ -149,7 +162,14 @@ describe.each(adapters)("telephony contract: $name", ({ name, create, expectedFi
     if (name === "web-client-audio") {
       fixture.socket.text(JSON.stringify({ type: "session.end" }));
     } else {
-      fixture.socket.text(JSON.stringify({ event: "stop", sequenceNumber: "2" }));
+      fixture.socket.text(
+        JSON.stringify({
+          event: "stop",
+          sequenceNumber: "2",
+          streamSid: "MZ1",
+          stop: { accountSid: "AC123", callSid: "CA123" },
+        }),
+      );
     }
 
     await expect(remoteHangup).resolves.toBeUndefined();
