@@ -1529,6 +1529,8 @@ export class PipelineVoiceLoop {
           await incrementalPlayback?.catch(() => undefined);
         }
       } catch (error) {
+        // Persistence failures use the failed-turn recovery path, not TTS fallback handling.
+        if (this.#durableWriteRecovery.nonCheckpointDegraded) throw error;
         audioError = normalizeUnknownError(error, {
           code: "tts.delivery_failed",
           category: "internal",

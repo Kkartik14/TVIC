@@ -223,96 +223,104 @@ describe("R2-06 recovery and durable correctness", () => {
     15_000,
   );
 
-  it("reports active-turn status timeouts as recoverable when cleanup lets the session continue", async () => {
-    const runtime = createRuntime({
-      durableStore: createInMemoryDurableRuntimeStore(),
-      durablePolicy: { criticalWriteTimeoutMs: 50, persistenceRecoveryGraceMs: 250 },
-    });
-    await runtime.start();
-    const agent = buildAgent();
-    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
-    const session = attachment.session;
-    const call = makeCallHandle();
-    const stt = makeStt();
-    const updateTurnStatus = runtime.updateTurnStatus.bind(runtime);
-    let injected = false;
-    vi.spyOn(runtime, "updateTurnStatus").mockImplementation(async (sessionId, turnId, status) => {
-      if (status === "calling_tool" && !injected) {
-        injected = true;
-        throw timeoutError("test.calling_tool_timeout", "calling tool status timed out");
-      }
-      return updateTurnStatus(sessionId, turnId, status);
-    });
-    const toolCall = { callRef: "c1", toolName: "check_availability" as never, input: {} };
-    let llmCalls = 0;
-    const llm = makeLlm((request) => {
-      llmCalls += 1;
-      if (llmCalls === 1) {
+  it.each([
+    { status: "calling_tool" as const, description: "tool transition" },
+    { status: "speaking" as const, description: "speech transition" },
+  ])(
+    "reports active-turn $description timeouts as recoverable when cleanup lets the session continue",
+    async ({ status }) => {
+      const runtime = createRuntime({
+        durableStore: createInMemoryDurableRuntimeStore(),
+        durablePolicy: { criticalWriteTimeoutMs: 50, persistenceRecoveryGraceMs: 500 },
+      });
+      await runtime.start();
+      const agent = buildAgent();
+      const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+      const session = attachment.session;
+      const call = makeCallHandle();
+      const stt = makeStt();
+      const updateTurnStatus = runtime.updateTurnStatus.bind(runtime);
+      let injected = false;
+      vi.spyOn(runtime, "updateTurnStatus").mockImplementation(async (sessionId, turnId, next) => {
+        if (next === status && !injected) {
+          injected = true;
+          throw timeoutError(`test.${status}_timeout`, `${status} status timed out`);
+        }
+        return updateTurnStatus(sessionId, turnId, next);
+      });
+      const toolCall = { callRef: "c1", toolName: "check_availability" as never, input: {} };
+      let llmCalls = 0;
+      const llm = makeLlm((request) => {
+        llmCalls += 1;
+        if (status === "calling_tool" && llmCalls === 1) {
+          return [
+            llmEvent(request, 1, { type: "llm.started", model: request.model }),
+            llmEvent(request, 2, { type: "llm.tool_call", call: toolCall }),
+            llmEvent(request, 3, { type: "llm.completed", text: "", toolCalls: [toolCall] }),
+          ];
+        }
         return [
           llmEvent(request, 1, { type: "llm.started", model: request.model }),
-          llmEvent(request, 2, { type: "llm.tool_call", call: toolCall }),
-          llmEvent(request, 3, { type: "llm.completed", text: "", toolCalls: [toolCall] }),
+          llmEvent(request, 2, { type: "llm.completed", text: "Recovered.", toolCalls: [] }),
         ];
-      }
-      return [
-        llmEvent(request, 1, { type: "llm.started", model: request.model }),
-        llmEvent(request, 2, { type: "llm.completed", text: "Recovered.", toolCalls: [] }),
-      ];
-    });
-    const loop = new PipelineVoiceLoop({
-      runtime,
-      session,
-      attachment,
-      agent: withPipelineProviders(agent, {
-        stt: stt.provider,
-        llm,
-        tts: makeTts((request) => [audioChunk(request, 1)], { endStream: true }),
-      }),
-      callHandle: call.handle,
-      llmModel: "gpt-test",
-    });
-    const running = loop.start();
-    const seen: VoiceEvent[] = [];
-    const draining = (async () => {
-      for await (const event of running) seen.push(event);
-    })();
+      });
+      const loop = new PipelineVoiceLoop({
+        runtime,
+        session,
+        attachment,
+        agent: withPipelineProviders(agent, {
+          stt: stt.provider,
+          llm,
+          tts: makeTts((request) => [audioChunk(request, 1)], { endStream: true }),
+        }),
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      });
+      const running = loop.start();
+      const seen: VoiceEvent[] = [];
+      const draining = (async () => {
+        for await (const event of running) seen.push(event);
+      })();
 
-    try {
-      call.push(streamStarted(session.id));
-      stt.pushFinal(session.id, "use a tool");
-      stt.pushFinal(session.id, "continue after recovery");
-      await until(async () => {
+      try {
+        call.push(streamStarted(session.id));
+        stt.pushFinal(session.id, "first caller turn");
+        stt.pushFinal(session.id, "continue after recovery");
+        await until(async () => {
+          const snapshot = await runtime.inspectSession(session.id);
+          return snapshot.turns.some(
+            (turn) =>
+              turn.input.transcript === "continue after recovery" && turn.status === "completed",
+          );
+        }, "next caller turn completes after failed-turn recovery");
+        await until(() => attachment.health === "healthy", "persistence health recovery");
+
+        call.push(streamEnded(session.id, "completed"));
+        const result = await running;
+        await draining;
         const snapshot = await runtime.inspectSession(session.id);
-        return snapshot.turns.some(
-          (turn) =>
-            turn.input.transcript === "continue after recovery" && turn.status === "completed",
-        );
-      }, "next caller turn completes after failed-turn recovery");
-      await until(() => attachment.health === "healthy", "persistence health recovery");
 
-      call.push(streamEnded(session.id, "completed"));
-      const result = await running;
-      await draining;
-      const snapshot = await runtime.inspectSession(session.id);
-
-      expect(injected).toBe(true);
-      expect(result.turnsHandled).toBe(2);
-      expect(snapshot.turns.map((turn) => turn.status)).toEqual(["failed", "completed"]);
-      expect(
-        seen.some(
-          (event) =>
-            event.kind === "error" &&
-            event.error.code === "durable.write.failure" &&
-            event.recoverable === true,
-        ),
-      ).toBe(true);
-    } finally {
-      call.push(streamEnded(session.id, "completed"));
-      await running.catch(() => undefined);
-      await draining;
-      await runtime.stop();
-    }
-  }, 15_000);
+        expect(injected).toBe(true);
+        expect(llmCalls).toBe(2);
+        expect(result.turnsHandled).toBe(2);
+        expect(snapshot.turns.map((turn) => turn.status)).toEqual(["failed", "completed"]);
+        expect(
+          seen.some(
+            (event) =>
+              event.kind === "error" &&
+              event.error.code === "durable.write.failure" &&
+              event.recoverable === true,
+          ),
+        ).toBe(true);
+      } finally {
+        call.push(streamEnded(session.id, "completed"));
+        await running.catch(() => undefined);
+        await draining;
+        await runtime.stop();
+      }
+    },
+    15_000,
+  );
 
   it("reports when coordinator stop times out before an in-flight poll drains", async () => {
     vi.useFakeTimers();
