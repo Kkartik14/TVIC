@@ -61,18 +61,28 @@ class ManagedVoiceEventIterator implements AsyncIterator<VoiceEvent>, AsyncItera
 }
 
 class RejectedVoiceEventIterator implements AsyncIterator<VoiceEvent>, AsyncIterable<VoiceEvent> {
-  readonly #error: unknown;
+  readonly #completion: Promise<PipelineVoiceLoopResult>;
 
-  constructor(error: unknown) {
-    this.#error = error;
+  constructor(completion: Promise<PipelineVoiceLoopResult>) {
+    this.#completion = completion;
+  }
+
+  async #reject(): Promise<IteratorResult<VoiceEvent>> {
+    try {
+      await this.#completion;
+    } catch (error) {
+      if (error instanceof Error) throw error;
+      throw new Error("Managed voice event iteration failed", { cause: error });
+    }
+    throw new Error("Managed voice event iterator is unavailable");
   }
 
   next(): Promise<IteratorResult<VoiceEvent>> {
-    return Promise.reject(this.#error);
+    return this.#reject();
   }
 
   return(): Promise<IteratorResult<VoiceEvent>> {
-    return Promise.reject(this.#error);
+    return this.#reject();
   }
 
   [Symbol.asyncIterator](): AsyncIterator<VoiceEvent> {

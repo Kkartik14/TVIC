@@ -69,6 +69,7 @@ import {
   type AudioTapSummary,
 } from "../src/index.js";
 import { validateRunOptions } from "../src/managed-agent-validation.js";
+import { ManagedVoiceAgentRun } from "../src/managed-agent-run.js";
 import {
   createProviderCapabilitySnapshot,
   BackendUnavailableError,
@@ -4322,6 +4323,37 @@ describe("managed voice agent", () => {
     } finally {
       await harness.agent.stop();
     }
+  });
+
+  it("rejects unclaimed event iteration with the stop Error instead of its completion Promise", async () => {
+    const harness = createLifecycleHarness();
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      await session.stop();
+      const originalError = await session.run.catch((error: unknown) => error);
+      const iterator = session.run[Symbol.asyncIterator]();
+
+      await expect(iterator.next()).rejects.toBe(originalError);
+      if (iterator.return) await expect(iterator.return()).rejects.toBe(originalError);
+      expect(originalError).toBeInstanceOf(Error);
+      expect(harness.closeReasons).toEqual(["cancelled"]);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("preserves a failed run Error when a public iterator was never created", async () => {
+    const failure = new Error("pipeline setup failed before event iteration");
+    const run = new ManagedVoiceAgentRun("failed-run" as SessionId, {
+      claim: () => ({ completion: Promise.reject(failure) }),
+      cancel() {},
+    });
+    const iterator = run[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).rejects.toBe(failure);
   });
 
   it("finalizes cleanly through a real WebClientAudioCallHandle after stop", async () => {
