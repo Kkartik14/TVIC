@@ -270,6 +270,18 @@ The Twilio adapter is an accept-only bridge. The host application owns the
 phone number, TwiML webhook, Twilio signature verification, and public HTTPS
 endpoint.
 
+For a bidirectional Media Stream, return a `<Connect><Stream>` envelope from
+the authenticated TwiML webhook. The host supplies the public `wss` URL and any
+short-lived stream credentials it uses:
+
+```xml
+<Response>
+  <Connect>
+    <Stream url="wss://voice.example.com/twilio/media?token=SIGNED_TOKEN&amp;exp=EXPIRY" />
+  </Connect>
+</Response>
+```
+
 Create the provider:
 
 ```ts
@@ -288,18 +300,58 @@ const session = await agent.start({
     twilioCallSid,
     accountSid,
   },
-  callHandle: ({ sessionId, call }) => twilio.acceptWebSocket(socket, call.id, sessionId),
+  callHandle: ({ sessionId, call }) =>
+    twilio.acceptWebSocket(socket, call.id, sessionId, {
+      expectedTwilioCallSid: twilioCallSid,
+      expectedAccountSid: accountSid,
+    }),
 });
 ```
 
 The adapter converts Twilio's 8 kHz mu-law edge format to TVIC's normalized
-16 kHz PCM16 format and converts output back for Twilio. It handles media
-sequence validation, DTMF, buffer clear, marks, and playout acknowledgement.
-Sequenced messages must start at `1` and increment by one; the unsequenced
-`connected` message does not advance that counter. Outbound audio events must
-use mono PCM16 at 16 kHz. A commit flushes its final partial audio frame before
-the mark, while `clear()` drops locally buffered partial audio and sends a clear
-barrier before later output.
+16 kHz PCM16 format and converts output back for Twilio. The outer Twilio
+`sequenceNumber` remains strict: numbered messages must start at `1` and
+increment by one; the unnumbered `connected` message does not advance that
+counter. The separate `media.chunk` value is diagnostic rather than a strict
+ordering gate. Gaps and out-of-order chunk values are accepted and counted. An
+exact repeat of the previous inbound media frame (same chunk, timestamp, and
+payload) is dropped and counted separately; other repeated or out-of-order
+chunks are delivered. A regressing media timestamp is accepted and clamped to
+the prior monotonic offset.
+
+Protocol framing still fails closed. The adapter rejects malformed messages,
+unknown event types, invalid or discontinuous `sequenceNumber` values, stream
+identity changes, unsupported media tracks, invalid chunk/timestamp encodings
+or payloads, and a `start` frame that does not describe the expected
+bidirectional stream (one inbound track, mono `audio/x-mulaw` at 8 kHz). It also
+rejects invalid DTMF and stop identity mismatches. When supplied,
+`expectedTwilioCallSid` and `expectedAccountSid` bind `start.callSid` and
+`start.accountSid` to the authenticated call; mismatches fail closed. Pass these
+values from the authenticated webhook context as shown above. Media marked as
+the `outbound` track is dropped and counted.
+
+Inbound `media.audio.chunk` metadata can include these progression fields:
+
+| Key                                | Scope     | Meaning                                                                                       |
+| ---------------------------------- | --------- | --------------------------------------------------------------------------------------------- |
+| `twilioChunkGap`                   | Per frame | The chunk number differed from the expected next number; the nonduplicate frame was accepted. |
+| `expectedChunk`                    | Per frame | The next chunk number expected when this mismatch was detected.                               |
+| `twilioTimestampRegression`        | Per frame | This frame's timestamp went backwards and was clamped.                                        |
+| `twilioChunkGapCount`              | Per call  | Cumulative count of accepted skips, nonduplicate repeats, and out-of-order values.            |
+| `twilioDuplicateMediaDroppedCount` | Per call  | Cumulative count of exact duplicate frames dropped.                                           |
+| `twilioTimestampRegressionCount`   | Per call  | Cumulative count of timestamp regressions.                                                    |
+| `twilioOutboundMediaDroppedCount`  | Per call  | Cumulative count of outbound-track frames dropped.                                            |
+
+Each emitted counter snapshot is an authoritative cumulative per-call total.
+The adapter attaches snapshots to normalized audio and normal stream-end events;
+a protocol-error close may not emit a final snapshot. Per-frame markers are
+best-effort: media normalization and buffering can defer which normalized audio
+event carries metadata from a Twilio frame.
+
+The adapter also handles DTMF, buffer clear, marks, and playout acknowledgement.
+Outbound audio events must use mono PCM16 at 16 kHz. A commit flushes its final
+partial audio frame before the mark, while `clear()` drops locally buffered
+partial audio and sends a clear barrier before later output.
 
 The [live-call example](../examples/live-call/README.md) includes the gateway,
 replay protection, signed stream tokens, and production configuration.

@@ -3,7 +3,7 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
-## 2.2.0 (Unreleased)
+## 2.2.0
 
 ### Added
 
@@ -60,8 +60,6 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   `tts_speed.unsupported`, and the `tts.language_unsupported` and
   `stt.vocabulary_unsupported` error codes. Exhaustive consumers of
   `ProviderCompatibilityIssueCode` must handle the new issue codes.
-- Added public consumer checks for the new selection, text-control,
-  capability-snapshot, voice-requirement, and turn-profile types and exports.
 - Exported the Cartesia and ElevenLabs capability snapshot loaders through the
   published `voice-runtime` package and added a managed-agent snapshot loader
   callback for refreshing bounded account facts before each call.
@@ -73,6 +71,18 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 ### Changed
 
+- Raise the default `criticalWriteTimeoutMs` from 75 ms to 2,000 ms; no database
+  schema migration is required.
+- Within each `Runtime` instance, allow at most one active turn per session in
+  every runtime configuration. A second start rejects with
+  `turn.already_active`; a shared `durableStore` serializes this check across
+  runtime instances.
+- Require custom durable-store adapters to serialize transactions per session
+  or reject stale snapshots with `RecordConflictError` without committing
+  writes.
+- Document the required Twilio `<Connect><Stream>` setup and validate the
+  documented bidirectional `start`, `stop`, and DTMF message fields in the
+  media WebSocket protocol.
 - Keep capability snapshot enforcement opt-in for compatibility: when snapshots
   are supplied, stale, missing, or unsupported facts reject dependent selections;
   omitting snapshots preserves existing configured voice behavior. Managed
@@ -92,10 +102,10 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Require model-scoped voice availability facts for model-specific snapshot
   checks. A model-independent voice fact no longer satisfies a selected-model
   query; the ElevenLabs snapshot loader emits one fact per requested model ID.
-- Keep non-empty `sttLanguage` values as legacy raw provider values, including
-  host-specific tags such as `hi_IN` and `multi`; the managed API rejects an
-  empty string. Use `sttLanguagePolicy` when TVIC should normalize and preflight
-  a fixed, automatic, or hinted policy.
+- Continue passing non-empty `sttLanguage` values as raw provider hints,
+  including host-specific tags such as `hi_IN` and `multi`. Use
+  `sttLanguagePolicy` when TVIC should normalize and preflight a fixed,
+  automatic, or hinted policy.
 - Exclude tool names from STT vocabulary by default. Set
   `includeToolNamesInSttVocabulary: true` to include them. The 256-term
   vocabulary limit applies before trimming and de-duplication.
@@ -142,9 +152,10 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Disable ElevenLabs SSML parsing by default on regular WebSocket routes.
   `enableSsmlParsing: true` remains an explicit opt-in that sends
   `enable_ssml_parsing=true`. The HTTP routes always interpret tags on non-v3
-  models, so they accept `true` without sending it and reject `false`. Untyped normalization settings are removed from
-  custom URLs, and configured phoneme dictionaries remain an explicit host
-  opt-in that may activate the vendor parser.
+  models, so they accept `true` without sending it and reject `false`. Untyped
+  normalization settings are removed from custom URLs, and configured phoneme
+  dictionaries remain an explicit host opt-in that may activate the vendor
+  parser.
 - Preserve ElevenLabs text exactly on every adapter route. Text-to-Dialogue
   bracket tags and SSML-shaped text with phoneme dictionaries may still be
   interpreted by the vendor; TVIC does not claim those strings are spoken literally.
@@ -201,11 +212,40 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   with the previous selection error code in `metadata.selectionErrorCode`.
 - Report unsupported cross-field TTS combinations with the public
   `tts.selection_unsupported` provider compatibility issue code.
-- Compile the published README quick-start example as part of the public-package
-  check so its loader contract and TypeScript example remain valid.
+- Validate Twilio start, stop, and DTMF envelopes before changing call state;
+  malformed nested fields fail with a specific protocol reason.
+- Tolerate and count Twilio chunk and timestamp progression anomalies without
+  closing the call, while dropping and counting exact duplicate and outbound
+  media frames.
+- Correct Sarvam documentation to distinguish the legacy streaming adapter
+  from the separate, unimplemented Realtime API.
+- Document capability-snapshot selection rules for wrapper TTS adapters.
+- Correct self-hosting package-manager, persistence, environment, migration,
+  and production-secret guidance.
+
+### Deprecated
+
+- Deprecate `RuntimeOptions.sessionStore`, `turnStore`, and `toolCallStore`;
+  use `durableStore` for atomic lifecycle writes.
+- Deprecate the per-store overrides to `createInMemoryDurableRuntimeStore()`;
+  use the default transactional store or a custom `durableStore` instead.
 
 ### Fixed
 
+- Fix the 2.1.0 failure where calls sending sustained audio with STT reconnect
+  enabled ended after about 10 seconds, even without a provider fault. The
+  default PCM16 16 kHz mono replay journal now holds up to 1,600,640 bytes and
+  5,018 commands per stream,
+  up from 320,000 bytes and 512 commands. A stream survives an outage for about
+  4–5 seconds with 5 ms frames that omit their duration, about 20 seconds with
+  declared 5 ms frames, and about 25 seconds nominally with frames of 10 ms or
+  more; the last limit is a timer tie. Derived limits clamp at 16 MiB and 8,192
+  commands instead of rejecting otherwise-valid opens. Short-chunk hosts should
+  coalesce frames or set `maxBufferedCommands`; retained audio uses roughly
+  twice its payload size on the heap. Limits are per stream, not process-wide:
+  500 concurrent default-format calls could retain about 800 MB of audio payload
+  (roughly 1.6 GB on the heap). Overflow errors report the limiting unit,
+  configured cap, and observed size.
 - Stream Hindi, Bengali, Urdu, and CJK sentences incrementally to TTS, and keep
   turn timing consistent across STT reconnect recovery.
 - Apply provider-specific language, model, vocabulary, and speed settings or
@@ -246,6 +286,36 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
   report the error and continue the call.
 - Close the STT stream cleanly when hangup overlaps a reconnect open, and keep
   replay audio moving if a replayed context write times out.
+- Resume transcript admission after an interruption checkpoint recovers, while
+  preserving degradation from an unrelated durable write failure.
+- Prevent text-only delivery that settles after hangup, cancellation, or STT
+  shutdown from completing the turn or writing it to memory. Preserve a true
+  `delivery.text` transport receipt as `transport_accepted`, and skip delivery
+  when terminal shutdown is already observed.
+- Report unexpected STT EOF as `call_ended.reason = failed` instead of
+  misreporting it as `remote_hangup`.
+- Make most durable-write failures end the call cleanly instead of leaving it
+  connected and unable to process caller input.
+- Classify call-close failures with `voice_runtime.call_close_failed` and
+  `voice_runtime.call_close_timeout`; a timeout uses the timeout code, a plain
+  `Error` rejection uses the failed code, and existing TVIC-coded errors retain
+  their code.
+- Report Twilio protocol validation failures as protocol errors instead of
+  caller hangups.
+- Emit final text received after end-of-audio from the Soniox adapter stream
+  when the provider closes without its finished marker.
+- Discard late ElevenLabs output for cancelled contexts while preserving other
+  active contexts. A cancelled ID stays reserved until its late final arrives or
+  TVIC retains 32 newer cancelled or failed context IDs; use unique IDs per
+  connection. If TVIC cannot send `close_context`, it fails the shared
+  connection.
+- Report malformed accumulated OpenAI tool arguments in
+  `response.completed` as a non-retriable `llm.failed` event.
+- Make a stopped managed voice-event iterator reject with the run's original
+  Error, and wait for managed finalization before a rejected iterator read
+  throws the same error as `session.run`.
+- Update the getting-started and voice-agent examples to handle remote hangups
+  without unhandled promise rejections.
 
 ## 2.1.0
 
