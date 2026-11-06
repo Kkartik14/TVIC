@@ -1268,7 +1268,11 @@ export class PipelineVoiceLoop {
     try {
       await this.#options.runtime.updateTurnStatus(this.#options.session.id, turnId, status);
     } catch (error) {
-      this.#durableWriteRecovery.onWriteFailure("turn_status", error);
+      this.#durableWriteRecovery.onWriteFailure(
+        "turn_status",
+        error,
+        isBackendUnavailableError(error),
+      );
       throw error;
     }
   }
@@ -1325,11 +1329,14 @@ export class PipelineVoiceLoop {
       });
       await this.#persistTurnStatus(turn.id, "thinking");
     } catch (error) {
-      const generation = this.#durableWriteRecovery.onWriteFailure("turn_start", error);
+      const lateTurnId = turn ? undefined : lateStartedTurnId(error);
+      const canRecover =
+        isBackendUnavailableError(error) && (turn !== undefined || lateTurnId !== undefined);
+      const generation = this.#durableWriteRecovery.onWriteFailure("turn_start", error, canRecover);
       const failure = this.#durableWriteRecovery.lastFailure!;
       this.#turnsFailed += 1;
       this.#firstTurnError ??= failure;
-      const recoveryDeadline = isBackendUnavailableError(error)
+      const recoveryDeadline = canRecover
         ? (this.#durableWriteRecovery.recoveryDeadlineMs ??
           this.#durableWriteRecovery.beginRecoveryWindow())
         : Date.now();
@@ -1338,7 +1345,7 @@ export class PipelineVoiceLoop {
         turn?.id,
         recoveryDeadline,
         turn ? "thinking" : undefined,
-        turn ? undefined : lateStartedTurnId(error),
+        lateTurnId,
       );
       if (terminal) {
         this.#durableWriteRecovery.recoverNonCheckpoint(generation);

@@ -153,6 +153,76 @@ describe("R2-06 recovery and durable correctness", () => {
     }
   }, 15_000);
 
+  it.each([
+    {
+      description: "a normalized timeout",
+      makeError: () => timeoutError("test.turn_start_timeout", "turn start timed out"),
+    },
+    {
+      description: "a backend rejection without late settlement",
+      makeError: () => new BackendUnavailableError("database unavailable"),
+    },
+  ])(
+    "marks $description as non-recoverable when turn start has no recovery candidate",
+    async ({ makeError }) => {
+      const runtime = createRuntime({ durableStore: createInMemoryDurableRuntimeStore() });
+      await runtime.start();
+      const agent = buildAgent();
+      const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+      const session = attachment.session;
+      const call = makeCallHandle();
+      const closeCall = vi.spyOn(call.handle, "close");
+      vi.spyOn(runtime, "startTurn").mockRejectedValue(makeError());
+      const stt = makeStt();
+      const loop = new PipelineVoiceLoop({
+        runtime,
+        session,
+        attachment,
+        agent: withPipelineProviders(agent, {
+          stt: stt.provider,
+          llm: makeLlm(() => {
+            throw new Error("the model must not start without a turn");
+          }),
+          tts: makeTts(() => [], { endStream: true }),
+        }),
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      });
+      const running = loop.start();
+      const seen: VoiceEvent[] = [];
+      const draining = (async () => {
+        for await (const event of running) seen.push(event);
+      })();
+
+      try {
+        call.push(streamStarted(session.id));
+        stt.pushFinal(session.id, "start a turn");
+        await until(() => closeCall.mock.calls.length > 0, "call closure after turn start failure");
+        await running.catch(() => undefined);
+        await draining;
+
+        expect(closeCall).toHaveBeenCalledWith("error");
+        expect((await runtime.inspectSession(session.id)).session).toMatchObject({
+          status: "failed",
+        });
+        expect(
+          seen.some(
+            (event) =>
+              event.kind === "error" &&
+              event.error.code === "durable.write.failure" &&
+              event.recoverable === false,
+          ),
+        ).toBe(true);
+      } finally {
+        call.push(streamEnded(session.id, "completed"));
+        await running.catch(() => undefined);
+        await draining;
+        await runtime.stop();
+      }
+    },
+    15_000,
+  );
+
   it("reports when coordinator stop times out before an in-flight poll drains", async () => {
     vi.useFakeTimers();
     const store = createInMemoryDurableRuntimeStore();

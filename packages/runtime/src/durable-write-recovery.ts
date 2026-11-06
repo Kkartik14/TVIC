@@ -77,7 +77,11 @@ export class DurableWriteRecovery {
     return this.#persistenceGate;
   }
 
-  onWriteFailure(source: string, error: unknown): number {
+  onWriteFailure(
+    source: string,
+    error: unknown,
+    recoverable = isRetryablePersistenceFailure(error),
+  ): number {
     const wasDegraded = this.#persistenceDegraded;
     if (!this.#nonCheckpointPersistenceDegraded) {
       this.#nonCheckpointPersistenceGeneration += 1;
@@ -88,10 +92,7 @@ export class DurableWriteRecovery {
     this.#lastPersistenceFailure = this.failure(error, source);
     this.#syncPersistenceHealth();
     if (!wasDegraded) {
-      this.#emitPersistenceFailure(
-        this.#lastPersistenceFailure,
-        isRetryablePersistenceFailure(error),
-      );
+      this.#emitPersistenceFailure(this.#lastPersistenceFailure, recoverable);
     }
     return this.#nonCheckpointPersistenceGeneration;
   }
