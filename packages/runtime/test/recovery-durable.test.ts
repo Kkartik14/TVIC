@@ -159,14 +159,16 @@ describe("R2-06 recovery and durable correctness", () => {
     {
       description: "a normalized timeout",
       makeError: () => timeoutError("test.turn_start_timeout", "turn start timed out"),
+      expectedStartAttempts: 1,
     },
     {
-      description: "a backend rejection without late settlement",
+      description: "a persistent backend rejection after one confirmed-empty retry",
       makeError: () => new BackendUnavailableError("database unavailable"),
+      expectedStartAttempts: 2,
     },
   ])(
-    "marks $description as non-recoverable when turn start has no recovery candidate",
-    async ({ makeError }) => {
+    "ends on $description when no turn can be started",
+    async ({ makeError, expectedStartAttempts }) => {
       const runtime = createRuntime({ durableStore: createInMemoryDurableRuntimeStore() });
       await runtime.start();
       const agent = buildAgent();
@@ -174,7 +176,7 @@ describe("R2-06 recovery and durable correctness", () => {
       const session = attachment.session;
       const call = makeCallHandle();
       const closeCall = vi.spyOn(call.handle, "close");
-      vi.spyOn(runtime, "startTurn").mockRejectedValue(makeError());
+      const startTurn = vi.spyOn(runtime, "startTurn").mockRejectedValue(makeError());
       const stt = makeStt();
       const loop = new PipelineVoiceLoop({
         runtime,
@@ -204,6 +206,7 @@ describe("R2-06 recovery and durable correctness", () => {
         await draining;
 
         expect(closeCall).toHaveBeenCalledWith("error");
+        expect(startTurn).toHaveBeenCalledTimes(expectedStartAttempts);
         expect((await runtime.inspectSession(session.id)).session).toMatchObject({
           status: "failed",
         });
@@ -224,6 +227,172 @@ describe("R2-06 recovery and durable correctness", () => {
     },
     15_000,
   );
+
+  it("retries a turn start after inspection confirms a transient write created no turn", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+    let putTurnCalls = 0;
+    durableStore.runSessionTransaction = async <T>(
+      sessionId: SessionId,
+      lease: SessionLease,
+      operation: (transaction: DurableSessionTransaction) => Promise<T>,
+    ) =>
+      runSessionTransaction(sessionId, lease, async (transaction) => {
+        const wrapped = new Proxy(transaction, {
+          get(target, property, receiver) {
+            if (property === "putTurn") {
+              return async (...args: Parameters<DurableSessionTransaction["putTurn"]>) => {
+                putTurnCalls += 1;
+                if (putTurnCalls === 1) {
+                  throw new BackendUnavailableError("injected transient turn-start failure");
+                }
+                return target.putTurn(...args);
+              };
+            }
+            const value = Reflect.get(target, property, receiver) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        return operation(wrapped);
+      });
+
+    const runtime = createRuntime({
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 2_000, persistenceRecoveryGraceMs: 2_000 },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const session = attachment.session;
+    const call = makeCallHandle();
+    const closeCall = vi.spyOn(call.handle, "close");
+    const stt = makeStt();
+    let llmCalls = 0;
+    const llm = makeLlm((request) => {
+      llmCalls += 1;
+      return [
+        llmEvent(request, 1, {
+          type: "llm.completed",
+          text: `Answer ${llmCalls}.`,
+          toolCalls: [],
+        }),
+      ];
+    });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      attachment,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm,
+        tts: makeTts((request) => [audioChunk(request, 1)], { endStream: true }),
+      }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.start();
+    const seen: VoiceEvent[] = [];
+    const draining = (async () => {
+      for await (const event of running) seen.push(event);
+    })();
+
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "The first utterance hits a transient store blip.");
+      stt.pushFinal(session.id, "The second utterance waits behind the retry.");
+      await until(async () => {
+        const snapshot = await runtime.inspectSession(session.id);
+        return (
+          snapshot.turns.filter((turn) => turn.status === "completed").length === 2 ||
+          closeCall.mock.calls.length > 0
+        );
+      }, "both turns complete or the call closes");
+
+      const snapshot = await runtime.inspectSession(session.id);
+      expect(putTurnCalls).toBe(3);
+      expect(llmCalls).toBe(2);
+      expect(snapshot.turns.map((turn) => turn.status)).toEqual(["completed", "completed"]);
+      expect(snapshot.turns.map((turn) => turn.input.transcript)).toEqual([
+        "The first utterance hits a transient store blip.",
+        "The second utterance waits behind the retry.",
+      ]);
+      expect(attachment.health).toBe("healthy");
+      expect(closeCall).not.toHaveBeenCalledWith("error");
+      expect(
+        seen.some(
+          (event) =>
+            event.kind === "error" &&
+            event.error.code === "durable.write.failure" &&
+            event.recoverable === true,
+        ),
+      ).toBe(true);
+
+      call.push(streamEnded(session.id, "completed"));
+      await running;
+      await draining;
+    } finally {
+      call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+      await draining;
+      await runtime.stop();
+    }
+  }, 15_000);
+
+  it("does not retry a start error when inspection finds its committed active turn", async () => {
+    const runtime = createRuntime({ durableStore: createInMemoryDurableRuntimeStore() });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const session = attachment.session;
+    const call = makeCallHandle();
+    const closeCall = vi.spyOn(call.handle, "close");
+    const originalStartTurn = runtime.startTurn.bind(runtime);
+    const startTurn = vi.spyOn(runtime, "startTurn").mockImplementationOnce(async (request) => {
+      await originalStartTurn(request);
+      throw new BackendUnavailableError("write acknowledgement lost after commit");
+    });
+    const stt = makeStt();
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      attachment,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: makeLlm(() => {
+          throw new Error("the ambiguous turn must not start model work");
+        }),
+        tts: makeTts(() => [], { endStream: true }),
+      }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.start();
+    const draining = (async () => {
+      for await (const _event of running) {
+        // Drain the run so its cleanup and failure event settle.
+      }
+    })();
+
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "the acknowledgement is ambiguous");
+      await until(() => closeCall.mock.calls.length > 0, "call closure after the ambiguous write");
+      await running.catch(() => undefined);
+      await draining;
+
+      const snapshot = await runtime.inspectSession(session.id);
+      expect(startTurn).toHaveBeenCalledTimes(1);
+      expect(snapshot.turns).toHaveLength(1);
+      expect(snapshot.turns[0]?.sequence).toBe(1);
+      expect(snapshot.session.status).toBe("failed");
+      expect(closeCall).toHaveBeenCalledWith("error");
+    } finally {
+      call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+      await draining;
+      await runtime.stop();
+    }
+  }, 15_000);
 
   it.each([
     { status: "calling_tool" as const, description: "tool transition" },
@@ -1040,7 +1209,7 @@ describe("R2-06 recovery and durable correctness", () => {
     expect(stats.debugStats().activeSessionClocks).toBe(0);
   });
 
-  it("rejected turn write surfaces durable.write.failure degradation once", async () => {
+  it("recovers an immediate session read rejection before starting the turn", async () => {
     const store = createInMemoryDurableRuntimeStore();
     let failNext = false;
     const sessions = store.sessions;
@@ -1075,23 +1244,45 @@ describe("R2-06 recovery and durable correctness", () => {
     const draining = (async () => {
       for await (const event of running) seen.push(event);
     })();
-    call.push(streamStarted(session.id));
-    stt.pushFinal(session.id, "admit me");
-    stt.pushFinal(session.id, "ignored after failure");
-    call.push(streamEnded(session.id, "completed"));
-    await running.catch(() => undefined);
-    await draining;
-    const terminal = await runtime.getSession(session.id);
-    expect(terminal?.status).toBe("failed");
-    const errors = seen.filter((e) => e.kind === "error");
-    expect(errors.length).toBeGreaterThanOrEqual(1);
-    for (const event of errors) {
-      if (event.kind === "error") {
-        expect(event.error.code).toBe("durable.write.failure");
-        expect(event.error.metadata).toMatchObject({ degraded: true });
-      }
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "admit me");
+      await until(
+        () =>
+          seen.some(
+            (event) =>
+              event.kind === "error" &&
+              event.error.code === "durable.write.failure" &&
+              event.recoverable,
+          ),
+        "the transient read failure is reported as recoverable",
+      );
+      await until(async () => {
+        const snapshot = await runtime.inspectSession(session.id);
+        return snapshot.turns.some((turn) => turn.status === "completed");
+      }, "the retry completes its turn");
+      call.push(streamEnded(session.id, "completed"));
+      await running;
+      await draining;
+
+      const snapshot = await runtime.inspectSession(session.id);
+      expect(snapshot.session.status).toBe("active");
+      expect(snapshot.turns).toMatchObject([{ status: "completed" }]);
+      expect(
+        seen.some(
+          (event) =>
+            event.kind === "error" &&
+            event.error.code === "durable.write.failure" &&
+            event.recoverable,
+        ),
+      ).toBe(true);
+      expect(seen.some((event) => event.kind === "turn_started")).toBe(true);
+    } finally {
+      call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+      await draining;
+      await runtime.stop();
     }
-    await runtime.stop();
   });
 
   it("ends the call when write failures follow a late committed and cancelled turn", async () => {
@@ -1188,7 +1379,7 @@ describe("R2-06 recovery and durable correctness", () => {
       await draining;
 
       const snapshot = await runtime.inspectSession(session.id);
-      expect(putTurnCalls).toBe(2);
+      expect(putTurnCalls).toBe(3);
       expect(closeCall).toHaveBeenCalledWith("error");
       expect(snapshot.session).toMatchObject({
         status: "failed",

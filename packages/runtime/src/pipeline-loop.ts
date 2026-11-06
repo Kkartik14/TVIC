@@ -6,6 +6,7 @@ import {
   createDefaultIdGenerator,
   evaluateProviderCompatibility,
   internalError,
+  isTerminalTurn,
   normalizeUnknownError,
   timeoutError,
   validationError,
@@ -214,6 +215,7 @@ export class PipelineVoiceLoop {
   readonly #turnMaxDurationMs: number;
   #turnsHandled = 0;
   #turnsFailed = 0;
+  #lastTurnSequence: number;
   #firstTurnError: NormalizedError | null = null;
   #interruptions = 0;
   #turnChain: Promise<void> = Promise.resolve();
@@ -245,6 +247,7 @@ export class PipelineVoiceLoop {
   #lastAudioTapTimestampMs = 0;
   #lastAudioTapClockObservationMs = globalThis.performance.now();
   constructor(options: PipelineVoiceLoopOptions) {
+    this.#lastTurnSequence = options.session.state.turnSequence;
     if (options.turnProfile !== undefined) {
       const provider = options.agent.providers.stt;
       const compatibility = evaluateProviderCompatibility(provider, {
@@ -1309,7 +1312,29 @@ export class PipelineVoiceLoop {
     }
   }
 
-  async #handleTranscript(transcript: string, timing: UtteranceTiming): Promise<void> {
+  async #noTurnWasCreatedBeforeRetry(recoveryDeadlineMs: number): Promise<boolean> {
+    const inspection = await settleBy(
+      () => this.#options.runtime.inspectSession(this.#options.session.id),
+      recoveryDeadlineMs,
+    );
+    if (inspection.status !== "completed") return false;
+    const snapshot = inspection.value;
+    if (
+      snapshot.session.status !== "active" ||
+      snapshot.session.state.turnSequence !== this.#lastTurnSequence
+    ) {
+      return false;
+    }
+    return snapshot.turns.every(
+      (turn) => turn.sequence <= this.#lastTurnSequence && isTerminalTurn(turn),
+    );
+  }
+
+  async #handleTranscript(
+    transcript: string,
+    timing: UtteranceTiming,
+    retriedTurnStart = false,
+  ): Promise<void> {
     const checkpointRecovered = await this.#durableWriteRecovery.admit();
     if (this.#durableWriteRecovery.sessionEnding) return;
     if (!checkpointRecovered || this.#durableWriteRecovery.isDegraded) {
@@ -1329,17 +1354,36 @@ export class PipelineVoiceLoop {
         sessionId: this.#options.session.id,
         input: { transcript, mediaEventIds: [] },
       });
+      this.#lastTurnSequence = Math.max(this.#lastTurnSequence, turn.sequence);
       await this.#persistTurnStatus(turn.id, "thinking", isBackendUnavailableError);
     } catch (error) {
       const lateTurnId = turn ? undefined : lateStartedTurnId(error);
+      const canRetryTurnStart =
+        turn === undefined &&
+        !retriedTurnStart &&
+        isBackendUnavailableError(error) &&
+        lateTurnId === undefined;
       const canRecover =
         isBackendUnavailableError(error) && (turn !== undefined || lateTurnId !== undefined);
-      const generation = this.#durableWriteRecovery.onWriteFailure("turn_start", error, canRecover);
+      const generation = this.#durableWriteRecovery.onWriteFailure(
+        "turn_start",
+        error,
+        canRecover || canRetryTurnStart,
+      );
       const failure = this.#durableWriteRecovery.lastFailure!;
-      const recoveryDeadline = canRecover
-        ? (this.#durableWriteRecovery.recoveryDeadlineMs ??
-          this.#durableWriteRecovery.beginRecoveryWindow())
-        : Date.now();
+      const recoveryDeadline =
+        canRecover || canRetryTurnStart
+          ? (this.#durableWriteRecovery.recoveryDeadlineMs ??
+            this.#durableWriteRecovery.beginRecoveryWindow())
+          : Date.now();
+      if (
+        canRetryTurnStart &&
+        Date.now() < recoveryDeadline &&
+        (await this.#noTurnWasCreatedBeforeRetry(recoveryDeadline))
+      ) {
+        this.#durableWriteRecovery.recoverNonCheckpoint(generation);
+        return this.#handleTranscript(transcript, timing, true);
+      }
       const recoveredStatus =
         turn && canRecover
           ? await this.#durableWriteRecovery.recoverTurnStatus(
@@ -1359,6 +1403,7 @@ export class PipelineVoiceLoop {
           lateTurnId,
         );
         if (terminal) {
+          this.#lastTurnSequence = Math.max(this.#lastTurnSequence, terminal.sequence);
           this.#durableWriteRecovery.recoverNonCheckpoint(generation);
           if (terminal.status === "failed") {
             this.#turnsFailed += 1;
