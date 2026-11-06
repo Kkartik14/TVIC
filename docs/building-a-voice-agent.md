@@ -362,7 +362,8 @@ console.log(session.sessionId);
 ```
 
 `session.run` is both an async event stream and an awaitable final result. Start
-one event consumer and await the same run:
+one event consumer and await the same run. The event consumer can reject when the
+run fails, so settle both promises together to avoid an unhandled rejection:
 
 ```ts
 const eventsFinished = (async () => {
@@ -397,13 +398,19 @@ const eventsFinished = (async () => {
 })();
 
 try {
-  const result = await session.run;
-  await eventsFinished;
-  console.log({
-    turnsHandled: result.turnsHandled,
-    interruptions: result.interruptions,
-    terminalReason: result.terminalReason,
-  });
+  const [runOutcome, eventsOutcome] = await Promise.allSettled([session.run, eventsFinished]);
+  if (runOutcome.status === "rejected") {
+    console.error("call failed:", runOutcome.reason);
+  } else {
+    if (eventsOutcome.status === "rejected") {
+      console.error("event stream failed:", eventsOutcome.reason);
+    }
+    console.log({
+      turnsHandled: runOutcome.value.turnsHandled,
+      interruptions: runOutcome.value.interruptions,
+      terminalReason: runOutcome.value.terminalReason,
+    });
+  }
 } finally {
   await agent.stop();
 }
