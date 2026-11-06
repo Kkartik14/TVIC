@@ -88,6 +88,9 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
     const toolCalls = new Map<number, MutableToolCall>();
     let eventQueueFailed = false;
     let terminalSeen = false;
+    let completedResponseFailureContext:
+      | { readonly providerModel?: string; readonly usageReport: LlmUsageReport }
+      | undefined;
     const pushEvent = (event: LlmStreamEvent): boolean => {
       if (eventQueueFailed) return false;
       if (events.push(event)) return true;
@@ -191,8 +194,9 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
           }
 
           if (type === "response.completed") {
-            terminalSeen = true;
+            const providerModel = providerModelFromEvent(event);
             const usageReport = openAiUsageReport(usageFromEvent(event));
+            completedResponseFailureContext = { ...providerModel, usageReport };
             const usage = legacyLlmUsage(usageReport);
             if (
               !pushEvent({
@@ -205,12 +209,13 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
                 timestamp: this.#clock.now(),
                 text: outputText,
                 toolCalls: [...toolCalls.values()].map(freezeToolCall),
-                ...providerModelFromEvent(event),
+                ...providerModel,
                 usageReport,
                 ...(usage ? { usage } : {}),
               })
             )
               return;
+            terminalSeen = true;
             closeEvents();
             return;
           }
@@ -313,7 +318,11 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
             sequence,
             provider: PROVIDER_NAMES.openaiResponses,
             timestamp: this.#clock.now(),
-            usageReport: openAiUsageReport(undefined),
+            ...(completedResponseFailureContext?.providerModel
+              ? { providerModel: completedResponseFailureContext.providerModel }
+              : {}),
+            usageReport:
+              completedResponseFailureContext?.usageReport ?? openAiUsageReport(undefined),
             error: normalizeProviderError(error, {
               code: PROVIDER_ERROR_CODES.openaiResponses,
               provider: PROVIDER_NAMES.openaiResponses,
