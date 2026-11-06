@@ -138,10 +138,10 @@ process.once("SIGTERM", () => void shutdown("SIGTERM"));
 process.once("SIGINT", () => void shutdown("SIGINT"));
 ```
 
-The runtime's bounded cleanup deadlines use unreferenced timers. If shutdown
-closes the last active event-loop handle, Node may exit before `agent.stop()`
-settles or its error handler runs. Keep a host handle active through the drain
-when the shutdown result needs to be observed.
+Managed agent shutdown may wait on an unreferenced persistence-cleanup deadline
+timer. If shutdown closes the last active event-loop handle, Node may exit
+before `agent.stop()` settles or its error handler runs. Keep a host handle
+active through the drain when the shutdown result needs to be observed.
 
 For a load-balanced deployment, use a pre-stop hook or drain signal to remove
 the instance from service before closing its WebSocket listeners. Set a
