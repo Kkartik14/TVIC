@@ -8,6 +8,7 @@ import type {
   AgentProviders,
   AgentId,
   DurableRuntimeStore,
+  DurableSessionTransaction,
   DurableOutboxEvent,
   ProviderCapabilities,
   SessionId,
@@ -154,6 +155,134 @@ async function assertSingleActiveTurnAfterConcurrentStart(
     await runtime.stop();
   }
 }
+
+function failAfterTurnWrite(durableStore: DurableRuntimeStore): DurableRuntimeStore {
+  let injected = false;
+  const withFailure = async <T>(
+    tx: DurableSessionTransaction,
+    operation: (tx: DurableSessionTransaction) => Promise<T>,
+  ): Promise<T> => {
+    let turnWritten = false;
+    const faultingTransaction: DurableSessionTransaction = {
+      getSession: (sessionId) => tx.getSession(sessionId),
+      putSession: (record) => tx.putSession(record),
+      getTurn: (sessionId, turnId) => tx.getTurn(sessionId, turnId),
+      listTurns: (sessionId) => tx.listTurns(sessionId),
+      async putTurn(record) {
+        await tx.putTurn(record);
+        turnWritten = true;
+      },
+      async updateSession(sessionId, updater) {
+        if (turnWritten && !injected) {
+          injected = true;
+          throw new Error("injected session projection failure");
+        }
+        return tx.updateSession(sessionId, updater);
+      },
+      updateTurn: (sessionId, turnId, updater) => tx.updateTurn(sessionId, turnId, updater),
+      getToolCall: (sessionId, toolCallId) => tx.getToolCall(sessionId, toolCallId),
+      listToolCalls: (sessionId) => tx.listToolCalls(sessionId),
+      putToolCall: (record) => tx.putToolCall(record),
+      updateToolCall: (sessionId, toolCallId, updater) =>
+        tx.updateToolCall(sessionId, toolCallId, updater),
+      appendOutbox: (event) => tx.appendOutbox(event),
+    };
+    return operation(faultingTransaction);
+  };
+  return {
+    ...durableStore,
+    runSessionTransaction: (sessionId, lease, operation) =>
+      durableStore.runSessionTransaction(sessionId, lease, (tx) => withFailure(tx, operation)),
+    ...(durableStore.runUnfencedSessionTransaction
+      ? {
+          runUnfencedSessionTransaction: (sessionId, operation) =>
+            durableStore.runUnfencedSessionTransaction!(sessionId, (tx) =>
+              withFailure(tx, operation),
+            ),
+        }
+      : {}),
+  };
+}
+
+async function assertFailedTurnTransactionRollsBack(
+  durableStore: DurableRuntimeStore,
+  onSessionStarted?: (sessionId: SessionId) => void,
+): Promise<SessionId> {
+  const runtime = createRuntime({
+    durableStore: failAfterTurnWrite(durableStore),
+    durableStoreOwnership: "caller",
+  });
+  await runtime.start();
+  try {
+    const session = await runtime.startSession(
+      buildSingleActiveTurnAgent(`turn_rollback_agent_${randomUUID()}` as AgentId),
+      { channel: "simulated" },
+    );
+    onSessionStarted?.(session.id);
+    await expect(runtime.startTurn({ sessionId: session.id })).rejects.toThrow(
+      "injected session projection failure",
+    );
+    const snapshot = await runtime.inspectSession(session.id);
+    expect(snapshot.session.state.turnSequence).toBe(0);
+    expect(snapshot.session.state.currentTurnId).toBeUndefined();
+    expect(snapshot.turns).toEqual([]);
+    return session.id;
+  } finally {
+    await runtime.stop();
+  }
+}
+
+describe.skipIf(!redisIntegrationEnabled)("real Redis durable transaction rollback", () => {
+  it("does not commit a turn or outbox event after a later session write fails", async () => {
+    const redis = createClient({ url: process.env.REDIS_URL ?? "" });
+    await redis.connect();
+    const prefix = `tvic:test:turn-rollback:${randomUUID()}:`;
+    const store = createRedisDurableRuntimeStore(adaptRedis(redis), { prefix });
+    try {
+      await assertFailedTurnTransactionRollsBack(store);
+      const outboxKeys: string[] = [];
+      for await (const key of redis.scanIterator({ MATCH: `${prefix}outbox:*`, COUNT: 100 })) {
+        outboxKeys.push(key);
+      }
+      expect(outboxKeys).toHaveLength(1);
+    } finally {
+      const keys: string[] = [];
+      for await (const key of redis.scanIterator({ MATCH: `${prefix}*`, COUNT: 100 })) {
+        keys.push(key);
+      }
+      if (keys.length > 0) await redis.del(keys);
+      await store.close();
+      await redis.quit();
+    }
+  }, 15_000);
+});
+
+describe.skipIf(!postgresIntegrationEnabled)("real PostgreSQL durable transaction rollback", () => {
+  it("does not commit a turn or outbox event after a later session write fails", async () => {
+    const pg = new Pool({ connectionString: process.env.DATABASE_URL ?? "", max: 4 });
+    const sqlPool = adaptPool(pg);
+    const store = createPostgresDurableRuntimeStore({ pool: sqlPool });
+    let sessionId: SessionId | undefined;
+    try {
+      await runPostgresMigrations(sqlPool);
+      sessionId = await assertFailedTurnTransactionRollsBack(store, (id) => {
+        sessionId = id;
+      });
+      const turnEvents = await pg.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM tvic_outbox WHERE session_id = $1 AND aggregate_type = 'turn'",
+        [sessionId],
+      );
+      expect(turnEvents.rows[0]?.count).toBe(0);
+    } finally {
+      if (sessionId) {
+        await pg.query("DELETE FROM tvic_outbox WHERE session_id = $1", [sessionId]);
+        await pg.query("DELETE FROM tvic_sessions WHERE id = $1", [sessionId]);
+      }
+      await store.close();
+      await pg.end();
+    }
+  }, 15_000);
+});
 
 describe.skipIf(!redisIntegrationEnabled)("real Redis runtime turn serialization", () => {
   it("reports one concurrent start as turn.already_active", async () => {

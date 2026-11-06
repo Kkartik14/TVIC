@@ -27,6 +27,33 @@ const runtime = createRuntime({ durableStore, memory });
 In-memory state disappears when the process exits. It is not suitable for a
 multi-instance deployment or cross-process reconnect.
 
+## Legacy per-store compatibility options
+
+Passing `sessionStore`, `turnStore`, or `toolCallStore` directly to
+`createRuntime()` is deprecated; use `durableStore` for transactional lifecycle
+writes. When any of these options is passed, the runtime wraps them in an
+in-memory durable facade. Its lease, outbox, and per-session write-ordering state
+belongs to that one `Runtime` instance. Sharing the same adapters between
+multiple runtime instances can race, and the configuration is not safe across
+processes or restarts.
+
+Lifecycle writes that touch multiple records are not atomic for these
+compatibility adapters. If a later write fails, the operation rejects and the
+facade attempts to restore earlier writes. An adapter implementing only the
+public `SessionStore`, `TurnStore`, or `ToolCallStore` interface has no restore
+hook contract, so a turn written before a failed session update may remain while
+the session sequence and `currentTurnId` stay unchanged. Session end and
+attachment recovery inspect stored turns and close any active turn left by a
+partial write.
+
+The default runtime and `createInMemoryDurableRuntimeStore()` with no per-store
+overrides use a transactional process-local store. The built-in PostgreSQL,
+Redis, and PostgreSQL + Redis `durableStore` implementations apply related
+session, turn, tool, and outbox writes transactionally. Passing the deprecated
+per-store overrides to `createInMemoryDurableRuntimeStore()` keeps the same
+best-effort behavior described above. The three `createRuntime()` compatibility
+options are scheduled for removal in 3.0.0.
+
 ## PostgreSQL runtime state
 
 Install a PostgreSQL driver in your application:

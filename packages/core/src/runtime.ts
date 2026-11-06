@@ -39,8 +39,23 @@ import type {
 import type { SessionUsageSummary } from "./providers/usage.js";
 
 export interface RuntimeOptions {
+  /**
+   * @deprecated Use `durableStore`. The compatibility facade keeps leases, outbox, and write
+   * ordering in this Runtime instance and attempts best-effort rollback when a lifecycle write
+   * fails. It does not provide cross-runtime transactions and will be removed in 3.0.0.
+   */
   readonly sessionStore?: SessionStore;
+  /**
+   * @deprecated Use `durableStore`. The compatibility facade keeps leases, outbox, and write
+   * ordering in this Runtime instance and attempts best-effort rollback when a lifecycle write
+   * fails. It does not provide cross-runtime transactions and will be removed in 3.0.0.
+   */
   readonly turnStore?: TurnStore;
+  /**
+   * @deprecated Use `durableStore`. The compatibility facade keeps leases, outbox, and write
+   * ordering in this Runtime instance and attempts best-effort rollback when a lifecycle write
+   * fails. It does not provide cross-runtime transactions and will be removed in 3.0.0.
+   */
   readonly toolCallStore?: ToolCallStore;
   readonly clock?: Clock;
   readonly idGenerator?: IdGenerator;
