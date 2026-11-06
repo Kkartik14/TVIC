@@ -90,6 +90,8 @@ jobs:
       - run: pnpm check:ci-routing
       - run: pnpm check:local-integration-targets
       - run: pnpm check:ci-gates
+      - run: pnpm check:release-selector
+      - run: pnpm check:release-workflow
       - run: pnpm lint
 
   security:

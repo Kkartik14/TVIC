@@ -126,29 +126,8 @@ jobs:
           esac
 
           CHECKS_JSON="$RUNNER_TEMP/verify-checks.json"
-          curl --fail-with-body --silent --show-error \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "$API_URL/repos/$REPOSITORY/commits/$TAG_SHA/check-runs?filter=latest&per_page=100" > "$CHECKS_JSON"
-          node - "$CHECKS_JSON" "$TAG_SHA" <<'NODE'
-          const fs = require("node:fs");
-          const [file, sha] = process.argv.slice(2);
-          const payload = JSON.parse(fs.readFileSync(file, "utf8"));
-          const requiredCheckName = "Merge Gate";
-          const requiredGate = (payload.check_runs ?? []).find(
-            (check) =>
-              check.name === requiredCheckName &&
-              check.head_sha === sha &&
-              check.app?.slug === "github-actions",
-          );
-          if (
-            !requiredGate ||
-            requiredGate.status !== "completed" ||
-            requiredGate.conclusion !== "success"
-          ) {
-            throw new Error(`${requiredCheckName} has not passed for ${sha}`);
-          }
-          NODE
+          node scripts/fetch-release-check-runs.mjs "$API_URL" "$REPOSITORY" "$TAG_SHA" "$CHECKS_JSON"
+          node scripts/release-check-selector.mjs "$CHECKS_JSON" "$TAG_SHA"
 
           PKG_VERSION="$(node -p "require('./packages/voice-runtime/package.json').version")"
           test "$TAG_VERSION" = "$PKG_VERSION"
