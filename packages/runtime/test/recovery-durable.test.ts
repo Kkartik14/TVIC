@@ -12,6 +12,7 @@ import type {
   Clock,
   DurableSessionTransaction,
   FailedSession,
+  LlmMessage,
   Runtime,
   SessionLease,
   SessionId,
@@ -1384,8 +1385,10 @@ describe("R2-06 recovery and durable correctness", () => {
     const call = makeCallHandle();
     const stt = makeStt();
     let llmCalls = 0;
+    const requests: LlmMessage[][] = [];
     const llm = makeLlm((request) => {
       llmCalls += 1;
+      requests.push(request.messages.map((message) => message));
       return [
         llmEvent(request, llmCalls, {
           type: "llm.completed",
@@ -1457,9 +1460,21 @@ describe("R2-06 recovery and durable correctness", () => {
       expect(cancelledWriteFailures).toBeGreaterThan(0);
       expect(llmCalls).toBe(2);
       expect(result.turnsHandled).toBe(2);
+      expect(persisted.turns.find((turn) => turn.input.transcript === "first turn")).toMatchObject({
+        status: "cancelled",
+        reason: "barge_in",
+      });
       expect(persisted.turns.some((turn) => turn.input.transcript === "held caller final")).toBe(
         true,
       );
+      expect(requests[1]?.slice(-3).map(({ role, content }) => [role, content])).toEqual([
+        ["user", "first turn"],
+        [
+          "assistant",
+          "[Response interrupted before completion; some of this may not have been heard.] first answer",
+        ],
+        ["user", "held caller final"],
+      ]);
       await expect(runtime.endSession(session.id, { reason: "completed" })).resolves.toMatchObject({
         status: "completed",
       });
@@ -1476,7 +1491,7 @@ describe("R2-06 recovery and durable correctness", () => {
     }
   }, 15_000);
 
-  it("retries failed-turn persistence after a transient store outage and resumes held transcripts", async () => {
+  it("retries a transient thinking-status failure and resumes held transcripts", async () => {
     const durableStore = createInMemoryDurableRuntimeStore();
     const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
     let outageStarted = false;
@@ -1555,19 +1570,25 @@ describe("R2-06 recovery and durable correctness", () => {
       call.push(streamStarted(session.id));
       stt.pushFinal(session.id, "first turn encounters the outage");
       stt.pushFinal(session.id, "held transcript after recovery");
-      await until(() => llmCalls === 1, "held transcript resumes after terminal write retry");
+      await until(() => llmCalls === 2, "both caller transcripts reach the model after recovery");
       await until(() => attachment.health === "healthy", "persistence health recovery");
       call.push(streamEnded(session.id, "completed"));
-      await running;
+      const result = await running;
       await draining;
+      await expect(runtime.endSession(session.id, { reason: "completed" })).resolves.toMatchObject({
+        status: "completed",
+      });
       const snapshot = await runtime.inspectSession(session.id);
 
       expect(outageStarted).toBe(true);
-      expect(llmCalls).toBe(1);
-      expect(snapshot.turns[0]).toMatchObject({ status: "failed" });
-      expect(
-        snapshot.turns.some((turn) => turn.input.transcript === "held transcript after recovery"),
-      ).toBe(true);
+      expect(llmCalls).toBe(2);
+      expect(result.turnsFailed).toBe(0);
+      expect(result.terminalReason).toBe("completed");
+      expect(result.firstTurnError).toBeNull();
+      expect(snapshot.turns.map((turn) => [turn.input.transcript, turn.status])).toEqual([
+        ["first turn encounters the outage", "completed"],
+        ["held transcript after recovery", "completed"],
+      ]);
       expect(
         seen.some(
           (event) => event.kind === "error" && event.error.code === "durable.write.failure",
@@ -1584,7 +1605,7 @@ describe("R2-06 recovery and durable correctness", () => {
     }
   }, 15_000);
 
-  it("does not overlap a failed-turn retry with a timed-out transaction", async () => {
+  it("continues when a thinking-status write commits despite reporting a late failure", async () => {
     const durableStore = createInMemoryDurableRuntimeStore();
     const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
     let failThinkingAfterCommit = false;
@@ -1674,31 +1695,36 @@ describe("R2-06 recovery and durable correctness", () => {
       failThinkingAfterCommit = true;
       stt.pushFinal(session.id, "the status write reports a late failure");
       stt.pushFinal(session.id, "held until the terminal write commits");
-      await until(
-        () => closeCall.mock.calls.length > 0,
-        "call closure after terminal write timeout",
-      );
-      await running.catch(() => undefined);
+      await until(() => llmCalls === 2, "both turns continue after the committed status write");
+      await until(() => attachment.health === "healthy", "persistence health recovery");
+      call.push(streamEnded(session.id, "completed"));
+      const result = await running;
       await draining;
+      await expect(runtime.endSession(session.id, { reason: "completed" })).resolves.toMatchObject({
+        status: "completed",
+      });
       const snapshot = await runtime.inspectSession(session.id);
 
       expect(failedThinkingErrorSent).toBe(true);
-      expect(failedTurnWriteAttempts).toBe(1);
-      expect(llmCalls).toBe(0);
-      expect(snapshot.session).toMatchObject({
-        status: "failed",
-        error: { code: "durable.write.failure" },
-      });
-      expect(snapshot.turns[0]).toMatchObject({ status: "failed" });
+      expect(failedTurnWriteAttempts).toBe(0);
+      expect(llmCalls).toBe(2);
+      expect(result.turnsFailed).toBe(0);
+      expect(result.terminalReason).toBe("completed");
+      expect(result.firstTurnError).toBeNull();
+      expect(snapshot.session.status).toBe("completed");
+      expect(snapshot.turns.map((turn) => [turn.input.transcript, turn.status])).toEqual([
+        ["the status write reports a late failure", "completed"],
+        ["held until the terminal write commits", "completed"],
+      ]);
       expect(
         seen.some(
           (event) => event.kind === "error" && event.error.code === "durable.write.failure",
         ),
       ).toBe(true);
-      expect(seen.some((event) => event.kind === "call_ended" && event.reason === "failed")).toBe(
-        true,
-      );
-      expect(closeCall).toHaveBeenCalledWith("error");
+      expect(
+        seen.some((event) => event.kind === "call_ended" && event.reason === "completed"),
+      ).toBe(true);
+      expect(closeCall).not.toHaveBeenCalledWith("error");
     } finally {
       call.push(streamEnded(session.id, "completed"));
       await running.catch(() => undefined);
@@ -1757,12 +1783,14 @@ describe("R2-06 recovery and durable correctness", () => {
     const call = makeCallHandle();
     const stt = makeStt();
     let llmCalls = 0;
+    const requests: LlmMessage[][] = [];
     const llm = makeLlm((request) => {
       llmCalls += 1;
+      requests.push(request.messages.map((message) => message));
       return [
         llmEvent(request, llmCalls, {
           type: "llm.completed",
-          text: "second turn answer",
+          text: llmCalls === 1 ? "first turn answer" : "second turn answer",
           toolCalls: [],
         }),
       ];
@@ -1787,8 +1815,20 @@ describe("R2-06 recovery and durable correctness", () => {
       stt.pushFinal(session.id, "first turn with slow status write");
       stt.pushFinal(session.id, "second turn after recovery");
       await until(() => delayedWriteCommitted, "late thinking status commit");
-      await until(() => llmCalls === 1, "held second final resumes");
+      await until(() => llmCalls >= 1, "first turn reaches the model");
+      expect(requests[0]).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ role: "user", content: "first turn with slow status write" }),
+        ]),
+      );
+      await until(() => llmCalls === 2, "second caller turn reaches the model");
       await until(() => attachment.health === "healthy", "persistence health recovery");
+      await until(async () => {
+        const snapshot = await runtime.inspectSession(session.id);
+        return (
+          snapshot.turns.length === 2 && snapshot.turns.every((turn) => turn.status === "completed")
+        );
+      }, "both caller turns complete");
       call.push(streamEnded(session.id, "completed"));
       const result = await running;
       await draining;
@@ -1796,11 +1836,15 @@ describe("R2-06 recovery and durable correctness", () => {
 
       expect(delayedWrite).toBe(true);
       expect(delayedWriteCommitted).toBe(true);
-      expect(llmCalls).toBe(1);
-      expect(result.turnsHandled).toBe(1);
-      expect(
-        persisted.turns.some((turn) => turn.input.transcript === "second turn after recovery"),
-      ).toBe(true);
+      expect(llmCalls).toBe(2);
+      expect(result.turnsHandled).toBe(2);
+      expect(result.turnsFailed).toBe(0);
+      expect(result.terminalReason).toBe("completed");
+      expect(result.firstTurnError).toBeNull();
+      expect(persisted.turns.map((turn) => [turn.input.transcript, turn.status])).toEqual([
+        ["first turn with slow status write", "completed"],
+        ["second turn after recovery", "completed"],
+      ]);
       await expect(runtime.endSession(session.id, { reason: "completed" })).resolves.toMatchObject({
         status: "completed",
       });
@@ -1809,6 +1853,126 @@ describe("R2-06 recovery and durable correctness", () => {
           (event) => event.kind === "error" && event.error.code === "durable.write.failure",
         ),
       ).toBe(true);
+    } finally {
+      call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+      await draining;
+      await runtime.stop();
+    }
+  }, 15_000);
+
+  it("preserves a delivered completed turn and its history after a transient terminal write failure", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+    let failedCompletionWrite = false;
+    durableStore.runSessionTransaction = async <T>(
+      sessionId: SessionId,
+      lease: SessionLease,
+      operation: (transaction: DurableSessionTransaction) => Promise<T>,
+    ) =>
+      runSessionTransaction(sessionId, lease, async (transaction) => {
+        const wrapped = new Proxy(transaction, {
+          get(target, property, receiver) {
+            if (property === "updateTurn") {
+              return async (
+                turnSessionId: SessionId,
+                turnId: Parameters<DurableSessionTransaction["updateTurn"]>[1],
+                updater: Parameters<DurableSessionTransaction["updateTurn"]>[2],
+              ) =>
+                target.updateTurn(turnSessionId, turnId, (record) => {
+                  const next = updater(record);
+                  if (!failedCompletionWrite && next.turn.status === "completed") {
+                    failedCompletionWrite = true;
+                    throw new BackendUnavailableError("injected transient completed write failure");
+                  }
+                  return next;
+                });
+            }
+            const value = Reflect.get(target, property, receiver) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        return operation(wrapped);
+      });
+
+    const runtime = createRuntime({
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 2_000, persistenceRecoveryGraceMs: 2_000 },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const session = attachment.session;
+    const call = makeCallHandle();
+    const stt = makeStt();
+    const requests: LlmMessage[][] = [];
+    let llmCalls = 0;
+    const llm = makeLlm((request) => {
+      llmCalls += 1;
+      requests.push(request.messages.map((message) => message));
+      return [
+        llmEvent(request, llmCalls, {
+          type: "llm.completed",
+          text: llmCalls === 1 ? "first answer" : "second answer",
+          toolCalls: [],
+        }),
+      ];
+    });
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      attachment,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.start();
+    const seen: VoiceEvent[] = [];
+    const draining = (async () => {
+      for await (const event of running) seen.push(event);
+    })();
+
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "first utterance");
+      stt.pushFinal(session.id, "second utterance");
+      await until(() => llmCalls === 2, "second LLM request after recovered completion");
+      call.push(streamEnded(session.id, "completed"));
+      const result = await running;
+      await draining;
+      const snapshot = await runtime.inspectSession(session.id);
+
+      expect(failedCompletionWrite).toBe(true);
+      expect(
+        call.sent.some(
+          (event) => event.type === "media.audio.chunk" && event.turnId === snapshot.turns[0]?.id,
+        ),
+      ).toBe(true);
+      expect(snapshot.turns.map((turn) => [turn.input.transcript, turn.status])).toEqual([
+        ["first utterance", "completed"],
+        ["second utterance", "completed"],
+      ]);
+      expect(snapshot.turns[0]?.output).toMatchObject({
+        text: "first answer",
+        delivery: { audio: "transport_accepted" },
+      });
+      expect(requests[1]?.slice(-3).map(({ role, content }) => [role, content])).toEqual([
+        ["user", "first utterance"],
+        ["assistant", "first answer"],
+        ["user", "second utterance"],
+      ]);
+      expect(result.terminalReason).toBe("completed");
+      expect(result.turnsFailed).toBe(0);
+      expect(result.firstTurnError).toBeNull();
+      expect(
+        seen.some(
+          (event) => event.kind === "error" && event.error.code === "durable.write.failure",
+        ),
+      ).toBe(true);
+      await expect(runtime.endSession(session.id, { reason: "completed" })).resolves.toMatchObject({
+        status: "completed",
+      });
     } finally {
       call.push(streamEnded(session.id, "completed"));
       await running.catch(() => undefined);
@@ -2307,6 +2471,7 @@ describe("R2-06 recovery and durable correctness", () => {
         endStream();
         const result = await running;
         await draining;
+        const snapshot = await runtime.inspectSession(session.id);
 
         expect(checkpointAttempts).toBe(4);
         expect(health).toContain(true);
@@ -2314,7 +2479,10 @@ describe("R2-06 recovery and durable correctness", () => {
         expect(resumed).toBe(true);
         expect(llmCalls).toBe(2);
         expect(result.turnsHandled).toBe(2);
-        expect(result.turnsFailed).toBe(failIndependentWrite ? 1 : 0);
+        expect(result.turnsFailed).toBe(0);
+        expect(snapshot.turns.find((turn) => turn.input.transcript === "first turn")).toMatchObject(
+          { status: "cancelled", reason: "barge_in" },
+        );
         expect(
           seen.some(
             (event) => event.kind === "error" && event.error.code === "durable.write.failure",
