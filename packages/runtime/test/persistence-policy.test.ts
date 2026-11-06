@@ -9,7 +9,7 @@ import {
   type TurnId,
 } from "@tvic/core";
 import { criticalWrite } from "../src/runtime-support.js";
-import { persistInterruptionCheckpoint } from "../src/persistence-policy.js";
+import { persistInterruptionCheckpoint } from "../src/durable-write-recovery.js";
 
 describe("persistInterruptionCheckpoint", () => {
   it("does not retry a checkpoint while its timed-out write is still in flight", async () => {

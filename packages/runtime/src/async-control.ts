@@ -12,6 +12,55 @@ export function stallTimer(ms: number): {
   return { promise, cancel: () => clearTimeout(timer) };
 }
 
+export type Settlement<T> =
+  | { readonly status: "completed"; readonly value: T }
+  | { readonly status: "rejected"; readonly error: unknown }
+  | { readonly status: "timeout" };
+
+export function settleBy<T>(work: () => Promise<T>, deadlineMs: number): Promise<Settlement<T>> {
+  const remainingMs = deadlineMs - Date.now();
+  if (remainingMs <= 0) return Promise.resolve({ status: "timeout" });
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const settled = Promise.resolve()
+    .then(work)
+    .then(
+      (value): Settlement<T> => ({ status: "completed", value }),
+      (error: unknown): Settlement<T> => ({ status: "rejected", error }),
+    );
+  const timeout = new Promise<Settlement<T>>((resolve) => {
+    timer = setTimeout(() => resolve({ status: "timeout" }), remainingMs);
+    timer.unref?.();
+  });
+  return Promise.race([settled, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+export async function pollUntil<T>(input: {
+  readonly deadlineMs: number;
+  readonly signal?: AbortSignal;
+  readonly attempt: () => Promise<T | null>;
+  readonly nextDelayMs: (attempt: number) => number;
+}): Promise<T | null> {
+  let attempt = 0;
+  while (!input.signal?.aborted && Date.now() < input.deadlineMs) {
+    const result = await input.attempt();
+    if (result !== null) return result;
+    const remainingMs = input.deadlineMs - Date.now();
+    if (remainingMs <= 0 || input.signal?.aborted) break;
+    const delayMs = Math.max(1, input.nextDelayMs(attempt));
+    const boundedDelayMs = Math.min(delayMs, remainingMs);
+    if (input.signal) {
+      await sleepWithAbort(input.signal, boundedDelayMs);
+    } else {
+      await new Promise<void>((resolve) => setTimeout(resolve, boundedDelayMs));
+    }
+    attempt += 1;
+  }
+  return null;
+}
+
 export function abortPromise(signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve();
   return new Promise<void>((resolve) => {
