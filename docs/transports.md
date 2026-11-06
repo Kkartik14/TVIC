@@ -319,6 +319,12 @@ payload) is dropped and counted separately; other repeated or out-of-order
 chunks are delivered. A regressing media timestamp is accepted and clamped to
 the prior monotonic offset.
 
+TVIC accepts at most 65,536 decoded bytes in an inbound `media.payload` per
+message. Larger payloads fail through the protocol-error path before audio
+decoding. This is a TVIC safety bound, not a Twilio wire-format limit; Twilio
+defines `media.payload` as raw audio encoded in base64 in its
+[WebSocket Messages reference](https://www.twilio.com/docs/voice/media-streams/websocket-messages).
+
 Protocol framing still fails closed. The adapter rejects malformed messages,
 unknown event types, invalid or discontinuous `sequenceNumber` values, stream
 identity changes, unsupported media tracks, invalid chunk/timestamp encodings
