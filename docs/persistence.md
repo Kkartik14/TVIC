@@ -194,7 +194,8 @@ Custom `Runtime` implementations used by `PipelineVoiceLoop` must give
 not reject while a store write can still commit later unless it is cancelled,
 fenced, or tracked until settlement. Their session-end operation must serialize
 behind earlier same-session turn, status, interruption-checkpoint, and
-session-terminal writes.
+session-terminal writes, and late continuations must not commit after shutdown
+fences their session lease.
 
 ### Known limitations
 
