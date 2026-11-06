@@ -11,6 +11,9 @@ import {
 
 import { unknownErrorMessage } from "./common.js";
 
+export const TWILIO_MAX_MEDIA_PAYLOAD_BYTES = 64 * 1024;
+const MAX_TWILIO_MEDIA_PAYLOAD_BASE64_LENGTH = Math.ceil(TWILIO_MAX_MEDIA_PAYLOAD_BYTES / 3) * 4;
+
 export function validateTwilioMessage(
   value: Readonly<Record<string, unknown>>,
   streamSid: string | null,
@@ -108,7 +111,8 @@ export function validateTwilioMessage(
     if (timestamp === null) {
       return "media.timestamp must be a non-negative decimal integer";
     }
-    if (!isCanonicalBase64(media.payload)) return "media.payload must be non-empty base64";
+    const payloadError = validateMediaPayload(media.payload);
+    if (payloadError) return payloadError;
     return null;
   }
 
@@ -199,14 +203,26 @@ function matchesWholeValue(pattern: RegExp, value: string): boolean {
   return pattern.exec(value)?.[0] === value;
 }
 
-function isCanonicalBase64(value: unknown): value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length % 4 !== 0) return false;
+function validateMediaPayload(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length % 4 !== 0) {
+    return "media.payload must be non-empty base64";
+  }
+  if (value.length > MAX_TWILIO_MEDIA_PAYLOAD_BASE64_LENGTH) {
+    return `media.payload exceeds the ${TWILIO_MAX_MEDIA_PAYLOAD_BYTES}-byte limit`;
+  }
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
-    return false;
+    return "media.payload must be non-empty base64";
+  }
+  const paddingLength = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  const decodedByteLength = (value.length / 4) * 3 - paddingLength;
+  if (decodedByteLength > TWILIO_MAX_MEDIA_PAYLOAD_BYTES) {
+    return `media.payload exceeds the ${TWILIO_MAX_MEDIA_PAYLOAD_BYTES}-byte limit`;
   }
   try {
-    return bytesToBase64(base64ToBytes(value)) === value;
+    return bytesToBase64(base64ToBytes(value)) === value
+      ? null
+      : "media.payload must be non-empty base64";
   } catch {
-    return false;
+    return "media.payload must be non-empty base64";
   }
 }

@@ -935,6 +935,70 @@ describe("provider utilities", () => {
     await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
   });
 
+  it("fails closed on a Twilio media payload larger than the supported audio bound", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_large_payload" as CallId,
+      sessionId: "session_twilio_large_payload" as SessionId,
+    });
+    const iterator = handle.events[Symbol.asyncIterator]();
+    socket.receive(JSON.stringify(twilioStartFrame("MZlarge-payload")));
+    await iterator.next();
+    const frame = {
+      ...twilioMediaFrame("MZlarge-payload", "2", "1", "0"),
+      media: {
+        track: "inbound",
+        chunk: "1",
+        timestamp: "0",
+        payload: bytesToBase64(new Uint8Array(125_000)),
+      },
+    };
+
+    expect(() => socket.receive(JSON.stringify(frame))).not.toThrow();
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: {
+        type: "media.error",
+        error: {
+          category: "media",
+          metadata: { reason: "media.payload exceeds the 65536-byte limit" },
+        },
+      },
+      done: false,
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+  });
+
+  it("accepts a Twilio media payload at the supported audio bound", async () => {
+    const socket = new FakeSocket();
+    const handle = new TwilioMediaStreamCallHandle({
+      socket: socket as unknown as TwilioMediaStreamSocket,
+      callId: "call_twilio_payload_limit" as CallId,
+      sessionId: "session_twilio_payload_limit" as SessionId,
+    });
+    const iterator = handle.events[Symbol.asyncIterator]();
+    socket.receive(JSON.stringify(twilioStartFrame("MZpayload-limit")));
+    await iterator.next();
+    const frame = {
+      ...twilioMediaFrame("MZpayload-limit", "2", "1", "0"),
+      media: {
+        track: "inbound",
+        chunk: "1",
+        timestamp: "0",
+        payload: bytesToBase64(new Uint8Array(65_536)),
+      },
+    };
+
+    expect(() => socket.receive(JSON.stringify(frame))).not.toThrow();
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.audio.chunk" },
+      done: false,
+    });
+    await handle.close("completed");
+  });
+
   it("allows equal nondecreasing Twilio timestamps and DTMF between media chunks", async () => {
     const socket = new FakeSocket();
     const handle = new TwilioMediaStreamCallHandle({

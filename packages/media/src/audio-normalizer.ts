@@ -209,7 +209,7 @@ class StreamingFirResampler {
 
   fork(): StreamingFirResampler {
     const clone = new StreamingFirResampler(this.#inputRateHz, this.#outputRateHz, this.#filters);
-    clone.#samples.push(...this.#samples);
+    appendSamples(clone.#samples, this.#samples);
     clone.#bufferStartIndex = this.#bufferStartIndex;
     clone.#totalInputFrames = this.#totalInputFrames;
     clone.#nextOutputIndex = this.#nextOutputIndex;
@@ -217,7 +217,7 @@ class StreamingFirResampler {
   }
 
   push(samples: readonly number[]): void {
-    this.#samples.push(...samples);
+    appendSamples(this.#samples, samples);
     this.#totalInputFrames += samples.length;
   }
 
@@ -298,6 +298,12 @@ class StreamingFirResampler {
     }
     this.#samples.splice(0, Math.min(remove, this.#samples.length));
     this.#bufferStartIndex = keepFrom;
+  }
+}
+
+function appendSamples(target: number[], source: readonly number[]): void {
+  for (const sample of source) {
+    target.push(sample);
   }
 }
 

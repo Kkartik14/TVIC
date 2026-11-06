@@ -32,6 +32,20 @@ describe("AudioNormalizer", () => {
     expect(() => normalizer.push(new Uint8Array(2))).toThrow(/finished/);
   });
 
+  it("normalizes a large input and keeps forked streams aligned", () => {
+    const normalizer = createAudioNormalizer({
+      inputFormat: { encoding: "pcm_s16le", sampleRateHz: 8000, channels: 1 },
+    });
+    const first = normalizer.push(new Uint8Array(250_000));
+    const fork = normalizer.fork();
+    const continuation = pcm16Bytes(new Array(160).fill(1_000));
+    const originalTail = concat(normalizer.push(continuation), normalizer.finish());
+    const forkTail = concat(fork.push(continuation), fork.finish());
+
+    expect(frameCountForPcm16le(concat(first, originalTail))).toBe(250_320);
+    expect(forkTail).toEqual(originalTail);
+  });
+
   it("is invariant to realtime chunk boundaries", () => {
     const source = new Array(960)
       .fill(0)
