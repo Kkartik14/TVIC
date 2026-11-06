@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { BackendUnavailableError } from "@tvic/core";
+import {
+  BackendUnavailableError,
+  isNormalizedError,
+  timeoutError,
+  validationError,
+} from "@tvic/core";
 import { LeaseLostError } from "@tvic/core";
 import type {
   AgentId,
@@ -18,6 +23,7 @@ import type {
 import { createInMemoryDurableRuntimeStore, InMemorySessionLeaseStore } from "@tvic/dal";
 import { InMemoryToolIdempotencyStore } from "@tvic/tools";
 import { createRuntime, PipelineVoiceLoop, type VoiceEvent } from "../src/index.js";
+import { DurableWriteRecovery } from "../src/durable-write-recovery.js";
 import { SessionRecoveryCoordinator, SessionReaper } from "../src/session-recovery.js";
 import {
   audioChunk,
@@ -36,6 +42,401 @@ import {
 } from "./harness.js";
 
 describe("R2-06 recovery and durable correctness", () => {
+  it("keeps valid errors intact and normalizes timeout persistence failures", () => {
+    const emittedFailures: Array<{ readonly error: unknown; readonly recoverable: boolean }> = [];
+    const recovery = new DurableWriteRecovery({
+      runtime: { setPersistenceHealth() {} } as unknown as Runtime,
+      sessionId: "session_failure_normalization" as SessionId,
+      emitError: (error, recoverable) => emittedFailures.push({ error, recoverable }),
+      onSessionFailure() {},
+      closeCall: async () => {},
+      abortRun() {},
+      abortActiveTurn() {},
+    });
+    const source = "turn_start";
+    const backendError = new BackendUnavailableError("database unavailable");
+    const timeout = timeoutError("runtime.store_timeout", "database operation timed out");
+    const validation = validationError("turn.already_active", "A turn is already active");
+
+    for (const error of [backendError, timeout]) {
+      const failure = recovery.failure(error, source);
+      expect(isNormalizedError(failure)).toBe(true);
+      expect(failure).toMatchObject({
+        name: "InternalError",
+        code: "durable.write.failure",
+        category: "internal",
+        cause: error,
+        metadata: { degraded: true, source },
+      });
+    }
+
+    const failure = recovery.failure(validation, source);
+    expect(isNormalizedError(failure)).toBe(true);
+    expect(failure).toBe(validation);
+    expect(failure).toMatchObject({
+      code: "turn.already_active",
+      category: "validation",
+      name: "ValidationError",
+    });
+
+    recovery.onWriteFailure(source, backendError);
+    expect(emittedFailures).toHaveLength(1);
+    expect(isNormalizedError(emittedFailures[0]?.error)).toBe(true);
+    expect(emittedFailures[0]?.recoverable).toBe(true);
+  });
+
+  it("persists the original validation error when a host turn blocks pipeline start", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runtime = createRuntime({
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 75, persistenceRecoveryGraceMs: 100 },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const session = attachment.session;
+    const call = makeCallHandle();
+    const closeCall = vi.spyOn(call.handle, "close");
+    const stt = makeStt();
+    let llmCalls = 0;
+    const llm = makeLlm((request) => {
+      llmCalls += 1;
+      return [
+        llmEvent(request, llmCalls, { type: "llm.completed", text: "unexpected", toolCalls: [] }),
+      ];
+    });
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      attachment,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const hostTurn = await runtime.startTurn({
+      sessionId: session.id,
+      input: { transcript: "host-created turn", mediaEventIds: [] },
+    });
+    const running = loop.start();
+    const seen: VoiceEvent[] = [];
+    const draining = (async () => {
+      for await (const event of running) seen.push(event);
+    })();
+
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "caller speaks while a host turn is active");
+      await until(() => closeCall.mock.calls.length > 0, "call closure after turn.already_active");
+      await running.catch(() => undefined);
+      await draining;
+
+      const snapshot = await runtime.inspectSession(session.id);
+      expect(closeCall).toHaveBeenCalledWith("error");
+      expect(snapshot.session).toMatchObject({
+        status: "failed",
+        error: { code: "turn.already_active", category: "validation" },
+      });
+      expect(
+        isNormalizedError(snapshot.session.status === "failed" ? snapshot.session.error : null),
+      ).toBe(true);
+      expect(snapshot.turns).toMatchObject([{ id: hostTurn.id, status: "failed" }]);
+      expect(llmCalls).toBe(0);
+      expect(
+        seen.some((event) => event.kind === "error" && event.error.code === "turn.already_active"),
+      ).toBe(true);
+    } finally {
+      call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+      await draining;
+      await runtime.stop();
+    }
+  }, 15_000);
+
+  it.each([
+    {
+      description: "a normalized timeout",
+      makeError: () => timeoutError("test.turn_start_timeout", "turn start timed out"),
+    },
+    {
+      description: "a backend rejection without late settlement",
+      makeError: () => new BackendUnavailableError("database unavailable"),
+    },
+  ])(
+    "marks $description as non-recoverable when turn start has no recovery candidate",
+    async ({ makeError }) => {
+      const runtime = createRuntime({ durableStore: createInMemoryDurableRuntimeStore() });
+      await runtime.start();
+      const agent = buildAgent();
+      const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+      const session = attachment.session;
+      const call = makeCallHandle();
+      const closeCall = vi.spyOn(call.handle, "close");
+      vi.spyOn(runtime, "startTurn").mockRejectedValue(makeError());
+      const stt = makeStt();
+      const loop = new PipelineVoiceLoop({
+        runtime,
+        session,
+        attachment,
+        agent: withPipelineProviders(agent, {
+          stt: stt.provider,
+          llm: makeLlm(() => {
+            throw new Error("the model must not start without a turn");
+          }),
+          tts: makeTts(() => [], { endStream: true }),
+        }),
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      });
+      const running = loop.start();
+      const seen: VoiceEvent[] = [];
+      const draining = (async () => {
+        for await (const event of running) seen.push(event);
+      })();
+
+      try {
+        call.push(streamStarted(session.id));
+        stt.pushFinal(session.id, "start a turn");
+        await until(() => closeCall.mock.calls.length > 0, "call closure after turn start failure");
+        await running.catch(() => undefined);
+        await draining;
+
+        expect(closeCall).toHaveBeenCalledWith("error");
+        expect((await runtime.inspectSession(session.id)).session).toMatchObject({
+          status: "failed",
+        });
+        expect(
+          seen.some(
+            (event) =>
+              event.kind === "error" &&
+              event.error.code === "durable.write.failure" &&
+              event.recoverable === false,
+          ),
+        ).toBe(true);
+      } finally {
+        call.push(streamEnded(session.id, "completed"));
+        await running.catch(() => undefined);
+        await draining;
+        await runtime.stop();
+      }
+    },
+    15_000,
+  );
+
+  it.each([
+    { status: "calling_tool" as const, description: "tool transition" },
+    { status: "speaking" as const, description: "speech transition" },
+  ])(
+    "reports active-turn $description timeouts as recoverable when cleanup lets the session continue",
+    async ({ status }) => {
+      const runtime = createRuntime({
+        durableStore: createInMemoryDurableRuntimeStore(),
+        durablePolicy: { criticalWriteTimeoutMs: 500, persistenceRecoveryGraceMs: 1_000 },
+      });
+      await runtime.start();
+      const agent = buildAgent();
+      const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+      const session = attachment.session;
+      const call = makeCallHandle();
+      const stt = makeStt();
+      const updateTurnStatus = runtime.updateTurnStatus.bind(runtime);
+      let injected = false;
+      vi.spyOn(runtime, "updateTurnStatus").mockImplementation(async (sessionId, turnId, next) => {
+        if (next === status && !injected) {
+          injected = true;
+          throw timeoutError(`test.${status}_timeout`, `${status} status timed out`);
+        }
+        return updateTurnStatus(sessionId, turnId, next);
+      });
+      const toolCall = { callRef: "c1", toolName: "check_availability" as never, input: {} };
+      let llmCalls = 0;
+      const llm = makeLlm((request) => {
+        llmCalls += 1;
+        if (status === "calling_tool" && llmCalls === 1) {
+          return [
+            llmEvent(request, 1, { type: "llm.started", model: request.model }),
+            llmEvent(request, 2, { type: "llm.tool_call", call: toolCall }),
+            llmEvent(request, 3, { type: "llm.completed", text: "", toolCalls: [toolCall] }),
+          ];
+        }
+        return [
+          llmEvent(request, 1, { type: "llm.started", model: request.model }),
+          llmEvent(request, 2, { type: "llm.completed", text: "Recovered.", toolCalls: [] }),
+        ];
+      });
+      const loop = new PipelineVoiceLoop({
+        runtime,
+        session,
+        attachment,
+        agent: withPipelineProviders(agent, {
+          stt: stt.provider,
+          llm,
+          tts: makeTts((request) => [audioChunk(request, 1)], { endStream: true }),
+        }),
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      });
+      const running = loop.start();
+      const seen: VoiceEvent[] = [];
+      const draining = (async () => {
+        for await (const event of running) seen.push(event);
+      })();
+
+      try {
+        call.push(streamStarted(session.id));
+        stt.pushFinal(session.id, "first caller turn");
+        stt.pushFinal(session.id, "continue after recovery");
+        await until(async () => {
+          const snapshot = await runtime.inspectSession(session.id);
+          return snapshot.turns.some(
+            (turn) =>
+              turn.input.transcript === "continue after recovery" && turn.status === "completed",
+          );
+        }, "next caller turn completes after failed-turn recovery");
+        await until(() => attachment.health === "healthy", "persistence health recovery");
+
+        call.push(streamEnded(session.id, "completed"));
+        const result = await running;
+        await draining;
+        const snapshot = await runtime.inspectSession(session.id);
+
+        expect(injected).toBe(true);
+        expect(llmCalls).toBe(2);
+        expect(result.turnsHandled).toBe(2);
+        expect(snapshot.turns.map((turn) => turn.status)).toEqual(["failed", "completed"]);
+        expect(
+          seen.some(
+            (event) =>
+              event.kind === "error" &&
+              event.error.code === "durable.write.failure" &&
+              event.recoverable === true,
+          ),
+        ).toBe(true);
+      } finally {
+        call.push(streamEnded(session.id, "completed"));
+        await running.catch(() => undefined);
+        await draining;
+        await runtime.stop();
+      }
+    },
+    15_000,
+  );
+
+  it("recovers a transient speaking store failure while the caller stays silent", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+    let failedSpeakingWrite = false;
+    let failureAtMs: number | undefined;
+    durableStore.runSessionTransaction = async <T>(
+      sessionId: SessionId,
+      lease: SessionLease,
+      operation: (transaction: DurableSessionTransaction) => Promise<T>,
+    ) =>
+      runSessionTransaction(sessionId, lease, async (transaction) => {
+        const wrapped = new Proxy(transaction, {
+          get(target, property, receiver) {
+            if (property === "updateTurn") {
+              return async (
+                turnSessionId: SessionId,
+                turnId: Parameters<DurableSessionTransaction["updateTurn"]>[1],
+                updater: Parameters<DurableSessionTransaction["updateTurn"]>[2],
+              ) => {
+                const current = await target.getTurn(turnSessionId, turnId);
+                if (!current) throw new Error("missing turn");
+                const next = updater(current);
+                if (!failedSpeakingWrite && next.turn.status === "speaking") {
+                  failedSpeakingWrite = true;
+                  failureAtMs = Date.now();
+                  throw new BackendUnavailableError("injected speaking status store failure");
+                }
+                return target.updateTurn(turnSessionId, turnId, () => next);
+              };
+            }
+            const value = Reflect.get(target, property, receiver) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        return operation(wrapped);
+      });
+
+    const recoveryGraceMs = 200;
+    const runtime = createRuntime({
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 500, persistenceRecoveryGraceMs: recoveryGraceMs },
+    });
+    await runtime.start();
+    const healthTransitions: boolean[] = [];
+    let recoveredAtMs: number | undefined;
+    const setPersistenceHealth = runtime.setPersistenceHealth.bind(runtime);
+    runtime.setPersistenceHealth = (sessionId, degraded) => {
+      setPersistenceHealth(sessionId, degraded);
+      if (!degraded && healthTransitions.includes(true)) recoveredAtMs ??= Date.now();
+      healthTransitions.push(degraded);
+    };
+
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const session = attachment.session;
+    const call = makeCallHandle();
+    const closeCall = vi.spyOn(call.handle, "close");
+    const stt = makeStt();
+    let llmCalls = 0;
+    const llm = makeLlm((request) => {
+      llmCalls += 1;
+      return [llmEvent(request, 1, { type: "llm.completed", text: "Recovered.", toolCalls: [] })];
+    });
+    const tts = makeTts((request) => [audioChunk(request, 1)], { endStream: true });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      attachment,
+      agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.start();
+    const seen: VoiceEvent[] = [];
+    const draining = (async () => {
+      for await (const event of running) seen.push(event);
+    })();
+
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "The caller stays silent after this turn.");
+      await until(() => failedSpeakingWrite, "speaking status store failure");
+      await until(() => recoveredAtMs !== undefined, "speaking failure recovery");
+      expect(failureAtMs).toBeDefined();
+      expect(recoveredAtMs! - failureAtMs!).toBeLessThan(recoveryGraceMs + 500);
+
+      const remainingMs = Math.max(0, 1_500 - (Date.now() - failureAtMs!));
+      await new Promise<void>((resolve) => setTimeout(resolve, remainingMs));
+      const snapshot = await runtime.inspectSession(session.id);
+
+      expect(attachment.health).toBe("healthy");
+      expect(healthTransitions).toEqual([true, false]);
+      expect(snapshot.turns.map((turn) => turn.status)).toEqual(["failed"]);
+      expect(closeCall).not.toHaveBeenCalledWith("error");
+      expect(llmCalls).toBe(1);
+      expect(
+        seen.some(
+          (event) => event.kind === "error" && event.error.code === "durable.write.failure",
+        ),
+      ).toBe(true);
+      expect(
+        seen.some((event) => event.kind === "error" && event.error.code === "tts.delivery_failed"),
+      ).toBe(false);
+
+      call.push(streamEnded(session.id, "completed"));
+      await running;
+      await draining;
+    } finally {
+      call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+      await draining;
+      await runtime.stop();
+    }
+  }, 10_000);
+
   it("reports when coordinator stop times out before an in-flight poll drains", async () => {
     vi.useFakeTimers();
     const store = createInMemoryDurableRuntimeStore();

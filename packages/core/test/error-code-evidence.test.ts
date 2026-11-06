@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Runtime, SessionId } from "@tvic/core";
 
 import {
   authError,
@@ -17,6 +18,7 @@ import {
   toolError,
   validationError,
 } from "../src/errors.js";
+import { DurableWriteRecovery } from "../../runtime/src/durable-write-recovery.js";
 
 type Evidence = {
   readonly exercise: () => unknown | Promise<unknown>;
@@ -202,6 +204,25 @@ describe("1.1.0 error-code migration evidence", () => {
       expected: {
         code: "provider.transport_timeout",
         retriable: false,
+      },
+    });
+  });
+
+  it("[1.1.0:error-code:packages/runtime/src/durable-write-recovery.ts:122:14]", async () => {
+    const recovery = new DurableWriteRecovery({
+      runtime: {} as Runtime,
+      sessionId: "evidence" as SessionId,
+      emitError() {},
+      onSessionFailure() {},
+      closeCall: async () => {},
+      abortRun() {},
+      abortActiveTurn() {},
+    });
+    await assertErrorMigrationEvidence({
+      exercise: () => recovery.failure(new Error("evidence"), "turn_start"),
+      expected: {
+        code: "durable.write.failure",
+        retriable: true,
       },
     });
   });
