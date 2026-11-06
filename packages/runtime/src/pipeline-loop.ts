@@ -1342,8 +1342,12 @@ export class PipelineVoiceLoop {
           : Date.now(),
         turn ? "thinking" : undefined,
       );
-      if (terminal) this.#durableWriteRecovery.recoverNonCheckpoint(generation);
-      else await this.#durableWriteRecovery.endSessionAfterPersistenceFailure(failure);
+      if (terminal) {
+        this.#lastTurnSequence = Math.max(this.#lastTurnSequence, terminal.sequence);
+        this.#durableWriteRecovery.recoverNonCheckpoint(generation);
+      } else {
+        await this.#durableWriteRecovery.endSessionAfterPersistenceFailure(failure);
+      }
       return;
     }
     this.#turnsHandled += 1;
