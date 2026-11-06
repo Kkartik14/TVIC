@@ -215,8 +215,8 @@ deadline, `stop()` and `finalSession` reject with
 in the background, so keep its dependencies open while it remains active.
 Managed agent shutdown may wait on an unreferenced persistence-cleanup deadline
 timer, so Node may exit before a pending cleanup timeout is reported if no
-other event-loop handles remain. Keep a host handle active while awaiting
-shutdown when its result needs to be observed.
+other referenced handles or requests keep it alive. Keep a referenced host
+handle active while awaiting shutdown when its result needs to be observed.
 Start `session.run`—typically by beginning to consume its event stream—before
 calling `session.complete()`. Calling `complete()` before the run starts rejects
 with `voice_runtime.session_not_running`.

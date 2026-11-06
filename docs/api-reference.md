@@ -151,7 +151,7 @@ shutdown deadline. If cleanup remains pending, it rejects with
 until cleanup settles or the process is restarted.
 
 The managed agent's persistence-cleanup deadline timer is unreferenced. If no
-other event-loop handles remain, Node may exit before cleanup settles or
+other referenced handles or requests keep Node alive, it may exit before cleanup settles or
 `agent.stop()` reports its failure; keep a host handle active while awaiting
 shutdown when its result must be observed.
 
