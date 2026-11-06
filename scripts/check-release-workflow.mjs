@@ -148,6 +148,71 @@ assert(
     /items.length === expectedTotal/u.test(checkRunFetcher),
   "release check fetcher does not validate complete paginated check-suite and check-run results",
 );
+const publishStart = workflow.indexOf("  publish:");
+const publishPreflightJob = workflow.slice(publishStart);
+const publishCommandIndex = publishPreflightJob.indexOf("npm publish");
+const publishPreflightStepStart = publishPreflightJob.indexOf(
+  "      - name: Recheck approved source and latest Merge Gate before publish",
+);
+const publishPreflightStepEnd = publishPreflightJob.indexOf(
+  "\n      - ",
+  publishPreflightStepStart + 1,
+);
+const publishTarballStepStart = publishPreflightJob.indexOf(
+  "      - name: Publish the tested tarball with provenance",
+);
+const publishPreflightStep =
+  publishPreflightStepStart >= 0
+    ? publishPreflightJob.slice(
+        publishPreflightStepStart,
+        publishPreflightStepEnd < 0 ? undefined : publishPreflightStepEnd,
+      )
+    : "";
+const preflightRunStart = publishPreflightStep.indexOf("        run: |\n");
+const preflightRunLines =
+  preflightRunStart < 0
+    ? []
+    : publishPreflightStep
+        .slice(preflightRunStart + "        run: |\n".length)
+        .split("\n")
+        .filter((line) => /^          \S/u.test(line))
+        .map((line) => line.slice(10).trim())
+        .filter((line) => line.length > 0 && !line.startsWith("#"));
+const releaseChecksFixture = preflightRunLinesForFixture(
+  '          # node scripts/fetch-release-check-runs.mjs "$API_URL" "$REPOSITORY" "$TAG_SHA" "$CHECKS_JSON"\n' +
+    '          # node scripts/release-check-selector.mjs "$CHECKS_JSON" "$TAG_SHA"',
+);
+assert(
+  !releaseChecksFixture.includes(
+    'node scripts/fetch-release-check-runs.mjs "$API_URL" "$REPOSITORY" "$TAG_SHA" "$CHECKS_JSON"',
+  ) &&
+    !releaseChecksFixture.includes(
+      'node scripts/release-check-selector.mjs "$CHECKS_JSON" "$TAG_SHA"',
+    ),
+  "pre-publish fixture incorrectly treats commented commands as executable",
+);
+const latestGateCommand =
+  'node scripts/fetch-release-check-runs.mjs "$API_URL" "$REPOSITORY" "$TAG_SHA" "$CHECKS_JSON"';
+const latestSelectorCommand = 'node scripts/release-check-selector.mjs "$CHECKS_JSON" "$TAG_SHA"';
+const latestGateIndex = preflightRunLines.indexOf(latestGateCommand);
+const latestSelectorIndex = preflightRunLines.indexOf(latestSelectorCommand);
+assert(
+  publishPreflightStepStart >= 0 &&
+    publishPreflightStepEnd > publishPreflightStepStart &&
+    publishTarballStepStart === publishPreflightStepEnd + 1 &&
+    publishTarballStepStart < publishCommandIndex &&
+    preflightRunStart >= 0 &&
+    latestGateIndex >= 0 &&
+    latestSelectorIndex > latestGateIndex &&
+    latestSelectorIndex === preflightRunLines.length - 1,
+  "publish does not re-fetch and select the latest Merge Gate immediately before npm publish",
+);
+assert(
+  /checks:\s*read/u.test(publishPreflightJob) &&
+    /test "\$TAG_SHA" = "\$APPROVED_RELEASE_SHA"/u.test(publishPreflightJob) &&
+    /test "\$TAG_SHA" = "\$MAIN_SHA"/u.test(publishPreflightJob),
+  "pre-publish source and check verification is missing required permissions or SHA checks",
+);
 const verifyJobStart = ciWorkflow.search(/^  verify:\s*$/mu);
 assert(verifyJobStart >= 0, "CI workflow is missing the verify job");
 const verifyJob = ciWorkflow.slice(verifyJobStart);
@@ -162,6 +227,16 @@ assert(
   releaseCheckNameMatch[1] === ciCheckName,
   `release check name ${releaseCheckNameMatch[1]} does not match CI verify job name ${ciCheckName}`,
 );
+for (const [document, contents] of [
+  ["release guide", await readFile(path.join(repositoryRoot, "docs/releasing.md"), "utf8")],
+  ["security guide", await readFile(path.join(repositoryRoot, "docs/security.md"), "utf8")],
+]) {
+  assert(
+    contents.includes(`\`${ciCheckName}\``),
+    `${document} does not name the required ${ciCheckName} check`,
+  );
+  assert(!contents.includes("`Verify`"), `${document} names the obsolete Verify check`);
+}
 const lintJobStart = ciWorkflow.search(/^  lint:\s*$/mu);
 assert(lintJobStart >= 0, "CI workflow is missing the lint job");
 const lintJob = ciWorkflow.slice(lintJobStart);
@@ -218,3 +293,11 @@ assert(!/pnpm\s+(?:build|install)/u.test(publishJob), "publish rebuilds or insta
 process.stdout.write(
   "release workflow shape ok: protected source, exact artifact, and trusted publish\n",
 );
+
+function preflightRunLinesForFixture(contents) {
+  return contents
+    .split("\n")
+    .filter((line) => /^          \S/u.test(line))
+    .map((line) => line.slice(10).trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+}

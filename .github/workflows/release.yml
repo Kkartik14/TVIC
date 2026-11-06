@@ -288,6 +288,7 @@ jobs:
     environment: npm-publish
     permissions:
       contents: read
+      checks: read
       id-token: write
     steps:
       - uses: actions/checkout@v7
@@ -330,6 +331,28 @@ jobs:
             voice-runtime-v*) test "${RELEASE_TAG#voice-runtime-v}" = "$EXPECTED_VERSION" ;;
             *) echo "invalid release tag" >&2; exit 1 ;;
           esac
+
+      - name: Recheck approved source and latest Merge Gate before publish
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          EXPECTED_VERSION: ${{ needs.package_artifact.outputs.package_version }}
+          EXPECTED_COMMIT: ${{ needs.package_artifact.outputs.tag_sha }}
+          APPROVED_RELEASE_SHA: ${{ vars.RELEASE_APPROVED_SHA }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          API_URL: ${{ github.api_url }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --tags --force
+          TAG_SHA="$(git rev-list -n 1 "$RELEASE_TAG^{commit}")"
+          MAIN_SHA="$(git rev-parse origin/main^{commit})"
+          test "$TAG_SHA" = "$EXPECTED_COMMIT"
+          test "$TAG_SHA" = "$APPROVED_RELEASE_SHA"
+          test "$TAG_SHA" = "$MAIN_SHA"
+          test "${RELEASE_TAG#voice-runtime-v}" = "$EXPECTED_VERSION"
+          CHECKS_JSON="$RUNNER_TEMP/pre-publish-checks.json"
+          node scripts/fetch-release-check-runs.mjs "$API_URL" "$REPOSITORY" "$TAG_SHA" "$CHECKS_JSON"
+          node scripts/release-check-selector.mjs "$CHECKS_JSON" "$TAG_SHA"
 
       - name: Publish the tested tarball with provenance
         working-directory: ${{ runner.temp }}/voice-runtime-artifact
