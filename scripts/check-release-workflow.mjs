@@ -80,6 +80,25 @@ assert(
   "release package-artifact source check is missing",
 );
 const sourceVerification = workflow.slice(packageArtifactStart, packageCompatibilityStart);
+const npmInstallVersions = [...workflow.matchAll(/npm install -g npm@([^\s]+)/gu)].map(
+  (match) => match[1],
+);
+assert(
+  npmInstallVersions.length === 2,
+  "artifact and publish jobs must each install the pinned npm CLI",
+);
+assert(
+  npmInstallVersions.every((version) => version === "11.21.1"),
+  "artifact and publish jobs must use npm@11.21.1",
+);
+assert(
+  /npm install -g npm@11\.21\.1[\s\S]*?npm --version/u.test(sourceVerification),
+  "artifact job does not report its pinned npm version",
+);
+assert(
+  /test "\$NPM_VERSION" = "11\.21\.1"/u.test(sourceVerification),
+  "artifact job does not enforce its pinned npm version",
+);
 assert(
   /registry\.npmjs\.org[\s\S]*already published/u.test(sourceVerification),
   "release does not reject an existing npm version",
@@ -186,6 +205,14 @@ assert(
   "publish command is missing public access",
 );
 const publishJob = workflow.slice(workflow.indexOf("  publish:"));
+assert(
+  /npm install -g npm@11\.21\.1[\s\S]*?npm --version/u.test(publishJob),
+  "publish job does not install and report the pinned npm version",
+);
+assert(
+  /test "\$NPM_VERSION" = "11\.21\.1"/u.test(publishJob),
+  "publish job does not enforce its pinned npm version",
+);
 assert(!/pnpm\s+(?:build|install)/u.test(publishJob), "publish rebuilds or installs the workspace");
 
 process.stdout.write(
