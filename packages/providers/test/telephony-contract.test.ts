@@ -230,6 +230,95 @@ describe.each(adapters)("telephony contract: $name", ({ name, create, expectedFi
   });
 });
 
+describe("Twilio remote hangup contract", () => {
+  it("still reports an unprompted peer socket close as remote hangup", async () => {
+    const fixture = adapters.find((adapter) => adapter.name === "twilio")?.create();
+    if (!fixture) throw new Error("Twilio contract fixture is missing");
+
+    fixture.start();
+    const remoteHangup = fixture.handle.remoteHangup;
+    if (!remoteHangup) throw new Error("Twilio handle does not expose remoteHangup");
+    fixture.drop();
+
+    await expect(remoteHangup).resolves.toBeUndefined();
+  });
+
+  it("does not report a protocol-triggered socket close as remote hangup", async () => {
+    const fixture = adapters.find((adapter) => adapter.name === "twilio")?.create();
+    if (!fixture) throw new Error("Twilio contract fixture is missing");
+
+    const iterator = fixture.handle.events[Symbol.asyncIterator]();
+    const remoteHangup = fixture.handle.remoteHangup;
+    if (!remoteHangup) throw new Error("Twilio handle does not expose remoteHangup");
+    let remoteHangupObserved = false;
+    void remoteHangup.then(() => {
+      remoteHangupObserved = true;
+    });
+
+    fixture.start();
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.stream.started" },
+    });
+    fixture.socket.text(
+      JSON.stringify({
+        event: "stop",
+        sequenceNumber: "2",
+        streamSid: "MZ1",
+        stop: { accountSid: "AC123", callSid: "CA_other" },
+      }),
+    );
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: {
+        type: "media.error",
+        error: { metadata: { reason: "stop.callSid does not match start.callSid" } },
+      },
+      done: false,
+    });
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+    await Promise.resolve();
+    expect(remoteHangupObserved).toBe(false);
+  });
+
+  it("does not replace a protocol error with a reentrant socket error", async () => {
+    const fixture = adapters.find((adapter) => adapter.name === "twilio")?.create();
+    if (!fixture) throw new Error("Twilio contract fixture is missing");
+
+    const iterator = fixture.handle.events[Symbol.asyncIterator]();
+    const remoteHangup = fixture.handle.remoteHangup;
+    if (!remoteHangup) throw new Error("Twilio handle does not expose remoteHangup");
+    let remoteHangupObserved = false;
+    void remoteHangup.then(() => {
+      remoteHangupObserved = true;
+    });
+
+    fixture.start();
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "media.stream.started" },
+    });
+    fixture.socket.errorOnClose = true;
+    fixture.socket.text(
+      JSON.stringify({
+        event: "stop",
+        sequenceNumber: "2",
+        streamSid: "MZ1",
+        stop: { accountSid: "AC123", callSid: "CA_other" },
+      }),
+    );
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: {
+        type: "media.error",
+        error: { metadata: { reason: "stop.callSid does not match start.callSid" } },
+      },
+      done: false,
+    });
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+    await Promise.resolve();
+    expect(remoteHangupObserved).toBe(false);
+  });
+});
+
 const CALL_ID = "call_contract" as CallId;
 const SESSION_ID = "session_contract" as SessionId;
 const TS = "2026-07-31T00:00:00.000Z" as Timestamp;
@@ -256,6 +345,7 @@ function outputChunk(): OutputMediaEvent {
 class ContractSocket {
   readyState: number = WebSocket.OPEN;
   closeCalls = 0;
+  errorOnClose = false;
   readonly #messages: Array<(data: WebSocket.RawData, isBinary: boolean) => void> = [];
   readonly #closes: Array<(...args: never[]) => void> = [];
   readonly #errors: Array<(error: Error) => void> = [];
@@ -265,6 +355,7 @@ class ContractSocket {
   }
   close(): void {
     this.closeCalls += 1;
+    if (this.errorOnClose) this.error(new Error("transport failed while closing"));
     this.drop();
   }
   on(event: string, handler: (...args: never[]) => void): this {
