@@ -296,6 +296,193 @@ describe("ElevenLabs multi-context WebSocket adapters", () => {
     expect(connection.contexts).toBe(0);
   });
 
+  it("ignores late audio and final messages for a cancelled context while a sibling remains active", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-path",
+      modelId: "eleven_flash_v2_5",
+      clock: fixedClock,
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const base = {
+      sessionId: "cancelled-context-session" as SessionId,
+      format: PCM16_16K_MONO,
+      voice: "voice-path",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice-path" }),
+      ],
+    } as const;
+    const cancelled = await connection.openContext({
+      ...base,
+      contextId: "cancelled-context",
+      turnId: "cancelled-turn" as TurnId,
+    });
+    const sibling = await connection.openContext({
+      ...base,
+      contextId: "sibling-context",
+      turnId: "sibling-turn" as TurnId,
+    });
+    const siblingIterator = sibling.events[Symbol.asyncIterator]();
+    const siblingFirstEvent = siblingIterator.next();
+
+    await cancelled.cancel();
+    await expect(
+      connection.openContext({
+        ...base,
+        contextId: "cancelled-context",
+        turnId: "reopened-too-early" as TurnId,
+      }),
+    ).rejects.toThrow(/recently closed/u);
+    socket.receive({
+      context_id: "cancelled-context",
+      audio: Buffer.from([1, 2]).toString("base64"),
+      is_final: false,
+    });
+    socket.receive({ context_id: "cancelled-context", audio: "", is_final: true });
+    await connection.openContext({
+      ...base,
+      contextId: "cancelled-context",
+      turnId: "reopened-after-final" as TurnId,
+    });
+    socket.receive({ context_id: "cancelled-context", audio: "", is_final: true });
+    const reopenedAfterNormalFinal = await connection.openContext({
+      ...base,
+      contextId: "cancelled-context",
+      turnId: "reopened-after-normal-final" as TurnId,
+    });
+    await reopenedAfterNormalFinal.cancel();
+    socket.receive({
+      context_id: "sibling-context",
+      audio: Buffer.from([3, 4]).toString("base64"),
+      is_final: true,
+    });
+
+    await expect(siblingFirstEvent).resolves.toMatchObject({
+      done: false,
+      value: { type: "media.audio.chunk", turnId: "sibling-turn" },
+    });
+    await expect(collect(siblingIterator)).resolves.toMatchObject([
+      { type: "media.audio.committed", turnId: "sibling-turn" },
+    ]);
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+    expect(connection.contexts).toBe(0);
+    await connection.close();
+  });
+
+  it("keeps a never-opened context id fatal while another context is active", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-path",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const sibling = await connection.openContext({
+      contextId: "known-sibling",
+      sessionId: "unknown-context-session" as SessionId,
+      turnId: "known-sibling-turn" as TurnId,
+      format: PCM16_16K_MONO,
+      voice: "voice-path",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice-path" }),
+      ],
+    });
+    const siblingPending = sibling.events[Symbol.asyncIterator]().next();
+
+    socket.receive({ context_id: "never-opened", audio: "" });
+
+    await expect(siblingPending).rejects.toMatchObject({
+      message: expect.stringContaining("unknown context_id"),
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    expect(connection.contexts).toBe(0);
+  });
+
+  it("retains exactly the 32 newest closed context ids", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-path",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const base = {
+      sessionId: "closed-context-window-session" as SessionId,
+      format: PCM16_16K_MONO,
+      voice: "voice-path",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice-path" }),
+      ],
+    } as const;
+    for (let index = 0; index < 33; index += 1) {
+      const context = await connection.openContext({
+        ...base,
+        contextId: `closed-${index}`,
+        turnId: `closed-turn-${index}` as TurnId,
+      });
+      await context.cancel();
+    }
+    const sibling = await connection.openContext({
+      ...base,
+      contextId: "window-sibling",
+      turnId: "window-sibling-turn" as TurnId,
+    });
+    const siblingPending = sibling.events[Symbol.asyncIterator]().next();
+
+    socket.receive({ context_id: "closed-1", audio: Buffer.from([1, 2]).toString("base64") });
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+    socket.receive({ context_id: "closed-0", audio: "" });
+
+    await expect(siblingPending).rejects.toMatchObject({
+      message: expect.stringContaining("unknown context_id"),
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("fails the connection when cancel cannot send close_context but still resolves cancel", async () => {
+    const socket = new FakeSocket();
+    const provider = createElevenLabsTtsMultiContextProvider({
+      apiKey: "eleven-secret",
+      voiceId: "voice-path",
+      modelId: "eleven_flash_v2_5",
+      webSocketFactory: () => socket as never,
+    });
+    const connection = await provider.openConnection();
+    const base = {
+      sessionId: "cancel-send-failure-session" as SessionId,
+      format: PCM16_16K_MONO,
+      voice: "voice-path",
+      providerCapabilitySnapshots: [
+        elevenLabsCapabilitySnapshot({ model: "eleven_flash_v2_5", voice: "voice-path" }),
+      ],
+    } as const;
+    const cancelled = await connection.openContext({
+      ...base,
+      contextId: "cancel-send-failure",
+      turnId: "cancel-send-failure-turn" as TurnId,
+    });
+    const sibling = await connection.openContext({
+      ...base,
+      contextId: "cancel-send-failure-sibling",
+      turnId: "cancel-send-failure-sibling-turn" as TurnId,
+    });
+    const siblingPending = sibling.events[Symbol.asyncIterator]().next();
+    socket.send = () => {
+      throw new Error("refused");
+    };
+
+    await expect(cancelled.cancel()).resolves.toBeUndefined();
+    await expect(siblingPending).rejects.toMatchObject({
+      message: expect.stringContaining("socket is not writable"),
+    });
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    expect(connection.contexts).toBe(0);
+  });
+
   it("rejects an expired context capability snapshot before sending a context frame", async () => {
     const socket = new FakeSocket();
     const provider = createElevenLabsTtsMultiContextProvider({

@@ -82,6 +82,7 @@ import {
 } from "./elevenlabs-multi-context-helpers.js";
 
 const ELEVENLABS_MULTI_CONTEXT_LIMIT = 5;
+const ELEVENLABS_RECENTLY_CLOSED_CONTEXT_LIMIT = 32;
 const ELEVENLABS_MULTI_TTS_DEFAULT_MODEL = "eleven_multilingual_v2";
 const ELEVENLABS_MULTI_DIALOGUE_DEFAULT_MODEL = "eleven_v3_conversational";
 
@@ -348,7 +349,7 @@ interface ConnectionOptions {
 interface MultiContextTransport {
   send(message: Readonly<Record<string, unknown>>): void;
   closeContext(contextId: string): void;
-  remove(contextId: string): void;
+  remove(contextId: string, rememberForLateMessages?: boolean): void;
   failAll(error: unknown): void;
 }
 
@@ -356,6 +357,8 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
   readonly #socket: WebSocket;
   readonly #options: ConnectionOptions;
   readonly #contexts = new Map<string, ElevenLabsMultiContextSessionImpl>();
+  readonly #recentlyClosedContextIds = new Set<string>();
+  #droppedLateMessages = 0;
   #closed = false;
 
   constructor(socket: WebSocket, options: ConnectionOptions) {
@@ -394,6 +397,9 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
     if (this.#contexts.has(config.contextId)) {
       throw this.#error(`ElevenLabs context ${config.contextId} is already open`);
     }
+    if (this.#recentlyClosedContextIds.has(config.contextId)) {
+      throw this.#error(`ElevenLabs context ${config.contextId} was recently closed`);
+    }
     if (this.#contexts.size >= ELEVENLABS_MULTI_CONTEXT_LIMIT) {
       throw this.#error("ElevenLabs multi-context connections support at most five contexts");
     }
@@ -417,6 +423,7 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
     }
     for (const context of this.#contexts.values()) context.closeWithoutError();
     this.#contexts.clear();
+    this.#recentlyClosedContextIds.clear();
     safeClose(this.#socket);
   }
 
@@ -430,12 +437,23 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
   }
 
   closeContext(contextId: string): void {
-    if (this.#closed || this.#socket.readyState !== WebSocket.OPEN) return;
-    safeSend(this.#socket, JSON.stringify({ context_id: contextId, close_context: true }));
+    if (this.#closed) return;
+    if (
+      this.#socket.readyState !== WebSocket.OPEN ||
+      !safeSend(this.#socket, JSON.stringify({ context_id: contextId, close_context: true }))
+    ) {
+      this.failAll(this.#error("ElevenLabs multi-context socket is not writable"));
+    }
   }
 
-  remove(contextId: string): void {
-    this.#contexts.delete(contextId);
+  remove(contextId: string, rememberForLateMessages = true): void {
+    if (!this.#contexts.delete(contextId) || this.#closed) return;
+    if (!rememberForLateMessages) return;
+    this.#recentlyClosedContextIds.add(contextId);
+    if (this.#recentlyClosedContextIds.size > ELEVENLABS_RECENTLY_CLOSED_CONTEXT_LIMIT) {
+      const oldest = this.#recentlyClosedContextIds.values().next().value;
+      if (oldest !== undefined) this.#recentlyClosedContextIds.delete(oldest);
+    }
   }
 
   failAll(error: unknown): void {
@@ -443,6 +461,7 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
     this.#closed = true;
     for (const context of this.#contexts.values()) context.fail(error);
     this.#contexts.clear();
+    this.#recentlyClosedContextIds.clear();
     safeClose(this.#socket);
   }
 
@@ -454,6 +473,17 @@ class ElevenLabsTtsMultiContextConnectionImpl implements ElevenLabsTtsMultiConte
       return;
     }
     const contextId = parsed.context_id ?? parsed.contextId;
+    if (
+      typeof contextId === "string" &&
+      contextId.length > 0 &&
+      this.#recentlyClosedContextIds.has(contextId)
+    ) {
+      this.#droppedLateMessages += 1;
+      if (parsed.is_final === true || parsed.isFinal === true) {
+        this.#recentlyClosedContextIds.delete(contextId);
+      }
+      return;
+    }
     const context =
       typeof contextId === "string" && contextId.length > 0
         ? this.#contexts.get(contextId)
@@ -764,10 +794,10 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
 
   async cancel(): Promise<void> {
     if (this.#closed) return;
-    this.#transport.closeContext(this.contextId);
     this.#closed = true;
     this.#events.close();
     this.#transport.remove(this.contextId);
+    this.#transport.closeContext(this.contextId);
   }
 
   handleMessage(message: Readonly<Record<string, unknown>>): void {
@@ -807,7 +837,7 @@ class ElevenLabsMultiContextSessionImpl implements ElevenLabsMultiContextSession
     if (isFinal) {
       this.#commit();
       this.#closed = true;
-      this.#transport.remove(this.contextId);
+      this.#transport.remove(this.contextId, false);
       this.#events.close();
     }
   }
