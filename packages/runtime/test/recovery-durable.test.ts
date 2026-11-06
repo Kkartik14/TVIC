@@ -45,6 +45,37 @@ import {
 } from "./harness.js";
 
 describe("R2-06 recovery and durable correctness", () => {
+  it("opens the recovery window at first degradation with grace for a write and retry probe", () => {
+    const policy = {
+      criticalWriteTimeoutMs: 300,
+      bargeCheckpointRetryBudgetMs: 250,
+      persistenceRecoveryGraceMs: 100,
+    };
+    const recovery = new DurableWriteRecovery({
+      runtime: { durablePolicy: policy, setPersistenceHealth() {} } as unknown as Runtime,
+      sessionId: "session_effective_recovery_grace" as SessionId,
+      emitError() {},
+      onSessionFailure() {},
+      closeCall: async () => {},
+      abortRun() {},
+      abortActiveTurn() {},
+    });
+
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    try {
+      expect(recovery.recoveryDeadlineMs).toBeUndefined();
+      recovery.onWriteFailure(
+        "turn_start",
+        new BackendUnavailableError("injected first persistence failure"),
+      );
+
+      expect(recovery.recoveryDeadlineMs).toBe(10_550);
+      expect(recovery.beginRecoveryWindow()).toBe(10_550);
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
   it("keeps valid errors intact and normalizes timeout persistence failures", () => {
     const emittedFailures: Array<{ readonly error: unknown; readonly recoverable: boolean }> = [];
     const recovery = new DurableWriteRecovery({
@@ -1792,6 +1823,188 @@ describe("R2-06 recovery and durable correctness", () => {
     }
   }, 15_000);
 
+  it.each([
+    {
+      name: "a checkpoint that commits after the default write timeout",
+      criticalWriteTimeoutMs: 2_000,
+      bargeCheckpointRetryBudgetMs: 500,
+      persistenceRecoveryGraceMs: 2_000,
+      checkpointDelayMs: 2_300,
+    },
+    {
+      name: "a healthy checkpoint below its write timeout",
+      criticalWriteTimeoutMs: 300,
+      bargeCheckpointRetryBudgetMs: 500,
+      persistenceRecoveryGraceMs: 100,
+      checkpointDelayMs: 150,
+    },
+    {
+      name: "a checkpoint that commits after the eager window but within post-timeout grace",
+      criticalWriteTimeoutMs: 200,
+      bargeCheckpointRetryBudgetMs: 100,
+      persistenceRecoveryGraceMs: 50,
+      checkpointDelayMs: 400,
+    },
+  ])(
+    "keeps a held caller turn through $name",
+    async ({
+      criticalWriteTimeoutMs,
+      bargeCheckpointRetryBudgetMs,
+      persistenceRecoveryGraceMs,
+      checkpointDelayMs,
+    }) => {
+      const durableStore = createInMemoryDurableRuntimeStore();
+      const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+      let interruptedCheckpointStarted = false;
+      let interruptedCheckpointCommitted = false;
+      durableStore.runSessionTransaction = async <T>(
+        sessionId: SessionId,
+        lease: SessionLease,
+        operation: (transaction: DurableSessionTransaction) => Promise<T>,
+      ) =>
+        runSessionTransaction(sessionId, lease, async (transaction) => {
+          const wrapped = new Proxy(transaction, {
+            get(target, property, receiver) {
+              if (property === "updateTurn") {
+                return async (
+                  turnSessionId: SessionId,
+                  turnId: Parameters<DurableSessionTransaction["updateTurn"]>[1],
+                  updater: Parameters<DurableSessionTransaction["updateTurn"]>[2],
+                ) => {
+                  const current = await target.getTurn(turnSessionId, turnId);
+                  if (!current) throw new Error(`missing turn during injection: ${turnId}`);
+                  const next = updater(current);
+                  if (next.turn.status === "interrupted" && !interruptedCheckpointStarted) {
+                    interruptedCheckpointStarted = true;
+                    await new Promise<void>((resolve) => setTimeout(resolve, checkpointDelayMs));
+                  }
+                  const updated = await target.updateTurn(turnSessionId, turnId, () => next);
+                  if (updated.turn.status === "interrupted") {
+                    interruptedCheckpointCommitted = true;
+                  }
+                  return updated;
+                };
+              }
+              const value = Reflect.get(target, property, receiver) as unknown;
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+          return operation(wrapped);
+        });
+
+      const runtime = createRuntime({
+        durableStore,
+        durablePolicy: {
+          criticalWriteTimeoutMs,
+          bargeCheckpointRetryBudgetMs,
+          persistenceRecoveryGraceMs,
+        },
+      });
+      await runtime.start();
+      const agent = buildAgent({
+        interruptionPolicy: { mode: "graceful", minSpeechMs: 0, trimOutputOnInterrupt: true },
+      });
+      const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+      const session = attachment.session;
+      const call = makeCallHandle();
+      const closeCall = vi.spyOn(call.handle, "close");
+      const stt = makeStt();
+      let llmCalls = 0;
+      const llm = makeLlm((request) => {
+        llmCalls += 1;
+        return [
+          llmEvent(request, llmCalls, {
+            type: "llm.completed",
+            text: llmCalls === 1 ? "first answer" : "recovered answer",
+            toolCalls: [],
+          }),
+        ];
+      });
+      let ttsCalls = 0;
+      const tts: TextToSpeechProvider = {
+        name: "checkpoint-grace-test-tts",
+        kind: "tts",
+        version: "0.1.0",
+        capabilities: TEST_PROVIDER_CAPABILITIES,
+        supportsTtsLanguage: () => true,
+        supportsTtsSpeed: () => true,
+        async synthesize(request): Promise<TtsStream> {
+          ttsCalls += 1;
+          const queue = pushable<ReturnType<typeof audioChunk>>();
+          queue.push(audioChunk(request, ttsCalls));
+          if (ttsCalls > 1) queue.end();
+          return {
+            events: queue.iterable as TtsStream["events"],
+            async cancel() {
+              queue.end();
+            },
+          };
+        },
+      };
+      const loop = new PipelineVoiceLoop({
+        runtime,
+        session,
+        attachment,
+        agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts }),
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      });
+      const running = loop.start();
+      const draining = (async () => {
+        for await (const _event of running) {
+        }
+      })();
+
+      try {
+        call.push(streamStarted(session.id));
+        stt.pushFinal(session.id, "first turn");
+        await until(
+          () => call.sent.some((event) => event.type === "media.audio.chunk"),
+          "first turn audio",
+        );
+        stt.pushSpeechStarted(session.id);
+        stt.pushFinal(session.id, "held caller final");
+        await until(
+          () => interruptedCheckpointCommitted || closeCall.mock.calls.length > 0,
+          "checkpoint commit or premature call closure",
+        );
+
+        expect(interruptedCheckpointStarted).toBe(true);
+        expect(interruptedCheckpointCommitted).toBe(true);
+        expect(closeCall).not.toHaveBeenCalled();
+        await until(() => llmCalls === 2, "held final resumes after checkpoint commit");
+        await until(() => attachment.health === "healthy", "persistence health recovery");
+        call.push(streamEnded(session.id, "completed"));
+        const result = await running;
+        await draining;
+        const persisted = await runtime.inspectSession(session.id);
+
+        expect(llmCalls).toBe(2);
+        expect(result.turnsHandled).toBe(2);
+        expect(
+          persisted.turns.find((turn) => turn.input.transcript === "first turn"),
+        ).toMatchObject({
+          status: "cancelled",
+          reason: "barge_in",
+        });
+        expect(persisted.turns.some((turn) => turn.input.transcript === "held caller final")).toBe(
+          true,
+        );
+        await expect(
+          runtime.endSession(session.id, { reason: "completed" }),
+        ).resolves.toMatchObject({
+          status: "completed",
+        });
+      } finally {
+        call.push(streamEnded(session.id, "completed"));
+        await running.catch(() => undefined);
+        await draining;
+        await runtime.stop();
+      }
+    },
+    15_000,
+  );
+
   it("retries a transient thinking-status failure and resumes held transcripts", async () => {
     const durableStore = createInMemoryDurableRuntimeStore();
     const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
@@ -2035,11 +2248,19 @@ describe("R2-06 recovery and durable correctness", () => {
   }, 15_000);
 
   it.each([
-    { criticalWriteTimeoutMs: 75, outcome: "critical timeout followed by late commit" },
-    { criticalWriteTimeoutMs: 200, outcome: "normal late success" },
+    {
+      criticalWriteTimeoutMs: 75,
+      delayedRetryMs: 120,
+      outcome: "critical timeout followed by late commit",
+    },
+    {
+      criticalWriteTimeoutMs: 200,
+      delayedRetryMs: 300,
+      outcome: "critical timeout followed by a later commit",
+    },
   ])(
     "waits for the status retry before terminalizing the failed session ($outcome)",
-    async ({ criticalWriteTimeoutMs }) => {
+    async ({ criticalWriteTimeoutMs, delayedRetryMs }) => {
       const durableStore = createInMemoryDurableRuntimeStore();
       const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
       let thinkingWriteAttempts = 0;
@@ -2069,7 +2290,7 @@ describe("R2-06 recovery and durable correctness", () => {
                     }
                     if (thinkingWriteAttempts === 2) {
                       statusRetryInFlight = true;
-                      await new Promise<void>((resolve) => setTimeout(resolve, 120));
+                      await new Promise<void>((resolve) => setTimeout(resolve, delayedRetryMs));
                       const updated = await target.updateTurn(turnSessionId, turnId, () => next);
                       delayedStatusRetryCommitted = updated.turn.status === "thinking";
                       statusRetryInFlight = false;
@@ -2088,7 +2309,11 @@ describe("R2-06 recovery and durable correctness", () => {
 
       const runtime = createRuntime({
         durableStore,
-        durablePolicy: { criticalWriteTimeoutMs, persistenceRecoveryGraceMs: 50 },
+        durablePolicy: {
+          criticalWriteTimeoutMs,
+          persistenceRecoveryGraceMs: 50,
+          bargeCheckpointRetryBudgetMs: 0,
+        },
       });
       await runtime.start();
       const agent = buildAgent();
@@ -2152,7 +2377,7 @@ describe("R2-06 recovery and durable correctness", () => {
     15_000,
   );
 
-  it("recovers a single slow transaction after it commits instead of leaving the call degraded", async () => {
+  it("recovers a non-checkpoint write that takes 1.5 times its timeout", async () => {
     const durableStore = createInMemoryDurableRuntimeStore();
     const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
     let delayedWrite = false;
@@ -2176,7 +2401,7 @@ describe("R2-06 recovery and durable correctness", () => {
                 const next = updater(current);
                 if (!delayedWrite && next.turn.status === "thinking") {
                   delayedWrite = true;
-                  await new Promise<void>((resolve) => setTimeout(resolve, 150));
+                  await new Promise<void>((resolve) => setTimeout(resolve, 300));
                   const updated = await target.updateTurn(turnSessionId, turnId, () => next);
                   delayedWriteCommitted = updated.turn.status === "thinking";
                   return updated;
@@ -2193,13 +2418,14 @@ describe("R2-06 recovery and durable correctness", () => {
 
     const runtime = createRuntime({
       durableStore,
-      durablePolicy: { criticalWriteTimeoutMs: 75, persistenceRecoveryGraceMs: 500 },
+      durablePolicy: { criticalWriteTimeoutMs: 200, persistenceRecoveryGraceMs: 50 },
     });
     await runtime.start();
     const agent = buildAgent();
     const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
     const session = attachment.session;
     const call = makeCallHandle();
+    const closeCall = vi.spyOn(call.handle, "close");
     const stt = makeStt();
     let llmCalls = 0;
     const requests: LlmMessage[][] = [];
@@ -2255,6 +2481,7 @@ describe("R2-06 recovery and durable correctness", () => {
 
       expect(delayedWrite).toBe(true);
       expect(delayedWriteCommitted).toBe(true);
+      expect(closeCall).not.toHaveBeenCalledWith("error");
       expect(llmCalls).toBe(2);
       expect(result.turnsHandled).toBe(2);
       expect(result.turnsFailed).toBe(0);
@@ -2465,7 +2692,11 @@ describe("R2-06 recovery and durable correctness", () => {
 
       const runtime = createRuntime({
         durableStore,
-        durablePolicy: { criticalWriteTimeoutMs: 10, persistenceRecoveryGraceMs: 50 },
+        durablePolicy: {
+          criticalWriteTimeoutMs: 10,
+          persistenceRecoveryGraceMs: 50,
+          bargeCheckpointRetryBudgetMs: 0,
+        },
       });
       await runtime.start();
       const agent = buildAgent();
@@ -2606,7 +2837,11 @@ describe("R2-06 recovery and durable correctness", () => {
 
     const runtime = createRuntime({
       durableStore,
-      durablePolicy: { criticalWriteTimeoutMs: 10, persistenceRecoveryGraceMs: 50 },
+      durablePolicy: {
+        criticalWriteTimeoutMs: 10,
+        persistenceRecoveryGraceMs: 50,
+        bargeCheckpointRetryBudgetMs: 0,
+      },
     });
     await runtime.start();
     const agent = buildAgent();
@@ -2927,7 +3162,7 @@ describe("R2-06 recovery and durable correctness", () => {
     if (!runUnfencedSessionTransaction) {
       throw new Error("Test store does not support unfenced session transactions");
     }
-    const outageDurationMs = 100;
+    const outageDurationMs = 500;
     let outageStarted = false;
     let outageUntilMs = 0;
     let shouldInsertCompetingFailure = false;
@@ -3000,7 +3235,11 @@ describe("R2-06 recovery and durable correctness", () => {
 
     const runtime = createRuntime({
       durableStore,
-      durablePolicy: { criticalWriteTimeoutMs: 300, persistenceRecoveryGraceMs: 20 },
+      durablePolicy: {
+        criticalWriteTimeoutMs: 300,
+        persistenceRecoveryGraceMs: 20,
+        bargeCheckpointRetryBudgetMs: 0,
+      },
     });
     await runtime.start();
     const agent = buildAgent();

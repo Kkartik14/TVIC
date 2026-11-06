@@ -135,17 +135,25 @@ voice event stream emits an `error` with code `durable.write.failure`, and the
 session attachment reports `persistence_degraded` while the runtime holds new
 caller transcripts.
 
-The runtime retries or inspects the affected turn within its persistence
-recovery window. If the write or a terminal turn state is confirmed, it clears
-degraded health and resumes turn admission. If the state cannot be confirmed in
-time, TVIC emits a failed call outcome, attempts to persist the session as
-`failed` with the durable-write error, and closes the call handle. If the store
-remains unavailable, the failed session record cannot be guaranteed. Managed
-sessions also run their normal finalizer after the pipeline stops; a locally
-initiated call close is not reclassified as a remote hangup, and repeated
-session finalization is idempotent. The recovery window bounds retries and
-inspection; after recovery ends, call closure and terminal session persistence
-use separate bounded cleanup attempts.
+Durable-write recovery starts at the first detected persistence failure. Its
+effective window is the greater of `persistenceRecoveryGraceMs` and
+`criticalWriteTimeoutMs + bargeCheckpointRetryBudgetMs`. The initial checkpoint
+attempt gets the full critical-write timeout; if it reports a timeout but
+commits within the effective recovery window, the runtime accepts the commit,
+clears degraded health, and resumes turn admission. This floor means increasing
+`criticalWriteTimeoutMs` does not require manually increasing
+`persistenceRecoveryGraceMs` to preserve a full checkpoint retry budget.
+Lease-renewal handling continues to use the configured grace value.
+
+If the affected write or a terminal turn state cannot be confirmed in time,
+TVIC emits a failed call outcome, attempts to persist the session as `failed`
+with the durable-write error, and closes the call handle. If the store remains
+unavailable, the failed session record cannot be guaranteed. Managed sessions
+also run their normal finalizer after the pipeline stops; a locally initiated
+call close is not reclassified as a remote hangup, and repeated session
+finalization is idempotent. The recovery window bounds retries and inspection;
+after recovery ends, call closure and terminal session persistence use separate
+bounded cleanup attempts.
 
 These deadline timers are unreferenced. If no other referenced handles or
 requests keep Node alive, it may exit before a pending persistence cleanup
@@ -166,10 +174,6 @@ session finalization.
 - A turn start can commit after its timeout. If a later durable write then fails
   while reads still work, the call can remain connected. Track this in
   [issue #109](https://github.com/Kkartik14/TVIC/issues/109).
-- A checkpoint write that commits after `criticalWriteTimeoutMs` still ends the
-  call by default. If you raise `criticalWriteTimeoutMs`, set
-  `persistenceRecoveryGraceMs` above it. See
-  [issue #110](https://github.com/Kkartik14/TVIC/issues/110).
 - `criticalWriteTimeoutMs` and `persistenceRecoveryGraceMs` are not validated
   yet. Set each to a finite positive value; validation is tracked in
   [issue #111](https://github.com/Kkartik14/TVIC/issues/111).

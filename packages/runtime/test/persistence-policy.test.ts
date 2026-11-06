@@ -41,10 +41,9 @@ describe("persistInterruptionCheckpoint", () => {
           () => undefined,
         ),
     };
-    const onDegraded = vi.fn();
+    const onDegraded = vi.fn(() => Date.now() + policy.persistenceRecoveryGraceMs);
     const onRecovered = vi.fn();
     const onFatal = vi.fn();
-    const startedAt = Date.now();
 
     await expect(
       persistInterruptionCheckpoint({
@@ -52,14 +51,12 @@ describe("persistInterruptionCheckpoint", () => {
         sessionId: "checkpoint_timeout_session" as SessionId,
         turnId: "checkpoint_timeout_turn" as TurnId,
         cause: "barge_in",
-        recoveryDeadlineMs: startedAt + policy.persistenceRecoveryGraceMs,
         onDegraded,
         onRecovered,
         onFatal,
       }),
     ).resolves.toBe(false);
 
-    expect(Date.now() - startedAt).toBeLessThan(250);
     expect(checkpointAttempts).toBe(1);
     expect(activeWrites).toBe(1);
     expect(maximumActiveWrites).toBe(1);
@@ -70,7 +67,7 @@ describe("persistInterruptionCheckpoint", () => {
     await vi.waitFor(() => expect(operationSettled).toBe(true), { timeout: 500 });
   });
 
-  it("passes an in-flight checkpoint write to fatal cleanup when the recovery deadline wins", async () => {
+  it("gives a healthy checkpoint the full critical write timeout even when grace is shorter", async () => {
     const policy: DurableRuntimePolicy = {
       ...DEFAULT_DURABLE_RUNTIME_POLICY,
       criticalWriteTimeoutMs: 500,
@@ -81,7 +78,6 @@ describe("persistInterruptionCheckpoint", () => {
     let activeWrites = 0;
     let checkpointAttempts = 0;
     let operationSettled = false;
-    let fatalPendingWrite: Promise<unknown> | undefined;
     const runtime = {
       durablePolicy: policy,
       checkpointTurnInterruption: async () =>
@@ -98,10 +94,8 @@ describe("persistInterruptionCheckpoint", () => {
           () => undefined,
         ),
     };
-    const startedAt = Date.now();
-    const fatal = vi.fn((_error: unknown, pendingWrite?: Promise<unknown>) => {
-      fatalPendingWrite = pendingWrite;
-    });
+    const recovered = vi.fn();
+    const fatal = vi.fn();
 
     await expect(
       persistInterruptionCheckpoint({
@@ -109,19 +103,124 @@ describe("persistInterruptionCheckpoint", () => {
         sessionId: "checkpoint_outer_deadline_session" as SessionId,
         turnId: "checkpoint_outer_deadline_turn" as TurnId,
         cause: "barge_in",
-        recoveryDeadlineMs: startedAt + policy.persistenceRecoveryGraceMs,
-        onDegraded: vi.fn(),
-        onRecovered: vi.fn(),
+        onDegraded: () => Date.now() + policy.persistenceRecoveryGraceMs,
+        onRecovered: recovered,
         onFatal: fatal,
       }),
-    ).resolves.toBe(false);
+    ).resolves.toBe(true);
 
-    expect(Date.now() - startedAt).toBeLessThan(250);
     expect(checkpointAttempts).toBe(1);
-    expect(activeWrites).toBe(1);
-    expect(fatal).toHaveBeenCalledTimes(1);
-    expect(fatalPendingWrite).toBeInstanceOf(Promise);
-    await vi.waitFor(() => expect(operationSettled).toBe(true), { timeout: 500 });
+    expect(activeWrites).toBe(0);
+    expect(operationSettled).toBe(true);
+    expect(recovered).toHaveBeenCalledTimes(1);
+    expect(fatal).not.toHaveBeenCalled();
+  });
+
+  it("bounds the first checkpoint when a Runtime implementation never settles", async () => {
+    const policy: DurableRuntimePolicy = {
+      ...DEFAULT_DURABLE_RUNTIME_POLICY,
+      criticalWriteTimeoutMs: 20,
+      bargeCheckpointRetryBudgetMs: 0,
+      bargeCheckpointMaxAttempts: 1,
+      persistenceRecoveryGraceMs: 5,
+    };
+    let finishCheckpoint!: (value: unknown) => void;
+    const pendingCheckpoint = new Promise<unknown>((resolve) => {
+      finishCheckpoint = resolve;
+    });
+    let checkpointAttempts = 0;
+    let fatalPendingWrite: Promise<unknown> | undefined;
+    const runtime = {
+      durablePolicy: policy,
+      checkpointTurnInterruption() {
+        checkpointAttempts += 1;
+        return pendingCheckpoint;
+      },
+    };
+    const onDegraded = vi.fn(
+      () =>
+        Date.now() +
+        Math.max(
+          policy.persistenceRecoveryGraceMs,
+          policy.criticalWriteTimeoutMs + policy.bargeCheckpointRetryBudgetMs,
+        ),
+    );
+    const onFatal = vi.fn((_error: unknown, pendingWrite?: Promise<unknown>) => {
+      fatalPendingWrite = pendingWrite;
+    });
+
+    try {
+      await expect(
+        persistInterruptionCheckpoint({
+          runtime,
+          sessionId: "checkpoint_unbounded_runtime_session" as SessionId,
+          turnId: "checkpoint_unbounded_runtime_turn" as TurnId,
+          cause: "barge_in",
+          onDegraded,
+          onRecovered: vi.fn(),
+          onFatal,
+        }),
+      ).resolves.toBe(false);
+
+      expect(checkpointAttempts).toBe(1);
+      expect(onDegraded).toHaveBeenCalledTimes(1);
+      expect(onFatal).toHaveBeenCalledTimes(1);
+      expect(fatalPendingWrite).toBe(pendingCheckpoint);
+    } finally {
+      finishCheckpoint(undefined);
+    }
+  }, 1_000);
+
+  it("counts synchronous checkpoint invocation time against the critical write timeout", async () => {
+    const policy: DurableRuntimePolicy = {
+      ...DEFAULT_DURABLE_RUNTIME_POLICY,
+      criticalWriteTimeoutMs: 20,
+      bargeCheckpointRetryBudgetMs: 0,
+      bargeCheckpointMaxAttempts: 1,
+      persistenceRecoveryGraceMs: 5,
+    };
+    let nowMs = 1_000;
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    let checkpointAttempts = 0;
+    const runtime = {
+      durablePolicy: policy,
+      checkpointTurnInterruption() {
+        checkpointAttempts += 1;
+        nowMs += 21;
+        return Promise.resolve("late checkpoint commit");
+      },
+    };
+    const onDegraded = vi.fn(
+      () =>
+        Date.now() +
+        Math.max(
+          policy.persistenceRecoveryGraceMs,
+          policy.criticalWriteTimeoutMs + policy.bargeCheckpointRetryBudgetMs,
+        ),
+    );
+    const onRecovered = vi.fn();
+    const onFatal = vi.fn();
+
+    try {
+      await expect(
+        persistInterruptionCheckpoint({
+          runtime,
+          sessionId: "checkpoint_sync_timeout_session" as SessionId,
+          turnId: "checkpoint_sync_timeout_turn" as TurnId,
+          cause: "barge_in",
+          onDegraded,
+          onRecovered,
+          onFatal,
+        }),
+      ).resolves.toBe(true);
+
+      expect(checkpointAttempts).toBe(1);
+      expect(onDegraded).toHaveBeenCalledTimes(1);
+      expect(onRecovered).toHaveBeenCalledTimes(1);
+      expect(onFatal).not.toHaveBeenCalled();
+    } finally {
+      dateNow.mockRestore();
+    }
   });
 
   it("fails immediately on non-retriable durable errors", async () => {
@@ -147,8 +246,7 @@ describe("persistInterruptionCheckpoint", () => {
         sessionId: "checkpoint_conflict_session" as SessionId,
         turnId: "checkpoint_conflict_turn" as TurnId,
         cause: "barge_in",
-        recoveryDeadlineMs: Date.now() + policy.persistenceRecoveryGraceMs,
-        onDegraded: vi.fn(),
+        onDegraded: () => Date.now() + policy.persistenceRecoveryGraceMs,
         onRecovered: vi.fn(),
         onFatal,
       }),
