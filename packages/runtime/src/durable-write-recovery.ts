@@ -9,6 +9,7 @@ import {
   timeoutError,
 } from "@tvic/core";
 import type {
+  EndTurnRequest,
   NormalizedError,
   Runtime,
   SessionId,
@@ -133,6 +134,63 @@ export class DurableWriteRecovery {
     });
   }
 
+  async recoverTurnStatus(
+    turnId: TurnId,
+    status: "thinking" | "calling_tool" | "speaking",
+    recoveryDeadline: number,
+  ): Promise<boolean> {
+    while (Date.now() < recoveryDeadline) {
+      const pendingWrites = [...this.#pendingPersistenceWriteSettlements];
+      if (pendingWrites.length > 0) {
+        const settlement = await settleBy(
+          () => Promise.all(pendingWrites).then(() => undefined),
+          recoveryDeadline,
+        );
+        if (settlement.status === "timeout") return false;
+        for (const pendingWrite of pendingWrites) {
+          this.#pendingPersistenceWriteSettlements.delete(pendingWrite);
+        }
+      }
+
+      const inspection = await settleBy(
+        () => this.#options.runtime.inspectSession(this.#options.sessionId),
+        recoveryDeadline,
+      );
+      if (inspection.status !== "completed") return false;
+      const persisted = inspection.value.turns.find((candidate) => candidate.id === turnId);
+      if (!persisted || isTerminalTurn(persisted)) return false;
+      if (persisted.status === status) return true;
+      if (persisted.status !== "started") return false;
+
+      const statusWriteOperation = this.#options.runtime.updateTurnStatus(
+        this.#options.sessionId,
+        turnId,
+        status,
+      );
+      const statusWrite = await settleBy(() => statusWriteOperation, recoveryDeadline);
+      if (statusWrite.status === "completed") return statusWrite.value.status === status;
+      if (statusWrite.status === "timeout") {
+        const pendingSettlement = statusWriteOperation.then(
+          () => undefined,
+          async (error: unknown) => {
+            this.onWriteFailure("turn_status_recovery", error);
+            const lateSettlement = criticalWriteLateSettlement(error);
+            if (lateSettlement) await lateSettlement;
+          },
+        );
+        this.#trackPendingPersistenceSettlement(pendingSettlement);
+        return false;
+      }
+      this.onWriteFailure("turn_status_recovery", statusWrite.error);
+      if (!isRetryablePersistenceFailure(statusWrite.error)) return false;
+
+      const remainingMs = recoveryDeadline - Date.now();
+      if (remainingMs <= 0) return false;
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, remainingMs)));
+    }
+    return false;
+  }
+
   onInterrupt(turnId: TurnId, cause: TurnCancellationReason): Promise<boolean> {
     const checkpoint = persistInterruptionCheckpoint({
       runtime: this.#options.runtime,
@@ -160,6 +218,7 @@ export class DurableWriteRecovery {
     recoveryDeadline: number,
     expectedStatus?: Turn["status"],
     lateTurnId?: Promise<TurnId | undefined>,
+    terminalRequest?: EndTurnRequest,
   ): Promise<TerminalTurn | null> {
     const deadline = recoveryDeadline;
     const criticalWriteTimeoutMs =
@@ -213,10 +272,11 @@ export class DurableWriteRecovery {
         ) {
           const terminalization = await settleBy(
             () =>
-              this.#options.runtime.endTurn(this.#options.sessionId, candidateTurnId!, {
-                reason: "failed",
-                error: failure,
-              }),
+              this.#options.runtime.endTurn(
+                this.#options.sessionId,
+                candidateTurnId!,
+                terminalRequest ?? { reason: "failed", error: failure },
+              ),
             deadline,
           );
           if (terminalization.status === "completed" && isTerminalTurn(terminalization.value)) {
@@ -378,7 +438,12 @@ export class DurableWriteRecovery {
 
   #trackPendingPersistenceWrite(error: unknown): void {
     const pendingWrite = criticalWriteLateSettlement(error);
-    if (!pendingWrite || this.#pendingPersistenceWriteSettlements.has(pendingWrite)) return;
+    if (!pendingWrite) return;
+    this.#trackPendingPersistenceSettlement(pendingWrite);
+  }
+
+  #trackPendingPersistenceSettlement(pendingWrite: Promise<unknown>): void {
+    if (this.#pendingPersistenceWriteSettlements.has(pendingWrite)) return;
     this.#pendingPersistenceWriteSettlements.add(pendingWrite);
     void pendingWrite.then(
       () => this.#pendingPersistenceWriteSettlements.delete(pendingWrite),

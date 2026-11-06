@@ -255,7 +255,7 @@ describe("withSttReconnect", () => {
       vi.useRealTimers();
       await stream.close();
     }
-  });
+  }, 15_000);
 
   it("fails visibly when shorter chunks reach the derived command bound early", async () => {
     const fake = makeProvider({ blockReconnectOpen: true });

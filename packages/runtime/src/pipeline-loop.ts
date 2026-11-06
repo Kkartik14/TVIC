@@ -20,6 +20,7 @@ import type {
   AgentProviders,
   AudioTapSummary,
   CallHandle,
+  EndTurnRequest,
   IdGenerator,
   InputAudioChunk,
   Memory,
@@ -1335,26 +1336,41 @@ export class PipelineVoiceLoop {
         isBackendUnavailableError(error) && (turn !== undefined || lateTurnId !== undefined);
       const generation = this.#durableWriteRecovery.onWriteFailure("turn_start", error, canRecover);
       const failure = this.#durableWriteRecovery.lastFailure!;
-      this.#turnsFailed += 1;
-      this.#firstTurnError ??= failure;
       const recoveryDeadline = canRecover
         ? (this.#durableWriteRecovery.recoveryDeadlineMs ??
           this.#durableWriteRecovery.beginRecoveryWindow())
         : Date.now();
-      const terminal = await this.#durableWriteRecovery.recoverFailedTurn(
-        failure,
-        turn?.id,
-        recoveryDeadline,
-        turn ? "thinking" : undefined,
-        lateTurnId,
-      );
-      if (terminal) {
+      const recoveredStatus =
+        turn && canRecover
+          ? await this.#durableWriteRecovery.recoverTurnStatus(
+              turn.id,
+              "thinking",
+              recoveryDeadline,
+            )
+          : false;
+      if (recoveredStatus) {
         this.#durableWriteRecovery.recoverNonCheckpoint(generation);
       } else {
-        await this.#durableWriteRecovery.endSessionAfterPersistenceFailure(failure);
+        const terminal = await this.#durableWriteRecovery.recoverFailedTurn(
+          failure,
+          turn?.id,
+          recoveryDeadline,
+          turn ? "thinking" : undefined,
+          lateTurnId,
+        );
+        if (terminal) {
+          this.#durableWriteRecovery.recoverNonCheckpoint(generation);
+          if (terminal.status === "failed") {
+            this.#turnsFailed += 1;
+            this.#firstTurnError ??= terminal.error;
+          }
+        } else {
+          await this.#durableWriteRecovery.endSessionAfterPersistenceFailure(failure);
+        }
+        return;
       }
-      return;
     }
+    if (!turn) return;
     this.#turnsHandled += 1;
 
     const startedAtMs = timing.endpointAtMs;
@@ -1398,6 +1414,8 @@ export class PipelineVoiceLoop {
       isFinal: true,
     });
     let terminalWriteMayBeLate = false;
+    let terminalWriteRequest: EndTurnRequest | undefined;
+    let interruptedTurnRecorded = false;
     const detachControlSignal = linkAbortSignal(this.#effectiveSignal(), control.abort);
     const detachAttachmentClear = this.#options.attachment?.signal
       ? (() => {
@@ -1572,20 +1590,26 @@ export class PipelineVoiceLoop {
           latency.interruptionTailMs = control.interruptionTailMs;
         }
         let terminal: TerminalTurn;
+        const cancelledRequest: EndTurnRequest = {
+          reason: "cancelled",
+          cancelReason: control.interruptedAtMs !== null ? control.cancelReason : "not_heard",
+          output: {
+            text: finalText,
+            mediaEventIds: [],
+            delivery: turnOutputDelivery(control, textDelivered),
+          },
+          toolCallIds,
+          latency,
+        };
         try {
-          terminal = await this.#options.runtime.endTurn(this.#options.session.id, turn.id, {
-            reason: "cancelled",
-            cancelReason: control.interruptedAtMs !== null ? control.cancelReason : "not_heard",
-            output: {
-              text: finalText,
-              mediaEventIds: [],
-              delivery: turnOutputDelivery(control, textDelivered),
-            },
-            toolCallIds,
-            latency,
-          });
+          terminal = await this.#options.runtime.endTurn(
+            this.#options.session.id,
+            turn.id,
+            cancelledRequest,
+          );
         } catch (error) {
           terminalWriteMayBeLate = isBackendUnavailableError(error);
+          terminalWriteRequest = cancelledRequest;
           this.#durableWriteRecovery.onWriteFailure("turn_terminal", error);
           throw error;
         }
@@ -1614,6 +1638,7 @@ export class PipelineVoiceLoop {
         if (control.interruptedAtMs !== null && control.cancelReason === "barge_in") {
           const memoryText = interruptedText || finalText;
           this.#policy.recordInterruptedTurn(transcript, memoryText);
+          interruptedTurnRecorded = true;
           await this.#updateMemory(turn.id, transcript, memoryText, true).catch(() => undefined);
         }
         this.#observeTerminalTurn({
@@ -1632,19 +1657,25 @@ export class PipelineVoiceLoop {
       }
 
       let terminal: TerminalTurn;
+      const completedRequest: EndTurnRequest = {
+        reason: "completed",
+        output: {
+          text: finalText,
+          mediaEventIds: [],
+          delivery: turnOutputDelivery(control, textDelivered),
+        },
+        toolCallIds,
+        latency,
+      };
       try {
-        terminal = await this.#options.runtime.endTurn(this.#options.session.id, turn.id, {
-          reason: "completed",
-          output: {
-            text: finalText,
-            mediaEventIds: [],
-            delivery: turnOutputDelivery(control, textDelivered),
-          },
-          toolCallIds,
-          latency,
-        });
+        terminal = await this.#options.runtime.endTurn(
+          this.#options.session.id,
+          turn.id,
+          completedRequest,
+        );
       } catch (error) {
         terminalWriteMayBeLate = isBackendUnavailableError(error);
+        terminalWriteRequest = completedRequest;
         this.#durableWriteRecovery.onWriteFailure("turn_terminal", error);
         throw error;
       }
@@ -1720,6 +1751,9 @@ export class PipelineVoiceLoop {
               turn.id,
               this.#durableWriteRecovery.recoveryDeadlineMs ??
                 this.#durableWriteRecovery.beginRecoveryWindow(),
+              undefined,
+              undefined,
+              terminalWriteRequest,
             )) ?? undefined;
         } else {
           const terminalization = await settleBy(
@@ -1778,6 +1812,18 @@ export class PipelineVoiceLoop {
       if (terminal && terminal.status !== "failed") {
         if (terminal.status === "completed") {
           this.#policy.recordTurn(transcript, finalText);
+        } else if (
+          terminal.status === "cancelled" &&
+          control.interruptedAtMs !== null &&
+          control.cancelReason === "barge_in" &&
+          !interruptedTurnRecorded
+        ) {
+          const interruptedText =
+            control.alignedDurationMs > 0 ? alignedTextForHistory(control) : "";
+          const memoryText = interruptedText || finalText;
+          this.#policy.recordInterruptedTurn(transcript, memoryText);
+          interruptedTurnRecorded = true;
+          await this.#updateMemory(turn.id, transcript, memoryText, true).catch(() => undefined);
         }
         this.#recordTerminalObservation({
           turn,
