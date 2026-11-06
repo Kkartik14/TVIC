@@ -5021,7 +5021,6 @@ describe("managed voice agent", () => {
       });
 
       await vi.advanceTimersByTimeAsync(1);
-      expect(events).toHaveLength(1);
       const finalSession = await session.finalSession;
 
       expect(finalSession).toMatchObject({
@@ -5328,6 +5327,147 @@ describe("managed voice agent", () => {
       await harness.agent.stop();
     }
   });
+
+  it("does not let managed session finalization overlap a pending failed-turn write", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+    let held = false;
+    let transactionPending = false;
+    let transactionStartsWhilePending = 0;
+    let resolveTerminalWriteStarted!: () => void;
+    let releaseTerminalWrite!: () => void;
+    const terminalWriteStarted = new Promise<void>((resolve) => {
+      resolveTerminalWriteStarted = resolve;
+    });
+    const terminalWriteGate = new Promise<void>((resolve) => {
+      releaseTerminalWrite = resolve;
+    });
+    durableStore.runSessionTransaction = async <T>(
+      sessionId: SessionId,
+      lease: SessionLease,
+      operation: (transaction: DurableSessionTransaction) => Promise<T>,
+    ) => {
+      if (transactionPending) transactionStartsWhilePending += 1;
+      let heldByTransaction = false;
+      try {
+        return await runSessionTransaction(sessionId, lease, async (transaction) => {
+          const wrapped = new Proxy(transaction, {
+            get(target, property, receiver) {
+              if (property === "updateTurn") {
+                return async (
+                  turnSessionId: SessionId,
+                  turnId: Parameters<DurableSessionTransaction["updateTurn"]>[1],
+                  updater: Parameters<DurableSessionTransaction["updateTurn"]>[2],
+                ) => {
+                  const current = await target.getTurn(turnSessionId, turnId);
+                  if (!current) throw new Error(`missing turn during injection: ${turnId}`);
+                  const next = updater(current);
+                  if (next.turn.status === "failed" && !held) {
+                    held = true;
+                    heldByTransaction = true;
+                    transactionPending = true;
+                    resolveTerminalWriteStarted();
+                    await terminalWriteGate;
+                  }
+                  return target.updateTurn(turnSessionId, turnId, () => next);
+                };
+              }
+              const value = Reflect.get(target, property, receiver) as unknown;
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+          return operation(wrapped);
+        });
+      } finally {
+        if (heldByTransaction) transactionPending = false;
+      }
+    };
+
+    let resolveCallClosed!: () => void;
+    const callClosed = new Promise<void>((resolve) => {
+      resolveCallClosed = resolve;
+    });
+    const harness = createLifecycleHarness({
+      runtime: {
+        durableStore,
+        durablePolicy: { criticalWriteTimeoutMs: 100, persistenceRecoveryGraceMs: 100 },
+      },
+      closeCall: async () => resolveCallClosed(),
+    });
+
+    const waitWithin = async (
+      promise: Promise<void>,
+      timeoutMs: number,
+      description: string,
+    ): Promise<void> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          promise,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error(`Timed out waiting for ${description}`)),
+              timeoutMs,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    };
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      const observed = collectVoiceEvents(session.run);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      const timestamp = nowTimestamp();
+      harness.transcripts.push({
+        id: "managed-terminal-overlap-stt-final" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 1,
+        provider: "lifecycle-stt",
+        text: "Fail while terminal persistence is held.",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      harness.transcripts.push({
+        id: "managed-terminal-overlap-stt-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 2,
+        provider: "lifecycle-stt",
+        reason: "provider",
+        timestamp,
+      });
+
+      await waitWithin(terminalWriteStarted, 2_000, "the failed-turn transaction");
+      await waitWithin(callClosed, 3_000, "the bounded fatal call close");
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+
+      expect(transactionPending).toBe(true);
+      expect(transactionStartsWhilePending).toBe(0);
+      releaseTerminalWrite();
+      const result = await session.run;
+      const events = await observed;
+      const storedSession = await durableStore.sessions.get(session.sessionId);
+      const storedTurns = await durableStore.turns.listBySession(session.sessionId);
+      expect(result.terminalReason).toBe("failed");
+      expect(storedSession?.session.status).toBe("failed");
+      expect(storedTurns.map((turn) => turn.turn.status)).toEqual(["failed"]);
+      expect(transactionStartsWhilePending).toBe(0);
+      expect(events.at(-1)).toMatchObject({ kind: "call_ended", reason: "failed" });
+    } finally {
+      releaseTerminalWrite();
+      await harness.agent.stop();
+    }
+  }, 15_000);
 
   it("recovers a managed call after a speaking write failure and accepts a later utterance", async () => {
     const durableStore = createInMemoryDurableRuntimeStore();

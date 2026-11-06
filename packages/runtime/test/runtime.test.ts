@@ -1430,6 +1430,8 @@ describe("createRuntime", () => {
     });
     const baseStore = createInMemoryDurableRuntimeStore();
     let holdFirstWrite = true;
+    let firstWritePending = false;
+    let overlappingRetry = false;
     let retryCount = 0;
     const durableStore: DurableRuntimeStore = {
       ...baseStore,
@@ -1440,11 +1442,13 @@ describe("createRuntime", () => {
       ): Promise<T> {
         if (!holdFirstWrite) return baseStore.runSessionTransaction(sessionId, lease, operation);
         holdFirstWrite = false;
+        firstWritePending = true;
         signalFirstWriteStarted();
         try {
           await firstWriteGate;
           throw new Error("late terminal write failed");
         } finally {
+          firstWritePending = false;
           signalFirstWriteSettled();
         }
       },
@@ -1452,8 +1456,11 @@ describe("createRuntime", () => {
         sessionId: SessionId,
         operation: (tx: DurableSessionTransaction) => Promise<T>,
       ): Promise<T> {
+        if (firstWritePending) {
+          overlappingRetry = true;
+          throw new Error("overlapping terminal session write");
+        }
         retryCount += 1;
-        if (retryCount === 1) throw new Error("retry terminal write failed");
         return baseStore.runUnfencedSessionTransaction!(sessionId, operation);
       },
     };
@@ -1489,16 +1496,25 @@ describe("createRuntime", () => {
       await firstWriteStarted;
       await vi.advanceTimersByTimeAsync(1);
       await firstEndRejected;
-      await expect(
-        runtime.endSession(attachment.session.id, { reason: "completed" }),
-      ).rejects.toThrow("retry terminal write failed");
+      const retryBeforeLateSettlement = runtime.endSession(attachment.session.id, {
+        reason: "completed",
+      });
+      const retryRejected = expect(retryBeforeLateSettlement).rejects.toThrow(
+        "Session terminalization did not reach its write phase within 1ms",
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      await retryRejected;
+      expect(retryCount).toBe(0);
+      expect(overlappingRetry).toBe(false);
 
       releaseFirstWrite();
       await firstWriteSettled;
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1);
       const retriedEnd = runtime.endSession(attachment.session.id, { reason: "completed" });
       await vi.advanceTimersByTimeAsync(1);
       await retriedEnd;
+      expect(retryCount).toBe(1);
+      expect(overlappingRetry).toBe(false);
       const event = events[0];
 
       expect(events).toHaveLength(1);

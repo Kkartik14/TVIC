@@ -229,7 +229,10 @@ export class DurableWriteRecovery {
     let candidateTurnId = turnId;
     if (!candidateTurnId && lateTurnId) {
       const lateStart = await settleBy(() => lateTurnId, deadline);
-      if (lateStart.status === "timeout") return null;
+      if (lateStart.status === "timeout") {
+        this.#trackPendingPersistenceSettlement(lateTurnId);
+        return null;
+      }
       if (lateStart.status === "completed") candidateTurnId = lateStart.value;
     }
     if (!candidateTurnId) return null;
@@ -269,19 +272,39 @@ export class DurableWriteRecovery {
           !terminalWriteRetryDisabled &&
           Date.now() >= nextTerminalWriteAttemptAt
         ) {
-          const terminalization = await settleBy(
-            () =>
-              this.#options.runtime.endTurn(
-                this.#options.sessionId,
-                candidateTurnId!,
-                terminalRequest ?? { reason: "failed", error: failure },
-              ),
-            deadline,
-          );
-          if (terminalization.status === "completed" && isTerminalTurn(terminalization.value)) {
-            return terminalization.value;
+          let terminalizationOperation: Promise<TerminalTurn>;
+          try {
+            terminalizationOperation = this.#options.runtime.endTurn(
+              this.#options.sessionId,
+              candidateTurnId!,
+              terminalRequest ?? { reason: "failed", error: failure },
+            );
+          } catch (error) {
+            this.onWriteFailure("turn_terminal", error);
+            if (isBackendUnavailableError(error) && !isCriticalWriteTimeoutError(error)) {
+              nextTerminalWriteAttemptAt = Date.now() + 25;
+            } else {
+              terminalWriteRetryDisabled = true;
+            }
+            continue;
           }
-          if (terminalization.status === "rejected") {
+
+          const terminalization = await settleBy(() => terminalizationOperation, deadline);
+          if (terminalization.status === "completed") {
+            if (isTerminalTurn(terminalization.value)) return terminalization.value;
+          } else if (terminalization.status === "timeout") {
+            const pendingSettlement = terminalizationOperation.then(
+              () => undefined,
+              async (error: unknown) => {
+                this.onWriteFailure("turn_terminal", error);
+                const lateSettlement = criticalWriteLateSettlement(error);
+                if (lateSettlement) await lateSettlement;
+              },
+            );
+            this.#trackPendingPersistenceSettlement(pendingSettlement);
+            terminalWriteRetryDisabled = true;
+            break;
+          } else {
             this.onWriteFailure("turn_terminal", terminalization.error);
             if (
               isBackendUnavailableError(terminalization.error) &&
@@ -291,9 +314,6 @@ export class DurableWriteRecovery {
             } else {
               terminalWriteRetryDisabled = true;
             }
-          }
-          if (terminalization.status === "timeout") {
-            break;
           }
         }
       }
@@ -313,6 +333,25 @@ export class DurableWriteRecovery {
     if (this.#persistenceSessionEnding) return;
     this.#persistenceSessionEnding = true;
     this.#options.onSessionFailure(failure);
+    if (pendingCheckpointWrite) {
+      this.#trackPendingPersistenceSettlement(pendingCheckpointWrite);
+      void pendingCheckpointWrite.catch((error: unknown) =>
+        this.#trackPendingPersistenceWrite(error),
+      );
+    }
+
+    let initialSessionEnd: Promise<Awaited<ReturnType<Runtime["endSession"]>>>;
+    try {
+      initialSessionEnd = this.#options.runtime.endSession(this.#options.sessionId, {
+        reason: "failed",
+        error: failure,
+        terminalSource: "runtime_recovery",
+      });
+    } catch (error) {
+      initialSessionEnd = Promise.reject(error);
+    }
+    const terminalizationPromise = this.#terminalizeFailedSession(failure, initialSessionEnd);
+
     const criticalWriteTimeoutMs =
       this.#options.runtime.durablePolicy?.criticalWriteTimeoutMs ?? 2_000;
     const closeResult = await settleBy(
@@ -335,37 +374,45 @@ export class DurableWriteRecovery {
       this.#options.emitError(closeError, false);
       this.#options.abortRun(closeError);
     }
-    if (pendingCheckpointWrite) {
-      void pendingCheckpointWrite.catch((error: unknown) =>
-        this.#trackPendingPersistenceWrite(error),
-      );
-      const checkpointSettlement = await settleBy(
-        () => pendingCheckpointWrite,
-        Date.now() + criticalWriteTimeoutMs,
-      );
-      if (checkpointSettlement.status === "rejected") {
-        this.#trackPendingPersistenceWrite(checkpointSettlement.error);
-      }
-    }
-    const pendingWrites = [...this.#pendingPersistenceWriteSettlements];
-    if (pendingWrites.length > 0) {
-      await settleBy(
-        () => Promise.all(pendingWrites).then(() => undefined),
-        Date.now() + criticalWriteTimeoutMs,
+    const terminalization = await terminalizationPromise;
+    if (!terminalization.confirmed) {
+      this.#emitSessionTerminalizationUnconfirmed(
+        failure,
+        terminalization.outcome,
+        terminalization.deferred,
       );
     }
+  }
+
+  async #terminalizeFailedSession(
+    failure: NormalizedError,
+    initialAttempt: Promise<Awaited<ReturnType<Runtime["endSession"]>>>,
+  ): Promise<{
+    readonly outcome?: string;
+    readonly confirmed: boolean;
+    readonly deferred: boolean;
+  }> {
+    const criticalWriteTimeoutMs =
+      this.#options.runtime.durablePolicy?.criticalWriteTimeoutMs ?? 2_000;
     const terminalizationDeadline = Date.now() + criticalWriteTimeoutMs;
     let terminalizationOutcome: string | undefined;
     let terminalizationConfirmed = false;
+    let deferred = false;
+    let nextAttempt: Promise<Awaited<ReturnType<Runtime["endSession"]>>> | undefined =
+      initialAttempt;
     while (Date.now() < terminalizationDeadline) {
-      const terminalization = await settleBy(
-        () =>
+      const terminalization = await settleBy(() => {
+        const attempt = nextAttempt;
+        nextAttempt = undefined;
+        return (
+          attempt ??
           this.#options.runtime.endSession(this.#options.sessionId, {
             reason: "failed",
             error: failure,
-          }),
-        terminalizationDeadline,
-      );
+            terminalSource: "runtime_recovery",
+          })
+        );
+      }, terminalizationDeadline);
       if (terminalization.status === "completed") {
         terminalizationOutcome = terminalization.value.status;
         terminalizationConfirmed =
@@ -373,33 +420,48 @@ export class DurableWriteRecovery {
           terminalization.value.error.code === failure.code;
         break;
       }
-      if (terminalization.status === "timeout") break;
+      if (terminalization.status === "timeout") {
+        deferred = true;
+        break;
+      }
       if (
         isCriticalWriteTimeoutError(terminalization.error) ||
         !isBackendUnavailableError(terminalization.error)
       ) {
+        deferred = isCriticalWriteTimeoutError(terminalization.error);
         break;
       }
       const remainingMs = terminalizationDeadline - Date.now();
       if (remainingMs <= 0) break;
       await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, remainingMs)));
     }
-    if (!terminalizationConfirmed) {
-      this.#options.emitError(
-        {
-          ...failure,
-          message: "The failed session outcome was not confirmed in durable storage",
-          metadata: {
-            ...(failure.metadata ?? {}),
-            sessionTerminalizationConfirmed: false,
-            ...(terminalizationOutcome
-              ? { sessionTerminalizationOutcome: terminalizationOutcome }
-              : {}),
-          },
+    return {
+      ...(terminalizationOutcome ? { outcome: terminalizationOutcome } : {}),
+      confirmed: terminalizationConfirmed,
+      deferred,
+    };
+  }
+
+  #emitSessionTerminalizationUnconfirmed(
+    failure: NormalizedError,
+    terminalizationOutcome?: string,
+    deferred = false,
+  ): void {
+    this.#options.emitError(
+      {
+        ...failure,
+        message: "The failed session outcome was not confirmed in durable storage",
+        metadata: {
+          ...(failure.metadata ?? {}),
+          sessionTerminalizationConfirmed: false,
+          ...(terminalizationOutcome
+            ? { sessionTerminalizationOutcome: terminalizationOutcome }
+            : {}),
+          ...(deferred ? { sessionTerminalizationDeferred: true } : {}),
         },
-        false,
-      );
-    }
+      },
+      false,
+    );
   }
 
   beginRecoveryWindow(): number {

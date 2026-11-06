@@ -75,6 +75,8 @@ import {
   attachmentView,
   buildSession,
   criticalWrite,
+  criticalWriteLateSettlement,
+  criticalWriteTimeoutError,
   detachAttachment,
   drainFinalizers,
   durableEvent,
@@ -105,6 +107,7 @@ import {
 } from "./runtime-shutdown.js";
 import { RuntimeObservationCoordinator } from "./runtime-observation.js";
 import { registerRuntimeObservationWriter } from "./runtime-observation-capability.js";
+import { settleBy } from "./async-control.js";
 import {
   durationForTerminalTurn,
   persistSessionEnd,
@@ -126,6 +129,11 @@ interface RuntimeDetachOptions {
   readonly preserveSessionClockForPendingWrite?: boolean;
   readonly preserveHealth?: boolean;
   readonly usageDisposition?: "discard" | "reattachment" | "retry";
+}
+
+interface SessionEndOperation {
+  readonly operation: Promise<TerminalSession>;
+  readonly terminalWriteReady: Promise<void>;
 }
 
 export class InMemoryRuntime implements Runtime {
@@ -163,7 +171,10 @@ export class InMemoryRuntime implements Runtime {
     SessionId,
     { promise: Promise<void>; discardAudioTapSummaryOnFinish: boolean }
   >();
-  readonly #sessionEndOperations = new Map<SessionId, Promise<TerminalSession>>();
+  readonly #sessionEndOperations = new Map<SessionId, SessionEndOperation>();
+  readonly #runtimeRecoverySessionEnds = new Set<SessionId>();
+  readonly #pendingSessionWriteSettlements = new Map<SessionId, Set<Promise<void>>>();
+  readonly #pendingLateSessionEndSettlements = new Map<SessionId, Set<Promise<void>>>();
   readonly #pendingLateSessionEndWrites = new Map<SessionId, number>();
   readonly #sessionEndsBeingFinished = new Set<SessionId>();
   readonly #inFlightFinalizers = new Set<Promise<unknown>>();
@@ -429,7 +440,14 @@ export class InMemoryRuntime implements Runtime {
       this.#pipelineRunKeysBySession.clear();
     }
     await drainFinalizers(this.#inFlightFinalizers);
-    await Promise.all([...this.#attachments.keys()].map((sessionId) => this.#detach(sessionId)));
+    // A recovery terminalization may be waiting on a late write; let it persist and detach before
+    // releasing the session's fencing lease.
+    const attachmentsToDetach = [...this.#attachments.keys()].filter(
+      (sessionId) =>
+        !this.#runtimeRecoverySessionEnds.has(sessionId) &&
+        !this.#pendingLateSessionEndWrites.has(sessionId),
+    );
+    await Promise.all(attachmentsToDetach.map((sessionId) => this.#detach(sessionId)));
     const finalizersDrained = await drainFinalizers(this.#inFlightFinalizers);
     if (!finalizersDrained && this.#inFlightFinalizers.size > 0) {
       void waitForFinalizersAndClose(
@@ -438,9 +456,11 @@ export class InMemoryRuntime implements Runtime {
           this.#sessionStartMs.clear();
           this.#endedPipelineSessions.clear();
           this.#pendingLateSessionEndWrites.clear();
+          this.#pendingLateSessionEndSettlements.clear();
           this.#sessionClocksPendingCleanup.clear();
           this.#pipelineRunKeysBySession.clear();
           this.#finalizingSessionStartMs.clear();
+          this.#runtimeRecoverySessionEnds.clear();
           this.#sessionEndCoordinator.disableUsageRetries();
         },
         async () => {
@@ -455,9 +475,11 @@ export class InMemoryRuntime implements Runtime {
     this.#sessionStartMs.clear();
     this.#endedPipelineSessions.clear();
     this.#pendingLateSessionEndWrites.clear();
+    this.#pendingLateSessionEndSettlements.clear();
     this.#sessionClocksPendingCleanup.clear();
     this.#pipelineRunKeysBySession.clear();
     this.#finalizingSessionStartMs.clear();
+    this.#runtimeRecoverySessionEnds.clear();
     this.#sessionEndCoordinator.disableUsageRetries();
     await this.#shutdownObservations();
     await closeRuntimeDurableStore(this.#durableStoreOwnership, this.#durableStore);
@@ -519,24 +541,55 @@ export class InMemoryRuntime implements Runtime {
   }
 
   async endSession(id: SessionId, request: EndSessionRequest): Promise<TerminalSession> {
-    this.#assertTerminalWriteAllowed();
     const existing = this.#sessionEndOperations.get(id);
-    if (existing) return existing;
-    const operation = trackFinalizer(this.#inFlightFinalizers, this.#endSession(id, request));
-    this.#sessionEndOperations.set(id, operation);
-    void operation.then(
-      () => {
-        if (this.#sessionEndOperations.get(id) === operation) {
-          this.#sessionEndOperations.delete(id);
-        }
-      },
-      () => {
-        if (this.#sessionEndOperations.get(id) === operation) {
-          this.#sessionEndOperations.delete(id);
-        }
-      },
+    if (existing) return this.#awaitSessionEnd(existing);
+    this.#assertTerminalWriteAllowed();
+    const attachment = this.#attachments.get(id);
+    const runtimeRecovery =
+      request.reason === "failed" && request.terminalSource === "runtime_recovery";
+    if (runtimeRecovery) this.#runtimeRecoverySessionEnds.add(id);
+    if (
+      request.reason !== "completed" &&
+      !(request.reason === "failed" && request.terminalSource === "runtime_recovery")
+    ) {
+      this.#cancelPipelineRuns(id);
+    }
+    let markTerminalWriteReady!: () => void;
+    const terminalWriteReady = new Promise<void>((resolve) => {
+      markTerminalWriteReady = resolve;
+    });
+    const operation = trackFinalizer(
+      this.#inFlightFinalizers,
+      this.#endSessionAfterPendingSessionWrites(id, request, attachment, () =>
+        markTerminalWriteReady(),
+      ),
     );
-    return operation;
+    const trackedOperation: SessionEndOperation = { operation, terminalWriteReady };
+    this.#sessionEndOperations.set(id, trackedOperation);
+    const clearOperation = (): void => {
+      if (this.#sessionEndOperations.get(id) === trackedOperation) {
+        this.#sessionEndOperations.delete(id);
+      }
+      if (runtimeRecovery) this.#runtimeRecoverySessionEnds.delete(id);
+    };
+    void operation.then(clearOperation, clearOperation);
+    return this.#awaitSessionEnd(trackedOperation);
+  }
+
+  async #awaitSessionEnd(endOperation: SessionEndOperation): Promise<TerminalSession> {
+    const timeoutMs = this.#policy.criticalWriteTimeoutMs;
+    const settlement = await settleBy(
+      () => endOperation.terminalWriteReady,
+      Date.now() + timeoutMs,
+    );
+    if (settlement.status === "rejected") throw settlement.error;
+    if (settlement.status === "timeout") {
+      throw criticalWriteTimeoutError(
+        timeoutMs,
+        `Session terminalization did not reach its write phase within ${timeoutMs}ms`,
+      );
+    }
+    return endOperation.operation;
   }
 
   reportAudioTapSummary(id: SessionId, summary: AudioTapSummary): void {
@@ -581,35 +634,88 @@ export class InMemoryRuntime implements Runtime {
     this.#sessionEndCoordinator.discardUsage(id);
   }
 
-  async #endSession(id: SessionId, request: EndSessionRequest): Promise<TerminalSession> {
+  async #endSession(
+    id: SessionId,
+    request: EndSessionRequest,
+    attachment: RuntimeAttachmentState | undefined,
+    onTerminalWriteReady: () => void,
+  ): Promise<TerminalSession> {
     this.#sessionEndCoordinator.beginUsageFinalization(id);
     this.#sessionEndCoordinator.freezeUsageBeforeDetach(id);
     let usageRetainedForLateWrite = false;
+    let terminalWriteReady = false;
+    const markTerminalWriteReady = (): void => {
+      if (terminalWriteReady) return;
+      terminalWriteReady = true;
+      onTerminalWriteReady();
+    };
     try {
-      return await this.#endSessionAttempt(id, request, () => {
-        if (!usageRetainedForLateWrite) {
-          usageRetainedForLateWrite = true;
-          this.#sessionEndCoordinator.retainUsageForLateWrite(id);
-        }
-      });
+      return await this.#endSessionAttempt(
+        id,
+        request,
+        attachment,
+        () => {
+          if (!usageRetainedForLateWrite) {
+            usageRetainedForLateWrite = true;
+            this.#sessionEndCoordinator.retainUsageForLateWrite(id);
+          }
+        },
+        markTerminalWriteReady,
+      );
+    } catch (error) {
+      markTerminalWriteReady();
+      throw error;
     } finally {
       this.#sessionEndCoordinator.endUsageFinalization(id);
     }
   }
 
+  async #endSessionAfterPendingSessionWrites(
+    id: SessionId,
+    request: EndSessionRequest,
+    attachment: RuntimeAttachmentState | undefined,
+    onTerminalWriteReady: () => void,
+  ): Promise<TerminalSession> {
+    while (true) {
+      const pendingWrites = [
+        ...(this.#pendingSessionWriteSettlements.get(id) ?? []),
+        ...(this.#pendingLateSessionEndSettlements.get(id) ?? []),
+      ];
+      if (pendingWrites.length > 0) {
+        await Promise.all(pendingWrites);
+        continue;
+      }
+      const waitsForLeaseLossDetach =
+        request.terminalSource === "remote_transport" &&
+        attachment !== undefined &&
+        attachment.health !== "healthy" &&
+        attachment.health !== "persistence_degraded";
+      if (waitsForLeaseLossDetach && this.#attachmentStarts.has(id)) {
+        await this.#attachmentStarts.waitForIdle(id);
+        continue;
+      }
+      break;
+    }
+    const terminalAttachment =
+      attachment?.health === "lease_lost" ? undefined : (attachment ?? this.#attachments.get(id));
+    return this.#endSession(id, request, terminalAttachment, onTerminalWriteReady);
+  }
+
   async #endSessionAttempt(
     id: SessionId,
     request: EndSessionRequest,
+    attachment: RuntimeAttachmentState | undefined,
     onLateWritePending: () => void,
+    onTerminalWriteReady: () => void,
   ): Promise<TerminalSession> {
     await this.#failedSessionEndCleanups.get(id)?.promise;
-    const attachment = this.#attachments.get(id);
     const lease = attachment?.lease;
     const record = await this.#sessionStore.get(id);
     if (!record) {
       throw new RecordNotFoundError(`session:${id}`);
     }
     if (isTerminalSession(record.session)) {
+      onTerminalWriteReady();
       const usage = this.#sessionEndCoordinator.freezeUsageBeforeDetach(id);
       if (usage) {
         await this.#finishClaimedSessionEnd(record.session, attachment, []);
@@ -625,12 +731,22 @@ export class InMemoryRuntime implements Runtime {
     ) {
       throw new LeaseUnavailableError(`Session attachment is in progress: ${id}`);
     }
-    if (request.reason !== "completed") this.#cancelPipelineRuns(id);
+    onTerminalWriteReady();
+    if (
+      request.reason !== "completed" &&
+      !(request.reason === "failed" && request.terminalSource === "runtime_recovery")
+    ) {
+      this.#cancelPipelineRuns(id);
+    }
     const now = this.#clock.now();
     let persisted: PersistedSessionEnd | undefined;
     let lateEndPending = false;
     let ownsLateEndWrite = false;
     let releaseLateWriteAdmission: (() => void) | undefined;
+    let resolveLateSessionEndSettlement!: () => void;
+    const lateSessionEndSettlement = new Promise<void>((resolve) => {
+      resolveLateSessionEndSettlement = resolve;
+    });
     const onWriteTimeout = (): void => {
       onLateWritePending();
       this.#sessionEndCoordinator.freezeUsageBeforeDetach(id);
@@ -640,6 +756,12 @@ export class InMemoryRuntime implements Runtime {
         id,
         (this.#pendingLateSessionEndWrites.get(id) ?? 0) + 1,
       );
+      let settlements = this.#pendingLateSessionEndSettlements.get(id);
+      if (!settlements) {
+        settlements = new Set();
+        this.#pendingLateSessionEndSettlements.set(id, settlements);
+      }
+      settlements.add(lateSessionEndSettlement);
       releaseLateWriteAdmission ??= this.#attachmentStarts.acquire(id);
     };
     const onLateWriteSettled = (): void => {
@@ -652,6 +774,10 @@ export class InMemoryRuntime implements Runtime {
         const pendingWrites = this.#pendingLateSessionEndWrites.get(id) ?? 0;
         if (pendingWrites <= 1) this.#pendingLateSessionEndWrites.delete(id);
         else this.#pendingLateSessionEndWrites.set(id, pendingWrites - 1);
+        const settlements = this.#pendingLateSessionEndSettlements.get(id);
+        settlements?.delete(lateSessionEndSettlement);
+        if (settlements?.size === 0) this.#pendingLateSessionEndSettlements.delete(id);
+        resolveLateSessionEndSettlement();
       }
       this.#deferSessionClockCleanup(id);
     };
@@ -737,7 +863,10 @@ export class InMemoryRuntime implements Runtime {
   }
   async startTurn(request: StartTurnRequest): Promise<ActiveTurn> {
     this.#assertRunning();
-    return trackFinalizer(this.#inFlightFinalizers, startRuntimeTurn(this.#turnContext(), request));
+    return this.#trackSessionWrite(
+      request.sessionId,
+      startRuntimeTurn(this.#turnContext(), request),
+    );
   }
   async endTurn(
     sessionId: SessionId,
@@ -745,14 +874,17 @@ export class InMemoryRuntime implements Runtime {
     request: EndTurnRequest,
   ): Promise<TerminalTurn> {
     this.#assertTerminalWriteAllowed();
-    return trackFinalizer(
-      this.#inFlightFinalizers,
-      endRuntimeTurn(this.#turnContext(), sessionId, turnId, request),
+    return this.#trackSessionWrite(
+      sessionId,
+      this.#criticalWrite(() => endRuntimeTurn(this.#turnContext(), sessionId, turnId, request)),
     );
   }
   async updateTurnStatus(sessionId: SessionId, turnId: TurnId, status: TurnStatus): Promise<Turn> {
     this.#assertRunning();
-    return updateRuntimeTurnStatus(this.#turnContext(), sessionId, turnId, status);
+    return this.#trackSessionWrite(
+      sessionId,
+      updateRuntimeTurnStatus(this.#turnContext(), sessionId, turnId, status),
+    );
   }
   setPersistenceHealth(sessionId: SessionId, degraded: boolean): void {
     const state = this.#attachments.get(sessionId);
@@ -842,7 +974,10 @@ export class InMemoryRuntime implements Runtime {
     reason: TurnCancellationReason,
   ): Promise<Turn> {
     this.#assertRunning();
-    return checkpointRuntimeTurnInterruption(this.#turnContext(), sessionId, turnId, reason);
+    return this.#trackSessionWrite(
+      sessionId,
+      checkpointRuntimeTurnInterruption(this.#turnContext(), sessionId, turnId, reason),
+    );
   }
   async startAttachedSession(
     agent: Agent,
@@ -1051,6 +1186,7 @@ export class InMemoryRuntime implements Runtime {
       durableStore: this.#durableStore,
       policy: this.#policy,
       emitMetric: (name, value) => this.#emitMetric(name, value),
+      deferLeaseLostAbort: true,
     });
     if (state.health === "lease_lost") {
       this.#sessionEndCoordinator.freezeUsageBeforeDetach(sessionId);
@@ -1479,10 +1615,18 @@ export class InMemoryRuntime implements Runtime {
 
   async #abandonLateTurn(turn: ActiveTurn): Promise<void> {
     if (this.#hardStopped) return;
-    await endRuntimeTurn(this.#turnContext(), turn.sessionId, turn.id, {
-      reason: "cancelled",
-      cancelReason: "runtime_restarted",
-    }).catch(() => undefined);
+    try {
+      await this.#criticalWrite(() =>
+        endRuntimeTurn(this.#turnContext(), turn.sessionId, turn.id, {
+          reason: "cancelled",
+          cancelReason: "runtime_restarted",
+        }),
+      );
+    } catch (error) {
+      const lateSettlement = criticalWriteLateSettlement(error);
+      if (lateSettlement) await lateSettlement;
+      throw error;
+    }
   }
 
   async #criticalWrite<T>(
@@ -1499,6 +1643,34 @@ export class InMemoryRuntime implements Runtime {
       onTimeout,
       (pending) => trackFinalizer(this.#inFlightFinalizers, pending),
     );
+  }
+
+  #trackSessionWrite<T>(sessionId: SessionId, operation: Promise<T>): Promise<T> {
+    const tracked = trackFinalizer(this.#inFlightFinalizers, operation);
+    const settlement = tracked.then(
+      () => undefined,
+      (error: unknown) => {
+        const lateSettlement = criticalWriteLateSettlement(error);
+        return lateSettlement
+          ? lateSettlement.then(
+              () => undefined,
+              () => undefined,
+            )
+          : undefined;
+      },
+    );
+    let pendingWrites = this.#pendingSessionWriteSettlements.get(sessionId);
+    if (!pendingWrites) {
+      pendingWrites = new Set();
+      this.#pendingSessionWriteSettlements.set(sessionId, pendingWrites);
+    }
+    pendingWrites.add(settlement);
+    const removeSettlement = (): void => {
+      pendingWrites?.delete(settlement);
+      if (pendingWrites?.size === 0) this.#pendingSessionWriteSettlements.delete(sessionId);
+    };
+    void settlement.then(removeSettlement, removeSettlement);
+    return tracked;
   }
 
   #runUnfencedSessionTransaction<T>(

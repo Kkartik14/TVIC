@@ -406,7 +406,7 @@ export type EndSessionRequest =
   | {
       readonly reason: "failed";
       readonly error: NormalizedError;
-      readonly terminalSource?: "provider_runtime" | "legacy_unknown";
+      readonly terminalSource?: "provider_runtime" | "runtime_recovery" | "legacy_unknown";
     }
   | {
       readonly reason: "timeout";
@@ -491,8 +491,27 @@ export interface Runtime extends RuntimeServiceLifecycle {
     },
   ): Promise<SessionAttachment>;
   getSession(id: SessionId): Promise<Session | null>;
+  /**
+   * Persist a terminal session state. The built-in Runtime bounds each caller's wait
+   * for earlier unsettled writes and pre-write reads, and bounds its terminal write
+   * with `criticalWriteTimeoutMs` deadlines. A timeout before the terminal write
+   * phase does not cancel the tracked terminalizer; after earlier work settles, the
+   * session may become terminal later. Implementations used by `PipelineVoiceLoop`
+   * must serialize session terminalization behind earlier turn, status,
+   * interruption-checkpoint, and session-terminal writes. After shutdown fences a
+   * lease, any late continuation must fail without committing under that stale lease.
+   */
   endSession(id: SessionId, request: EndSessionRequest): Promise<TerminalSession>;
   startTurn(request: StartTurnRequest): Promise<Turn>;
+  /**
+   * Persist a terminal turn state. Custom Runtime implementations used by
+   * PipelineVoiceLoop must enforce one `criticalWriteTimeoutMs` deadline for the
+   * complete operation, including reads before the transaction. They must not
+   * reject while a write can still commit later; storage that can outlive a
+   * timeout must be cancelled, fenced, or tracked until it settles. The built-in
+   * Runtime tracks late settlement for its own timeout so pipeline recovery can
+   * wait before retrying.
+   */
   endTurn(sessionId: SessionId, turnId: TurnId, request: EndTurnRequest): Promise<TerminalTurn>;
   updateTurnStatus(sessionId: SessionId, turnId: TurnId, status: TurnStatus): Promise<Turn>;
   setPersistenceHealth(sessionId: SessionId, degraded: boolean): void;

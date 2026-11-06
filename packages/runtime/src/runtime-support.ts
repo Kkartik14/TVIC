@@ -28,8 +28,8 @@ import type { SessionUsageAccumulator } from "./session-usage.js";
 import type { AttachmentAdmission } from "./attachment-admission.js";
 
 class CriticalWriteTimeoutError extends BackendUnavailableError {
-  constructor(timeoutMs: number) {
-    super(`Durable write exceeded ${timeoutMs}ms`);
+  constructor(timeoutMs: number, message = `Durable write exceeded ${timeoutMs}ms`) {
+    super(message);
     this.name = "CriticalWriteTimeoutError";
   }
 }
@@ -41,6 +41,13 @@ const criticalWriteLateSettlements = new WeakMap<
 
 export function isCriticalWriteTimeoutError(error: unknown): error is BackendUnavailableError {
   return error instanceof CriticalWriteTimeoutError;
+}
+
+export function criticalWriteTimeoutError(
+  timeoutMs: number,
+  message?: string,
+): BackendUnavailableError {
+  return new CriticalWriteTimeoutError(timeoutMs, message);
 }
 
 export function criticalWriteLateSettlement<T = unknown>(
@@ -96,6 +103,7 @@ export interface LeaseRenewalContext {
   readonly durableStore: DurableRuntimeStore;
   readonly policy: DurableRuntimePolicy;
   readonly emitMetric: (name: string, value: number) => void;
+  readonly deferLeaseLostAbort?: boolean;
 }
 
 export interface LateWriteOutcome<T> {
@@ -310,7 +318,7 @@ export async function renewLease(
     ) {
       context.emitMetric("lease.lost", 1);
       state.health = "lease_lost";
-      state.controller.abort(new LeaseLostError(sessionId));
+      if (!context.deferLeaseLostAbort) state.controller.abort(new LeaseLostError(sessionId));
       if (state.heartbeat) clearInterval(state.heartbeat);
     }
     return;
@@ -371,7 +379,7 @@ export async function renewLease(
     }
     context.emitMetric("lease.lost", 1);
     state.health = "lease_lost";
-    state.controller.abort(new LeaseLostError(sessionId));
+    if (!context.deferLeaseLostAbort) state.controller.abort(new LeaseLostError(sessionId));
     if (state.heartbeat) clearInterval(state.heartbeat);
     return;
   }
@@ -394,21 +402,17 @@ export async function detachAttachment(
 ): Promise<void> {
   if (!isCurrentAttachment(sessionId, attachments, expectedState)) return;
   const state = attachments.get(sessionId)!;
+  const lease = state.lease;
+  const releaseAdmission = lease && releaseLease ? attachmentStarts.acquire(sessionId) : undefined;
   if (!preserveHealth) state.health = "detached";
   if (state.heartbeat) clearInterval(state.heartbeat);
   state.controller.abort();
   attachments.delete(sessionId);
   if (!preserveSessionClock) sessionStartMs.delete(sessionId);
-  if (state.lease && releaseLease) {
-    const releaseAdmission = attachmentStarts.acquire(sessionId);
+  if (lease && releaseAdmission) {
     const release = Promise.resolve()
       .then(() =>
-        durableStore.leases.release(
-          sessionId,
-          state.holder,
-          state.lease!.fence,
-          state.lease!.generationId,
-        ),
+        durableStore.leases.release(sessionId, lease.holder, lease.fence, lease.generationId),
       )
       .catch(() => undefined)
       .finally(releaseAdmission);

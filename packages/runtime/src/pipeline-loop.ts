@@ -1808,30 +1808,22 @@ export class PipelineVoiceLoop {
               terminalWriteRequest,
             )) ?? undefined;
         } else {
-          const terminalization = await settleBy(
-            () =>
-              this.#options.runtime.endTurn(this.#options.session.id, turn.id, {
-                reason: "failed",
-                error: turnError,
-                output: {
-                  text: finalText,
-                  mediaEventIds: [],
-                  delivery: turnOutputDelivery(control, textDelivered),
-                },
-                toolCallIds,
-                latency,
-              }),
-            Date.now() + criticalWriteTimeoutMs,
-          );
-          if (terminalization.status === "completed") {
-            terminal = terminalization.value;
-          } else {
-            const terminalError =
-              terminalization.status === "rejected"
-                ? terminalization.error
-                : new BackendUnavailableError(
-                    "Turn terminal write did not settle before its deadline",
-                  );
+          try {
+            // Runtime.endTurn owns the durable-write deadline and retains the
+            // late-settlement handle. An outer timer here can win the same
+            // deadline and hide that handle from recovery.
+            terminal = await this.#options.runtime.endTurn(this.#options.session.id, turn.id, {
+              reason: "failed",
+              error: turnError,
+              output: {
+                text: finalText,
+                mediaEventIds: [],
+                delivery: turnOutputDelivery(control, textDelivered),
+              },
+              toolCallIds,
+              latency,
+            });
+          } catch (terminalError) {
             recoveryGeneration = this.#durableWriteRecovery.onWriteFailure(
               "turn_terminal",
               terminalError,

@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BackendUnavailableError,
   isNormalizedError,
-  RecordConflictError,
   timeoutError,
   validationError,
 } from "@tvic/core";
@@ -73,6 +72,62 @@ describe("R2-06 recovery and durable correctness", () => {
       expect(recovery.beginRecoveryWindow()).toBe(10_550);
     } finally {
       dateNow.mockRestore();
+    }
+  });
+
+  it("does not accept a terminal retry that settles after the recovery deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    const turnId = "turn_recovery_deadline" as never;
+    const snapshot = {
+      turns: [{ id: turnId, status: "started" }],
+    } as unknown as Awaited<ReturnType<Runtime["inspectSession"]>>;
+    let endTurnSettledAt: number | undefined;
+    const endTurn = vi.fn(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 80));
+      endTurnSettledAt = Date.now();
+      return { status: "failed" } as never;
+    });
+    const runtime = {
+      durablePolicy: {
+        criticalWriteTimeoutMs: 100,
+        persistenceRecoveryGraceMs: 100,
+        bargeCheckpointRetryBudgetMs: 0,
+      },
+      inspectSession: vi.fn(async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+        return snapshot;
+      }),
+      endTurn,
+      setPersistenceHealth() {},
+    } as unknown as Runtime;
+    const recovery = new DurableWriteRecovery({
+      runtime,
+      sessionId: "session_recovery_deadline" as SessionId,
+      emitError() {},
+      onSessionFailure() {},
+      closeCall: async () => {},
+      abortRun() {},
+      abortActiveTurn() {},
+    });
+    const failure = new BackendUnavailableError("the first terminal write failed");
+    recovery.onWriteFailure("turn_terminal", failure);
+    const recovering = recovery.recoverFailedTurn(
+      recovery.failure(failure, "turn_terminal"),
+      turnId,
+      recovery.recoveryDeadlineMs!,
+    );
+
+    try {
+      await vi.advanceTimersByTimeAsync(50);
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(recovering).resolves.toBeNull();
+      expect(endTurn).toHaveBeenCalledTimes(1);
+      expect(endTurnSettledAt).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(30);
+      expect(endTurnSettledAt).toBeGreaterThan(recovery.recoveryDeadlineMs!);
+    } finally {
+      vi.useRealTimers();
     }
   });
 
@@ -2266,6 +2321,7 @@ describe("R2-06 recovery and durable correctness", () => {
       let thinkingWriteAttempts = 0;
       let statusRetryInFlight = false;
       let delayedStatusRetryCommitted = false;
+      let terminalizationConflicts = 0;
       durableStore.runSessionTransaction = async <T>(
         sessionId: SessionId,
         lease: SessionLease,
@@ -2274,6 +2330,22 @@ describe("R2-06 recovery and durable correctness", () => {
         runSessionTransaction(sessionId, lease, async (transaction) => {
           const wrapped = new Proxy(transaction, {
             get(target, property, receiver) {
+              if (property === "updateSession") {
+                return async (
+                  targetSessionId: SessionId,
+                  updater: (record: StoredSessionRecord) => StoredSessionRecord,
+                ) => {
+                  const current = await target.getSession(targetSessionId);
+                  if (!current) {
+                    throw new Error(`missing session during injection: ${targetSessionId}`);
+                  }
+                  const next = updater(current);
+                  if (statusRetryInFlight && next.session.status === "failed") {
+                    terminalizationConflicts += 1;
+                  }
+                  return target.updateSession(targetSessionId, () => next);
+                };
+              }
               if (property === "updateTurn") {
                 return async (
                   turnSessionId: SessionId,
@@ -2321,15 +2393,6 @@ describe("R2-06 recovery and durable correctness", () => {
       const session = attachment.session;
       const call = makeCallHandle();
       const closeCall = vi.spyOn(call.handle, "close");
-      const originalEndSession = runtime.endSession.bind(runtime);
-      let terminalizationConflicts = 0;
-      runtime.endSession = async (sessionId, request) => {
-        if (statusRetryInFlight) {
-          terminalizationConflicts += 1;
-          throw new RecordConflictError(`session:${sessionId}`);
-        }
-        return originalEndSession(sessionId, request);
-      };
       const stt = makeStt();
       const llm = makeLlm(() => {
         throw new Error("the caller must not reach the model after the recovery deadline");
@@ -2504,6 +2567,460 @@ describe("R2-06 recovery and durable correctness", () => {
       await running.catch(() => undefined);
       await draining;
       await runtime.stop();
+    }
+  }, 15_000);
+
+  function holdFirstFailedTerminalTransaction(
+    durableStore: ReturnType<typeof createInMemoryDurableRuntimeStore>,
+  ) {
+    const runSessionTransaction = durableStore.runSessionTransaction.bind(durableStore);
+    let resolveStarted!: () => void;
+    let resolveRelease!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const releaseGate = new Promise<void>((resolve) => {
+      resolveRelease = resolve;
+    });
+    let held = false;
+    let pending = false;
+    let transactionStartsWhilePending = 0;
+
+    durableStore.runSessionTransaction = async <T>(
+      sessionId: SessionId,
+      lease: SessionLease,
+      operation: (transaction: DurableSessionTransaction) => Promise<T>,
+    ) => {
+      if (pending) transactionStartsWhilePending += 1;
+      let heldByTransaction = false;
+      try {
+        return await runSessionTransaction(sessionId, lease, async (transaction) => {
+          const wrapped = new Proxy(transaction, {
+            get(target, property, receiver) {
+              if (property === "updateTurn") {
+                return async (
+                  turnSessionId: SessionId,
+                  turnId: Parameters<DurableSessionTransaction["updateTurn"]>[1],
+                  updater: Parameters<DurableSessionTransaction["updateTurn"]>[2],
+                ) => {
+                  const current = await target.getTurn(turnSessionId, turnId);
+                  if (!current) throw new Error(`missing turn during injection: ${turnId}`);
+                  const next = updater(current);
+                  if (next.turn.status === "failed" && !held) {
+                    held = true;
+                    heldByTransaction = true;
+                    pending = true;
+                    resolveStarted();
+                    await releaseGate;
+                  }
+                  return target.updateTurn(turnSessionId, turnId, () => next);
+                };
+              }
+              const value = Reflect.get(target, property, receiver) as unknown;
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+          return operation(wrapped);
+        });
+      } finally {
+        if (heldByTransaction) pending = false;
+      }
+    };
+
+    return {
+      started,
+      release: () => resolveRelease(),
+      get pending() {
+        return pending;
+      },
+      get transactionStartsWhilePending() {
+        return transactionStartsWhilePending;
+      },
+    };
+  }
+
+  it("bounds endSession callers waiting for a timed-out turn write without overlapping it", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const heldTransaction = holdFirstFailedTerminalTransaction(durableStore);
+    const runtime = createRuntime({
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 100, persistenceRecoveryGraceMs: 100 },
+    });
+    await runtime.start();
+    const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+    const turn = await runtime.startTurn({
+      sessionId: attachment.session.id,
+      input: { transcript: "fail the terminal write", mediaEventIds: [] },
+    });
+
+    try {
+      const endTurn = runtime.endTurn(attachment.session.id, turn.id, {
+        reason: "failed",
+        error: timeoutError("test.terminal_write", "injected terminal write outage"),
+      });
+      await heldTransaction.started;
+      await expect(endTurn).rejects.toThrow("Durable write exceeded 100ms");
+
+      const endSession = runtime.endSession(attachment.session.id, {
+        reason: "failed",
+        error: timeoutError("test.session_end", "caller ended after persistence timeout"),
+      });
+      await expect(endSession).rejects.toThrow(
+        "Session terminalization did not reach its write phase within 100ms",
+      );
+      expect(heldTransaction.pending).toBe(true);
+      expect(heldTransaction.transactionStartsWhilePending).toBe(0);
+
+      heldTransaction.release();
+      await until(
+        async () =>
+          (await runtime.inspectSession(attachment.session.id)).session.status === "failed",
+        "deferred terminal session write",
+      );
+      expect(heldTransaction.transactionStartsWhilePending).toBe(0);
+    } finally {
+      heldTransaction.release();
+      await runtime.stop();
+    }
+  }, 15_000);
+
+  it("bounds the initial session read for a failed terminal write", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const originalGet = durableStore.sessions.get.bind(durableStore.sessions);
+    let holdNextRead = false;
+    let terminalReadPending = false;
+    let resolveReadStarted!: () => void;
+    let releaseRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      resolveReadStarted = resolve;
+    });
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    durableStore.sessions.get = async (sessionId) => {
+      if (holdNextRead) {
+        holdNextRead = false;
+        terminalReadPending = true;
+        resolveReadStarted();
+        await readGate;
+        terminalReadPending = false;
+      }
+      return originalGet(sessionId);
+    };
+
+    const runtime = createRuntime({
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 100, persistenceRecoveryGraceMs: 100 },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const session = attachment.session;
+    const call = makeCallHandle();
+    const closeCall = vi.spyOn(call.handle, "close");
+    const stt = makeStt();
+    const llm = makeLlm(() => {
+      throw new Error("injected provider failure");
+    });
+    let failedTerminalCalls = 0;
+    let overlappingTerminalWrite = false;
+    const endTurn = runtime.endTurn.bind(runtime);
+    vi.spyOn(runtime, "endTurn").mockImplementation(async (sessionId, turnId, request) => {
+      if (request.reason === "failed") {
+        failedTerminalCalls += 1;
+        if (terminalReadPending) overlappingTerminalWrite = true;
+        holdNextRead = true;
+      }
+      return endTurn(sessionId, turnId, request);
+    });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      attachment,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm,
+        tts: makeTts(() => [], { endStream: true }),
+      }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.start();
+    const draining = (async () => {
+      for await (const _event of running) {
+        // Drain events while the test controls the session read.
+      }
+    })();
+
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "fail while the session lookup is stuck");
+      await readStarted;
+      await until(
+        () => closeCall.mock.calls.length > 0,
+        "fatal call close after session-read timeout",
+      );
+
+      expect(terminalReadPending).toBe(true);
+      expect(failedTerminalCalls).toBe(1);
+      expect(overlappingTerminalWrite).toBe(false);
+      expect(closeCall).toHaveBeenCalledWith("error");
+    } finally {
+      releaseRead();
+      call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+      await draining;
+      await runtime.stop();
+    }
+  }, 15_000);
+
+  it("bounds the initial session read for direct session terminalization", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const originalGet = durableStore.sessions.get.bind(durableStore.sessions);
+    let holdNextRead = false;
+    let resolveReadStarted!: () => void;
+    let releaseRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      resolveReadStarted = resolve;
+    });
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    durableStore.sessions.get = async (sessionId) => {
+      if (holdNextRead) {
+        holdNextRead = false;
+        resolveReadStarted();
+        await readGate;
+      }
+      return originalGet(sessionId);
+    };
+    const runtime = createRuntime({
+      durableStore,
+      durablePolicy: { criticalWriteTimeoutMs: 100 },
+    });
+    await runtime.start();
+    const attachment = await runtime.startAttachedSession(buildAgent(), { channel: "simulated" });
+    holdNextRead = true;
+
+    try {
+      const ending = runtime.endSession(attachment.session.id, { reason: "completed" });
+      await readStarted;
+      await expect(ending).rejects.toThrow(
+        "Session terminalization did not reach its write phase within 100ms",
+      );
+      releaseRead();
+      await until(
+        async () => (await runtime.getSession(attachment.session.id))?.status === "completed",
+        "late session read settles before terminalization",
+      );
+    } finally {
+      releaseRead();
+      await runtime.stop();
+    }
+  }, 15_000);
+
+  it.each([
+    {
+      name: "the default",
+      criticalWriteTimeoutMs: 2_000,
+      persistenceRecoveryGraceMs: 2_000,
+      leaseTtlMs: 10_000,
+      transactionDelayMs: 2_800,
+    },
+    {
+      name: "100 ms",
+      criticalWriteTimeoutMs: 100,
+      persistenceRecoveryGraceMs: 100,
+      leaseTtlMs: 10_000,
+      transactionDelayMs: 675,
+    },
+  ])(
+    "waits for a timed-out failed terminal transaction to settle under $name policy",
+    async ({
+      criticalWriteTimeoutMs,
+      persistenceRecoveryGraceMs,
+      leaseTtlMs,
+      transactionDelayMs,
+    }) => {
+      const durableStore = createInMemoryDurableRuntimeStore();
+      const heldTransaction = holdFirstFailedTerminalTransaction(durableStore);
+      const runtime = createRuntime({
+        durableStore,
+        durablePolicy: { criticalWriteTimeoutMs, persistenceRecoveryGraceMs, leaseTtlMs },
+      });
+      await runtime.start();
+      const agent = buildAgent();
+      const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+      const session = attachment.session;
+      const call = makeCallHandle();
+      const closeCall = vi.spyOn(call.handle, "close");
+      const stt = makeStt();
+      let llmCalls = 0;
+      const llm = makeLlm(() => {
+        llmCalls += 1;
+        throw new Error("injected provider failure");
+      });
+      let failedTerminalCalls = 0;
+      let overlappingTerminalWrite = false;
+      const endTurn = runtime.endTurn.bind(runtime);
+      vi.spyOn(runtime, "endTurn").mockImplementation(async (sessionId, turnId, request) => {
+        if (request.reason === "failed") {
+          failedTerminalCalls += 1;
+          if (heldTransaction.pending) overlappingTerminalWrite = true;
+        }
+        return endTurn(sessionId, turnId, request);
+      });
+      const loop = new PipelineVoiceLoop({
+        runtime,
+        session,
+        attachment,
+        agent: withPipelineProviders(agent, {
+          stt: stt.provider,
+          llm,
+          tts: makeTts(() => [], { endStream: true }),
+        }),
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      });
+      const running = loop.start();
+      const draining = (async () => {
+        for await (const _event of running) {
+          // Drain events while the test controls the store transaction.
+        }
+      })();
+
+      try {
+        call.push(streamStarted(session.id));
+        stt.pushFinal(session.id, "fail the model turn");
+        await heldTransaction.started;
+        await new Promise<void>((resolve) => setTimeout(resolve, transactionDelayMs));
+
+        expect(heldTransaction.pending).toBe(true);
+        heldTransaction.release();
+        await until(
+          async () =>
+            (await runtime.inspectSession(session.id)).turns.some(
+              (turn) => turn.status === "failed",
+            ),
+          "late failed terminal commit",
+        );
+        expect(closeCall).not.toHaveBeenCalledWith("error");
+        call.push(streamEnded(session.id, "completed"));
+        await running.catch(() => undefined);
+        await draining;
+
+        const snapshot = await runtime.inspectSession(session.id);
+        expect(llmCalls).toBe(1);
+        expect({
+          failedTerminalCalls,
+          overlappingTerminalWrite,
+          statuses: snapshot.turns.map((turn) => turn.status),
+        }).toEqual({
+          failedTerminalCalls: 1,
+          overlappingTerminalWrite: false,
+          statuses: ["failed"],
+        });
+      } finally {
+        heldTransaction.release();
+        call.push(streamEnded(session.id, "completed"));
+        await running.catch(() => undefined);
+        await draining;
+        await runtime.stop();
+      }
+    },
+    15_000,
+  );
+
+  it("keeps failed-session cleanup alive through runtime hard stop after a terminal write timeout", async () => {
+    const durableStore = createInMemoryDurableRuntimeStore();
+    const heldTransaction = holdFirstFailedTerminalTransaction(durableStore);
+    const runtime = createRuntime({
+      durableStore,
+      durableStoreOwnership: "caller",
+      durablePolicy: {
+        criticalWriteTimeoutMs: 100,
+        persistenceRecoveryGraceMs: 100,
+        leaseTtlMs: 30_000,
+        leaseHeartbeatMs: 20_000,
+      },
+    });
+    await runtime.start();
+    const agent = buildAgent();
+    const attachment = await runtime.startAttachedSession(agent, { channel: "simulated" });
+    const session = attachment.session;
+    const call = makeCallHandle();
+    const closeCall = vi.spyOn(call.handle, "close");
+    const stt = makeStt();
+    const llm = makeLlm(() => {
+      throw new Error("injected provider failure");
+    });
+    let failedTerminalCalls = 0;
+    let overlappingTerminalWrite = false;
+    const endTurn = runtime.endTurn.bind(runtime);
+    vi.spyOn(runtime, "endTurn").mockImplementation(async (sessionId, turnId, request) => {
+      if (request.reason === "failed") {
+        failedTerminalCalls += 1;
+        if (heldTransaction.pending) overlappingTerminalWrite = true;
+      }
+      return endTurn(sessionId, turnId, request);
+    });
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      attachment,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm,
+        tts: makeTts(() => [], { endStream: true }),
+      }),
+      callHandle: call.handle,
+      llmModel: "gpt-test",
+    });
+    const running = loop.start();
+    const draining = (async () => {
+      for await (const _event of running) {
+        // Drain events while the test controls the store transaction.
+      }
+    })();
+    if (!runtime.registerPipelineRun)
+      throw new Error("Runtime pipeline registration is unavailable");
+    runtime.registerPipelineRun(new Promise<void>(() => undefined), () => {}, session.id);
+    let stopping: Promise<void> | undefined;
+    let stopResolved = false;
+
+    try {
+      call.push(streamStarted(session.id));
+      stt.pushFinal(session.id, "fail while the store is stuck");
+      await heldTransaction.started;
+      await until(
+        () => closeCall.mock.calls.length > 0,
+        "fatal call close after recovery deadline",
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+
+      expect(heldTransaction.pending).toBe(true);
+      expect(failedTerminalCalls).toBe(1);
+      expect(overlappingTerminalWrite).toBe(false);
+      expect(heldTransaction.transactionStartsWhilePending).toBe(0);
+      expect(closeCall).toHaveBeenCalledWith("error");
+
+      stopping = runtime.stop().then(() => {
+        stopResolved = true;
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 5_200));
+      expect(stopResolved).toBe(false);
+      heldTransaction.release();
+      await stopping;
+      await until(
+        async () => (await runtime.inspectSession(session.id)).session.status === "failed",
+        "failed-session terminalization before shutdown closes the store",
+      );
+    } finally {
+      heldTransaction.release();
+      call.push(streamEnded(session.id, "completed"));
+      await running.catch(() => undefined);
+      await draining;
+      await (stopping ?? runtime.stop());
     }
   }, 15_000);
 
