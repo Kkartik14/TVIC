@@ -165,7 +165,7 @@ jobs:
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
 
       - name: Upload exact artifact and its identity record
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: voice-runtime-release-artifact
           if-no-files-found: error
@@ -212,7 +212,7 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: voice-runtime-release-artifact
           path: ${{ runner.temp }}/voice-runtime-artifact
@@ -272,7 +272,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: voice-runtime-release-artifact
           path: ${{ runner.temp }}/voice-runtime-artifact
@@ -306,7 +306,7 @@ jobs:
           NPM_VERSION="$(npm --version)"
           echo "Using npm $NPM_VERSION"
           test "$NPM_VERSION" = "12.2.1"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: voice-runtime-release-artifact
           path: ${{ runner.temp }}/voice-runtime-artifact
