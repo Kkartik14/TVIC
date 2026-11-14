@@ -368,7 +368,15 @@ from Deepgram's model matrix. Hint policies are available on multilingual
 tag `fil` is mapped to Deepgram's `tl`. The legacy `sttLanguage` field continues
 to pass raw provider values through.
 
-Official model information: <https://developers.deepgram.com/docs/models-languages-overview>
+When interim results are enabled, the adapter also requests Deepgram's
+`UtteranceEnd` signal with `utterance_end_ms=1000` (Deepgram requires interim
+results for this signal). If Deepgram has already sent final transcript segments,
+the adapter emits one endpoint for them when `UtteranceEnd` arrives. If only
+partial results exist, it requests finalization and waits for Deepgram's final
+transcript; partial text is never promoted to a final transcript. Noise-only
+input therefore does not create a transcript endpoint.
+
+Official references: [model and language information](https://developers.deepgram.com/docs/models-languages-overview), [end-of-speech detection](https://developers.deepgram.com/docs/understanding-end-of-speech-detection), and [streaming API reference](https://developers.deepgram.com/reference/speech-to-text/listen-streaming).
 
 ### Sarvam
 
