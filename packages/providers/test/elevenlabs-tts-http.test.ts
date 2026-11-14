@@ -84,6 +84,40 @@ describe("ElevenLabs complete HTTP TTS", () => {
   it.each([
     ["REST", createElevenLabsTtsRestProvider],
     ["HTTP streaming", createElevenLabsTtsHttpStreamProvider],
+  ] as const)(
+    "classifies the documented %s insufficient-credit response as quota",
+    async (_name, create) => {
+      const provider = create({
+        apiKey: "eleven-test-key",
+        voiceId: "voice-http-usage",
+        fetchImpl: async () =>
+          Response.json(
+            {
+              detail: {
+                type: "payment_required",
+                code: "insufficient_credits",
+                message: "Your account does not have enough credits for this operation.",
+                status: "insufficient_credits",
+                request_id: "request-payment-test",
+              },
+            },
+            { status: 402 },
+          ),
+      });
+
+      await expect(provider.synthesize(request)).rejects.toMatchObject({
+        code: TVIC_ERROR_CODES.providerQuotaExceeded,
+        category: "provider",
+        provider: PROVIDER_NAMES.elevenlabs,
+        retriable: false,
+        metadata: { httpStatus: 402, providerCode: "insufficient_credits" },
+      });
+    },
+  );
+
+  it.each([
+    ["REST", createElevenLabsTtsRestProvider],
+    ["HTTP streaming", createElevenLabsTtsHttpStreamProvider],
   ])("counts caller text for %s synthesis", async (_transport, createProvider) => {
     const textCharacters: number[] = [];
     const provider = createProvider({

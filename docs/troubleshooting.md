@@ -188,6 +188,23 @@ version, input sequence numbers, and `session.ready` before sending audio. For
 Twilio, verify the `start` frame, stream SID, sequence numbers, and mu-law edge
 format.
 
+## Provider error causes
+
+Provider adapters map vendor responses to stable TVIC codes. Check
+`event.error.code` and `event.error.retriable` instead of using an HTTP status or
+vendor message as the application contract:
+
+| Code                         | Meaning                                                 | Next step                                                        |
+| ---------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------- |
+| `provider.auth_failed`       | Credentials were rejected or lack permission.           | Check the API key and its access to the selected endpoint.       |
+| `provider.quota_exceeded`    | Credits, quota, or an account usage limit is exhausted. | Review provider billing and usage limits before retrying.        |
+| `provider.rate_limited`      | The provider reached a request or concurrency limit.    | Reduce concurrency and retry according to the provider's limits. |
+| `provider.model_unsupported` | The selected model is unavailable for the request.      | Choose a model supported by the provider and endpoint.           |
+| `provider.invalid_request`   | The provider rejected the request parameters.           | Check the selected model, voice, and request options.            |
+| `provider.upstream_failed`   | A provider service or transport failed.                 | Retry only when `event.error.retriable` is true.                 |
+
+Provider error formats differ. See the official [OpenAI error guide](https://developers.openai.com/api/docs/guides/error-codes), [Cartesia API errors](https://docs.cartesia.ai/use-the-api/api-errors), and [ElevenLabs errors](https://elevenlabs.io/docs/eleven-api/resources/errors) for current vendor details. Keep raw provider response bodies out of logs because they can include request data.
+
 ## Provider stalls and timeouts
 
 Provider streams must make progress. A stall can produce errors such as

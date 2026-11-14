@@ -3,6 +3,14 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
+## Unreleased
+
+### Fixed
+
+- Normalize OpenAI Responses, Cartesia TTS, and ElevenLabs TTS failures into
+  stable TVIC causes for exhausted quota, concurrency limits, unavailable
+  models, and upstream failures.
+
 ## 2.2.0
 
 ### Added

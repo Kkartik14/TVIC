@@ -18,6 +18,12 @@ describe("shared provider error classifier", () => {
       false,
     ],
     [
+      "Cartesia concurrency code without a status fallback",
+      { providerCode: "concurrency_limited" },
+      TVIC_ERROR_CODES.providerRateLimited,
+      true,
+    ],
+    [
       "exhausted billing message",
       { message: "  credits   exhausted " },
       TVIC_ERROR_CODES.providerQuotaExceeded,

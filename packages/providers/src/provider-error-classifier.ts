@@ -9,6 +9,7 @@ type ProviderErrorClassificationKind =
   | "quota_exceeded"
   | "rate_limited"
   | "invalid_request"
+  | "model_unsupported"
   | "voice_unsupported"
   | "upstream"
   | "protocol";
@@ -36,6 +37,13 @@ const EXHAUSTION_CODES = new Set([
   "balance_exhausted",
   "billing_required",
   "blocked_api_access",
+  "credit_balance_exhausted",
+  "insufficient_credits",
+  "payment_required",
+  "billing_hard_limit_reached",
+  "organization_spend_limit_exceeded",
+  "project_spend_limit_exceeded",
+  "organization_usage_limit_exceeded",
 ]);
 const EXHAUSTION_MESSAGES = new Set(["quota exceeded", "credits exhausted"]);
 const AUTH_CODES = new Set([
@@ -45,31 +53,41 @@ const AUTH_CODES = new Set([
   "unauthorized",
   "forbidden",
   "permission_denied",
+  "authentication_error",
 ]);
 const INVALID_CODES = new Set([
   "invalid_request",
   "invalid_request_error",
   "invalid_model",
-  "model_not_found",
-  "unsupported_model",
   "invalid_voice",
   "unsupported_voice",
   "context_length_exceeded",
   "invalid_parameter",
   "invalid_schema",
 ]);
+const MODEL_UNSUPPORTED_CODES = new Set(["model_not_found", "unsupported_model"]);
 /** Vendor identifiers that explicitly say the requested voice does not exist. */
 export const VOICE_NOT_FOUND_CODES: ReadonlySet<string> = new Set([
   "voice_not_found",
   "voice_id_does_not_exist",
 ]);
-const RATE_LIMIT_CODES = new Set(["rate_limit_exceeded", "too_many_requests", "throttled"]);
+const RATE_LIMIT_CODES = new Set([
+  "rate_limit_exceeded",
+  "too_many_requests",
+  "throttled",
+  "concurrency_limited",
+  "concurrent_limit_exceeded",
+  "slow_down",
+  "rate_limit_error",
+]);
 const UPSTREAM_CODES = new Set([
   "capacity_exceeded",
   "conflict",
   "internal_server_error",
   "service_unavailable",
+  "service_unavailable_error",
   "server_error",
+  "server_is_overloaded",
   "upstream_error",
 ]);
 
@@ -118,6 +136,10 @@ export function classifyProviderError(
 
   if (candidates.some((candidate) => VOICE_NOT_FOUND_CODES.has(candidate))) {
     return result(TVIC_ERROR_CODES.providerVoiceUnsupported, false, "voice_unsupported", metadata);
+  }
+
+  if (candidates.some((candidate) => MODEL_UNSUPPORTED_CODES.has(candidate))) {
+    return result(TVIC_ERROR_CODES.providerModelUnsupported, false, "model_unsupported", metadata);
   }
 
   if (candidates.some((candidate) => INVALID_CODES.has(candidate))) {
