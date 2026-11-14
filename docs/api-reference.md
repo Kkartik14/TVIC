@@ -39,6 +39,7 @@ Important options:
 | Option                            | Purpose                                                                                                            |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `prompt`                          | Agent instructions used as the base system prompt                                                                  |
+| `firstMessage`                    | Optional text spoken once when a new session starts, before the first caller turn                                  |
 | `providers`                       | Telephony, STT, LLM, and TTS provider instances or configuration objects                                           |
 | `models`                          | Optional model and TTS voice overrides                                                                             |
 | `providerCapabilitySnapshots`     | Optional capability facts; supplying them enables strict snapshot checks                                           |
@@ -52,6 +53,10 @@ Important options:
 | `runtime`                         | Durable state, memory, hooks, health, metrics, and shutdown options                                                |
 | `sttVocabulary`                   | Default STT vocabulary terms merged into each call's terms                                                         |
 | `ttsVoicesByLanguage`             | Default language-to-voice map used when a call does not choose a voice                                             |
+
+`firstMessage` is recorded as an assistant turn, without inventing caller
+input, and remains in conversation context for the next model request. The
+normal TTS output and interruption policy apply to it.
 
 The snapshot loader receives the selected TTS provider, model, and voice,
 `providerCapabilitySnapshotProviders`, any declared

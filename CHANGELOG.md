@@ -3,6 +3,13 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
+## Unreleased
+
+### Added
+
+- Added optional `firstMessage` text to managed agents. It is spoken and stored
+  as an assistant turn when a new session starts, before caller input.
+
 ## 2.2.0
 
 ### Added

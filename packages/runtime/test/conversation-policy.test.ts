@@ -10,6 +10,7 @@ import {
   type SpeechToTextProvider,
   type TelephonyProvider,
   type TextToSpeechProvider,
+  type Turn,
   type Timestamp,
   type TranscriptEvent,
 } from "@tvic/core";
@@ -59,6 +60,42 @@ describe("ConversationPolicy", () => {
       { role: "user", content: "first" },
       { role: "assistant", content: "confirmed" },
       { role: "user", content: "second" },
+    ]);
+  });
+
+  it("retains an agent first message as assistant-only conversation history", () => {
+    const policy = new ConversationPolicy({ agent: testAgent() });
+
+    policy.recordAssistantMessage("Welcome to our appointment desk.");
+
+    expect(policy.messagesForTranscript("I need to reschedule.")).toEqual([
+      { role: "system", content: "You book tables." },
+      { role: "assistant", content: "Welcome to our appointment desk." },
+      { role: "user", content: "I need to reschedule." },
+    ]);
+  });
+
+  it("hydrates a persisted first-message turn without inventing caller input", () => {
+    const policy = new ConversationPolicy({ agent: testAgent() });
+    const firstMessage = {
+      id: "turn_first_message" as never,
+      sessionId: "session_policy" as SessionId,
+      sequence: 1,
+      status: "completed",
+      input: { mediaEventIds: [], metadata: { kind: "agent_first_message" } },
+      output: { mediaEventIds: [], text: "Welcome to our appointment desk." },
+      toolCallIds: [],
+      startedAt: timestamp,
+      endedAt: timestamp,
+      latency: {},
+    } as Turn;
+
+    policy.hydrateTurns([firstMessage]);
+
+    expect(policy.messagesForTranscript("I need to reschedule.")).toEqual([
+      { role: "system", content: "You book tables." },
+      { role: "assistant", content: "Welcome to our appointment desk." },
+      { role: "user", content: "I need to reschedule." },
     ]);
   });
 

@@ -42,6 +42,7 @@ The managed API is exported from the package root:
 import { createVoiceAgent } from "voice-runtime";
 
 const agent = createVoiceAgent({
+  firstMessage: "Thank you for calling. How can I help?",
   id: "appointment-agent",
   name: "Appointment Agent",
   version: "1.0.0",
@@ -75,6 +76,11 @@ appointment was booked unless the booking tool succeeded.
 The managed constructor validates the prompt, provider kinds, audio formats,
 models, voices, tool requirements, and provider capabilities. A bad
 configuration fails before a session is created.
+
+`firstMessage` is optional. When present, TVIC speaks it once as the new session
+starts, before the first caller turn. It is stored as an assistant turn and
+included in the next model request without adding a caller transcript. Caller
+speech can interrupt it under the configured interruption policy.
 
 ## Choose providers and models
 

@@ -39,6 +39,7 @@ import {
   type ProviderEventId,
   type RuntimeSessionTrace,
   type RuntimeOptions,
+  type InterruptionPolicy,
   type SessionEndEvent,
   type SessionId,
   type SessionLease,
@@ -195,6 +196,233 @@ class AutoAcknowledgingCartesiaSocket {
 }
 
 describe("managed voice agent", () => {
+  it("speaks the configured first message as a persisted turn before caller input", async () => {
+    const firstMessage = "Welcome. How can I help you today?";
+    const synthesisRequests: TtsSynthesisRequest[] = [];
+    let sessionEnd: SessionEndEvent | undefined;
+    const harness = createLifecycleHarness({
+      firstMessage,
+      runtime: {
+        onSessionEnd(event) {
+          sessionEnd = event;
+        },
+      },
+      synthesizeTts: async (request) => {
+        synthesisRequests.push(request);
+        const events = new AsyncQueue<TtsEvent>();
+        const audio = createMediaEvent({
+          id: "first-message-audio" as never,
+          type: "media.audio.chunk",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          direction: "output",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          provider: "lifecycle-tts",
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        });
+        events.push(audio as OutputAudioChunk);
+        events.push(
+          createMediaEvent({
+            id: "first-message-committed" as never,
+            type: "media.audio.committed",
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            direction: "output",
+            timestamp: nowTimestamp(),
+            monotonicOffsetMs: 0,
+            provider: "lifecycle-tts",
+            durationMs: 20,
+            frameCount: 320,
+            sequenceRange: [1, 1],
+            chunkIds: [audio.id],
+          }),
+        );
+        events.close();
+        return { events, async cancel() {} } satisfies TtsStream;
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      const observed = collectVoiceEvents(session.run);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      await vi.waitFor(() => expect(synthesisRequests).toHaveLength(1), { timeout: 250 });
+      await harness.committed;
+      harness.inbound.push(streamEndedEvent(session.sessionId));
+
+      const [result, events] = await Promise.all([session.run, observed]);
+      expect(result.turnsHandled).toBe(1);
+      expect(result.turnsFailed).toBe(0);
+      expect(synthesisRequests.map((request) => request.text)).toEqual([firstMessage]);
+      expect(harness.sent.some((event) => event.type === "media.audio.chunk")).toBe(true);
+      expect(events.filter((event) => event.kind === "turn_started")).toHaveLength(1);
+      expect(events).toContainEqual(
+        expect.objectContaining({ kind: "turn_completed", status: "completed" }),
+      );
+      expect(sessionEnd?.snapshot.turns).toHaveLength(1);
+      expect(sessionEnd?.snapshot.turns[0]).toMatchObject({
+        input: { mediaEventIds: [], metadata: { kind: "agent_first_message" } },
+        output: { text: firstMessage },
+        status: "completed",
+      });
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("lets caller speech interrupt the first message under the agent policy", async () => {
+    let synthesisStarted = false;
+    let synthesisCancelled = false;
+    let sessionEnd: SessionEndEvent | undefined;
+    const harness = createLifecycleHarness({
+      firstMessage: "I will explain the next step.",
+      interruptionPolicy: { mode: "allow", minSpeechMs: 0, trimOutputOnInterrupt: true },
+      runtime: {
+        onSessionEnd(event) {
+          sessionEnd = event;
+        },
+      },
+      synthesizeTts: async (request) => {
+        synthesisStarted = true;
+        const events = new AsyncQueue<TtsEvent>();
+        const audio = createMediaEvent({
+          id: "first-message-interrupt-audio" as never,
+          type: "media.audio.chunk",
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          sequence: 1,
+          direction: "output",
+          timestamp: nowTimestamp(),
+          monotonicOffsetMs: 0,
+          provider: "lifecycle-tts",
+          audio: {
+            format: PCM16_16K_MONO,
+            durationMs: 20,
+            frameCount: 320,
+            bytes: new Uint8Array(640),
+          },
+        });
+        events.push(audio as OutputAudioChunk);
+        return {
+          events,
+          async cancel() {
+            synthesisCancelled = true;
+            events.close();
+          },
+        } satisfies TtsStream;
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      const observed = collectVoiceEvents(session.run);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      await vi.waitFor(() => expect(synthesisStarted).toBe(true), { timeout: 250 });
+      await vi.waitFor(
+        () => expect(harness.sent.some((event) => event.type === "media.audio.chunk")).toBe(true),
+        { timeout: 250 },
+      );
+      harness.transcripts.push({
+        id: "first-message-speech" as ProviderEventId,
+        type: "stt.speech.started",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 1,
+        provider: "lifecycle-stt",
+        timestamp: nowTimestamp(),
+      });
+      await vi.waitFor(() => expect(synthesisCancelled).toBe(true), { timeout: 250 });
+      harness.inbound.push(streamEndedEvent(session.sessionId));
+
+      const [result, events] = await Promise.all([session.run, observed]);
+      expect(result.turnsHandled).toBe(1);
+      expect(result.turnsFailed).toBe(0);
+      expect(result.interruptions).toBe(1);
+      expect(events).toContainEqual(
+        expect.objectContaining({ kind: "turn_completed", status: "cancelled" }),
+      );
+      expect(sessionEnd?.snapshot.turns[0]).toMatchObject({ status: "cancelled" });
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("ends the session with a normalized failure when first-message synthesis fails", async () => {
+    const harness = createLifecycleHarness({
+      firstMessage: "Welcome to our appointment desk.",
+      synthesizeTts: async () => {
+        throw new Error("synthetic provider failure");
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      const observed = collectVoiceEvents(session.run);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+
+      await expect(session.run).rejects.toMatchObject({ code: "tts.delivery_failed" });
+      await observed;
+      expect(harness.closeReasons).toContain("error");
+      expect(await session.finalSession).toMatchObject({ status: "failed" });
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("leaves first-message delivery disabled when the option is omitted", async () => {
+    let synthesisCount = 0;
+    const harness = createLifecycleHarness({
+      synthesizeTts: async () => {
+        synthesisCount += 1;
+        return { events: new AsyncQueue<TtsEvent>(), async cancel() {} } satisfies TtsStream;
+      },
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      const observed = collectVoiceEvents(session.run);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      harness.inbound.push(streamEndedEvent(session.sessionId));
+
+      const [result] = await Promise.all([session.run, observed]);
+      expect(result.turnsHandled).toBe(0);
+      expect(synthesisCount).toBe(0);
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("rejects a blank first message at agent creation", () => {
+    expect(() => createLifecycleHarness({ firstMessage: " \n\t" })).toThrow(
+      expect.objectContaining({ code: "voice_runtime.invalid_config" }),
+    );
+  });
+
   it("copies and freezes an empty TTS controls list at call admission", () => {
     const controls: unknown[] = [];
     const validated = validateRunOptions({ ttsTextControls: controls } as never);
@@ -5692,10 +5920,13 @@ interface LifecycleHarness {
   readonly sttOpened: Promise<void>;
   readonly committed: Promise<void>;
   readonly closeReasons: string[];
+  readonly sent: readonly OutputMediaEvent[];
 }
 
 interface LifecycleHarnessOptions {
   readonly audioTap?: AudioTapOptions;
+  readonly firstMessage?: string;
+  readonly interruptionPolicy?: InterruptionPolicy;
   readonly runtime?: RuntimeOptions;
   readonly models?: VoiceAgentModels;
   readonly sttVocabulary?: readonly string[];
@@ -5826,6 +6057,10 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
   return {
     agent: createVoiceAgent({
       prompt: "Handle lifecycle tests.",
+      ...(options.firstMessage !== undefined ? { firstMessage: options.firstMessage } : {}),
+      ...(options.interruptionPolicy !== undefined
+        ? { interruptionPolicy: options.interruptionPolicy }
+        : {}),
       ...(options.models ? { models: options.models } : {}),
       ...(options.sttVocabulary ? { sttVocabulary: options.sttVocabulary } : {}),
       ...(options.ttsVoicesByLanguage ? { ttsVoicesByLanguage: options.ttsVoicesByLanguage } : {}),
@@ -5844,6 +6079,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
     sttOpened,
     committed,
     closeReasons,
+    sent,
   };
 }
 
