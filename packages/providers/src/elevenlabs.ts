@@ -40,6 +40,7 @@ import {
   normalizeProviderError,
   openWebSocket,
   parseJsonObject,
+  readBoundedWebSocketErrorBody,
   MAX_PROVIDER_FRAME_BYTES,
   MAX_PROVIDER_TTS_OUTPUT_BYTES,
   MAX_PROVIDER_TTS_OUTPUT_CHUNKS,
@@ -80,7 +81,11 @@ import {
   type ElevenLabsTtsProtocol,
   type ElevenLabsTtsSendTextOptions,
 } from "./elevenlabs-options.js";
-import { elevenLabsVoiceNotFoundSocketError } from "./elevenlabs-http-helpers.js";
+import {
+  elevenLabsHttpResponseError,
+  elevenLabsVoiceNotFoundSocketError,
+} from "./elevenlabs-http-helpers.js";
+import { classifiedProviderError } from "./provider-error-classifier.js";
 import { validateTtsTextControls } from "./tts-text-controls.js";
 
 export type {
@@ -105,6 +110,8 @@ const ELEVENLABS_CAPABILITIES = {
 interface ElevenLabsMessage extends Readonly<Record<string, unknown>> {
   readonly audio?: string | null;
   readonly code?: string | number;
+  readonly type?: string;
+  readonly status?: string | number;
   readonly isFinal?: boolean | null;
   readonly is_final?: boolean | null;
   readonly is_final_audio_for_turn?: boolean | null;
@@ -347,7 +354,16 @@ export class ElevenLabsTtsProvider implements IncrementalTextToSpeechProvider {
       "xi-api-key": this.#options.apiKey,
     });
     try {
-      await openWebSocket(socket, request.signal ? { signal: request.signal } : {});
+      await openWebSocket(socket, {
+        ...(request.signal ? { signal: request.signal } : {}),
+        onUnexpectedResponse: async (response) => {
+          const body = await readBoundedWebSocketErrorBody(response);
+          const status = response.statusCode;
+          const safeStatus =
+            typeof status === "number" && status >= 200 && status <= 599 ? status : 502;
+          return elevenLabsHttpResponseError(new Response(body.text, { status: safeStatus }));
+        },
+      });
       return new ElevenLabsTtsStream(socket, request, {
         clock: this.#clock,
         modelId: model,
@@ -678,9 +694,12 @@ export class ElevenLabsTtsStream implements TtsSession {
       return;
     }
     const message = parsed as ElevenLabsMessage;
-    const hasProviderError = message.error !== undefined || message.message !== undefined;
+    const hasProviderError =
+      message.error !== undefined || message.message !== undefined || message.code !== undefined;
     const unknownKeys = Object.keys(message).filter(
-      (key) => !ELEVENLABS_MESSAGE_KEYS.has(key) && !(key === "code" && hasProviderError),
+      (key) =>
+        !ELEVENLABS_MESSAGE_KEYS.has(key) &&
+        !(hasProviderError && ["code", "type", "status"].includes(key)),
     );
     if (unknownKeys.length > 0) {
       this.#fail(this.#error("ElevenLabs returned an unknown message type"));
@@ -689,20 +708,61 @@ export class ElevenLabsTtsStream implements TtsSession {
     if (
       (message.error !== undefined && typeof message.error !== "string") ||
       (message.message !== undefined && typeof message.message !== "string") ||
-      (message.code !== undefined && !isValidElevenLabsErrorCode(message.code))
+      (message.code !== undefined && !isValidElevenLabsErrorCode(message.code)) ||
+      (message.type !== undefined && typeof message.type !== "string") ||
+      (message.status !== undefined &&
+        typeof message.status !== "string" &&
+        typeof message.status !== "number")
     ) {
       this.#fail(this.#error("ElevenLabs returned a malformed provider error"));
       return;
     }
-    if (message.error !== undefined || message.message !== undefined) {
+    if (
+      message.error !== undefined ||
+      message.message !== undefined ||
+      message.code !== undefined
+    ) {
       const text = boundedProviderMessage(
         message.error ?? message.message ?? "ElevenLabs synthesis failed",
       );
-      const metadata = message.code !== undefined ? { providerCode: message.code } : undefined;
-      this.#fail(
-        elevenLabsVoiceNotFoundSocketError(message.error, text, metadata) ??
-          this.#error(text, metadata),
+      const providerCode =
+        typeof message.code === "string"
+          ? message.code
+          : typeof message.status === "string"
+            ? message.status
+            : undefined;
+      const observedCode = providerCode ?? message.code ?? message.status;
+      const metadata = observedCode !== undefined ? { providerCode: observedCode } : undefined;
+      const voiceError = elevenLabsVoiceNotFoundSocketError(
+        providerCode ?? message.error,
+        "ElevenLabs voice was not found",
+        metadata,
       );
+      if (voiceError) {
+        this.#fail(voiceError);
+        return;
+      }
+      if (
+        providerCode !== undefined ||
+        message.type !== undefined ||
+        typeof message.status === "number"
+      ) {
+        this.#fail(
+          TvicThrowableError.from(
+            classifiedProviderError(
+              PROVIDER_NAMES.elevenlabs,
+              "ElevenLabs rejected the synthesis request",
+              {
+                ...(providerCode !== undefined ? { providerCode } : {}),
+                ...(message.type !== undefined ? { providerType: message.type } : {}),
+                ...(typeof message.status === "number" ? { status: message.status } : {}),
+              },
+            ),
+          ),
+        );
+        return;
+      }
+      this.#fail(this.#error(text, metadata));
       return;
     }
     if (

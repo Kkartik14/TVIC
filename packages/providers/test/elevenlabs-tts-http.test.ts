@@ -1343,7 +1343,7 @@ describe("ElevenLabs complete HTTP TTS", () => {
         category: "provider",
         provider: PROVIDER_NAMES.elevenlabs,
         retriable: false,
-        message: "A voice with voice_id 'Zq7nXk2LmPw9RtYb4HcV' was not found.",
+        message: "ElevenLabs voice was not found",
         metadata: { httpStatus: 404, providerCode: "voice_not_found" },
       });
 

@@ -7,6 +7,7 @@ export const MAX_PROVIDER_ERROR_CODE_CHARS = 128;
 type ProviderErrorClassificationKind =
   | "auth"
   | "quota_exceeded"
+  | "plan_not_allowed"
   | "rate_limited"
   | "invalid_request"
   | "model_unsupported"
@@ -18,6 +19,7 @@ export interface ProviderErrorClassificationInput {
   readonly status?: number;
   readonly providerCode?: unknown;
   readonly providerType?: unknown;
+  readonly providerParam?: unknown;
   readonly message?: unknown;
   readonly bodyTruncated?: boolean;
   readonly bodyMalformed?: boolean;
@@ -46,6 +48,11 @@ const EXHAUSTION_CODES = new Set([
   "organization_usage_limit_exceeded",
 ]);
 const EXHAUSTION_MESSAGES = new Set(["quota exceeded", "credits exhausted"]);
+const PLAN_NOT_ALLOWED_CODES = new Set([
+  "plan_upgrade_required",
+  "feature_not_available",
+  "subscription_required",
+]);
 const AUTH_CODES = new Set([
   "invalid_api_key",
   "authentication_failed",
@@ -96,6 +103,7 @@ export function classifyProviderError(
 ): ProviderErrorClassification {
   const code = boundedNormalizedToken(input.providerCode, MAX_PROVIDER_ERROR_CODE_CHARS);
   const type = boundedNormalizedToken(input.providerType, MAX_PROVIDER_ERROR_CODE_CHARS);
+  const param = boundedNormalizedToken(input.providerParam, MAX_PROVIDER_ERROR_CODE_CHARS);
   const message = boundedNormalizedMessage(input.message);
   const statuses = validStatus(input.status) ? input.status : undefined;
   const oversized = hasOversizedField(input);
@@ -108,6 +116,9 @@ export function classifyProviderError(
       : {}),
     ...(boundedOriginal(input.providerType, MAX_PROVIDER_ERROR_CODE_CHARS)
       ? { providerType: boundedOriginal(input.providerType, MAX_PROVIDER_ERROR_CODE_CHARS) }
+      : {}),
+    ...(boundedOriginal(input.providerParam, MAX_PROVIDER_ERROR_CODE_CHARS)
+      ? { providerParam: boundedOriginal(input.providerParam, MAX_PROVIDER_ERROR_CODE_CHARS) }
       : {}),
     ...(input.bodyTruncated === true ? { bodyTruncated: true } : {}),
     ...(bodyMalformed ? { bodyMalformed: true } : {}),
@@ -122,12 +133,10 @@ export function classifyProviderError(
   }
 
   if (
-    statuses === 402 &&
-    !candidates.some((candidate) =>
-      ["invalid_api_key", "authentication_failed", "invalid_token"].includes(candidate),
-    )
+    candidates.some((candidate) => PLAN_NOT_ALLOWED_CODES.has(candidate)) ||
+    param === "service_tier"
   ) {
-    return result(TVIC_ERROR_CODES.providerQuotaExceeded, false, "quota_exceeded", metadata);
+    return result(TVIC_ERROR_CODES.providerPlanNotAllowed, false, "plan_not_allowed", metadata);
   }
 
   if (candidates.some((candidate) => AUTH_CODES.has(candidate))) {

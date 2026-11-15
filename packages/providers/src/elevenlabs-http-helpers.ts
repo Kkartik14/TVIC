@@ -494,9 +494,19 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
     message,
   });
   const metadata = { ...classification.metadata, classification: classification.classification };
+  const safeMessage = elevenLabsClassificationMessage(classification.classification);
   if (classification.code === TVIC_ERROR_CODES.providerQuotaExceeded) {
     return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerQuotaExceeded, message, {
+      providerError(TVIC_ERROR_CODES.providerQuotaExceeded, safeMessage, {
+        provider: PROVIDER_NAMES.elevenlabs,
+        retriable: false,
+        metadata,
+      }),
+    );
+  }
+  if (classification.code === TVIC_ERROR_CODES.providerPlanNotAllowed) {
+    return TvicThrowableError.from(
+      providerError(TVIC_ERROR_CODES.providerPlanNotAllowed, safeMessage, {
         provider: PROVIDER_NAMES.elevenlabs,
         retriable: false,
         metadata,
@@ -505,7 +515,7 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
   }
   if (classification.code === TVIC_ERROR_CODES.providerRateLimited) {
     return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerRateLimited, message, {
+      providerError(TVIC_ERROR_CODES.providerRateLimited, safeMessage, {
         provider: PROVIDER_NAMES.elevenlabs,
         retriable: true,
         metadata,
@@ -514,7 +524,7 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
   }
   if (classification.code === TVIC_ERROR_CODES.providerAuthFailed) {
     return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerAuthFailed, message, {
+      providerError(TVIC_ERROR_CODES.providerAuthFailed, safeMessage, {
         provider: PROVIDER_NAMES.elevenlabs,
         retriable: false,
         metadata,
@@ -523,7 +533,7 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
   }
   if (classification.code === TVIC_ERROR_CODES.providerVoiceUnsupported) {
     return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerVoiceUnsupported, message, {
+      providerError(TVIC_ERROR_CODES.providerVoiceUnsupported, safeMessage, {
         provider: PROVIDER_NAMES.elevenlabs,
         retriable: false,
         metadata,
@@ -532,7 +542,7 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
   }
   if (classification.code === TVIC_ERROR_CODES.providerModelUnsupported) {
     return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerModelUnsupported, message, {
+      providerError(TVIC_ERROR_CODES.providerModelUnsupported, safeMessage, {
         provider: PROVIDER_NAMES.elevenlabs,
         retriable: false,
         metadata,
@@ -541,19 +551,53 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
   }
   if (response.status === 400 || response.status === 404 || response.status === 422) {
     return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerInvalidRequest, message, {
+      providerError(TVIC_ERROR_CODES.providerInvalidRequest, safeMessage, {
         provider: PROVIDER_NAMES.elevenlabs,
         metadata,
       }),
     );
   }
   return TvicThrowableError.from(
-    providerError(PROVIDER_ERROR_CODES.elevenlabsTts, message, {
+    providerError(PROVIDER_ERROR_CODES.elevenlabsTts, "ElevenLabs returned an unrecognized error", {
       provider: PROVIDER_NAMES.elevenlabs,
       metadata,
       retriable: false,
     }),
   );
+}
+
+function elevenLabsClassificationMessage(
+  classification:
+    | "auth"
+    | "quota_exceeded"
+    | "plan_not_allowed"
+    | "rate_limited"
+    | "invalid_request"
+    | "model_unsupported"
+    | "voice_unsupported"
+    | "upstream"
+    | "protocol",
+): string {
+  switch (classification) {
+    case "auth":
+      return "ElevenLabs rejected the API credentials";
+    case "quota_exceeded":
+      return "ElevenLabs reported insufficient credits or quota";
+    case "plan_not_allowed":
+      return "ElevenLabs does not allow this feature on the current plan";
+    case "rate_limited":
+      return "ElevenLabs rate limit was reached";
+    case "invalid_request":
+      return "ElevenLabs rejected the request";
+    case "model_unsupported":
+      return "ElevenLabs model is unavailable";
+    case "voice_unsupported":
+      return "ElevenLabs voice was not found";
+    case "upstream":
+      return "ElevenLabs is temporarily unavailable";
+    case "protocol":
+      return "ElevenLabs returned an unrecognized error";
+  }
 }
 
 /**

@@ -46,6 +46,7 @@ import {
   normalizeProviderError,
   openWebSocket,
   parseJsonObject,
+  readBoundedWebSocketErrorBody,
   providerEventQueueOverflow,
   providerThrowableError,
   providerError,
@@ -576,7 +577,21 @@ export class CartesiaTtsProvider implements IncrementalTextToSpeechProvider {
         "X-API-Key": this.#apiKey,
         "Cartesia-Version": PROVIDER_API_VERSIONS.cartesia,
       });
-      await openWebSocket(socket, signal ? { signal } : {});
+      await openWebSocket(socket, {
+        ...(signal ? { signal } : {}),
+        onUnexpectedResponse: async (response) => {
+          const body = await readBoundedWebSocketErrorBody(response);
+          const parsed = parseJsonObject(body.text);
+          return TvicThrowableError.from(
+            cartesiaProviderError({
+              ...(parsed ?? {}),
+              status_code: response.statusCode,
+              bodyTruncated: body.truncated,
+              bodyMalformed: body.text.trim().length > 0 && parsed === null,
+            }),
+          );
+        },
+      });
       return socket;
     } catch (error) {
       if (socket) safeClose(socket);

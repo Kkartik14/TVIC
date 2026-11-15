@@ -70,6 +70,106 @@ describe("OpenAI Responses provider errors", () => {
     expect(event.error.message).not.toContain("credit balance is exhausted");
   });
 
+  it.each([
+    {
+      name: "invalid API key",
+      status: 401,
+      error: {
+        type: "authentication_error",
+        code: "invalid_api_key",
+        message: "A private authentication diagnostic.",
+      },
+      code: TVIC_ERROR_CODES.providerAuthFailed,
+      retriable: false,
+      classification: "auth",
+    },
+    {
+      name: "ordinary request rate limit",
+      status: 429,
+      error: {
+        type: "rate_limit_error",
+        code: "rate_limit_exceeded",
+        message: "A private rate limit diagnostic.",
+      },
+      code: TVIC_ERROR_CODES.providerRateLimited,
+      retriable: true,
+      classification: "rate_limited",
+    },
+    {
+      name: "missing model",
+      status: 404,
+      error: {
+        type: "invalid_request_error",
+        code: "model_not_found",
+        param: "model",
+        message: "A private model diagnostic.",
+      },
+      code: TVIC_ERROR_CODES.providerModelUnsupported,
+      retriable: false,
+      classification: "model_unsupported",
+    },
+    {
+      name: "disallowed service tier",
+      status: 400,
+      error: {
+        type: "invalid_request_error",
+        code: "invalid_request_error",
+        param: "service_tier",
+        message: "A private service tier diagnostic.",
+      },
+      code: "provider.plan_not_allowed",
+      retriable: false,
+      classification: "plan_not_allowed",
+    },
+  ])(
+    "classifies a documented OpenAI $name response",
+    async ({ status, error, code, retriable, classification }) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => Response.json({ error }, { status })),
+      );
+
+      const event = await failureEvent();
+
+      expect(event.error).toMatchObject({
+        code,
+        provider: PROVIDER_NAMES.openaiResponses,
+        retriable,
+        metadata: { httpStatus: status, classification },
+      });
+      expect(event.error.message).not.toContain("private");
+    },
+  );
+
+  it("classifies a service-tier failure from response.failed event fields", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        sseResponse({
+          type: "response.failed",
+          response: {
+            error: {
+              type: "invalid_request_error",
+              code: "invalid_request_error",
+              param: "service_tier",
+              message: "A private service tier diagnostic.",
+            },
+          },
+        }),
+      ),
+    );
+
+    const event = await failureEvent();
+
+    expect(event.error).toMatchObject({
+      code: "provider.plan_not_allowed",
+      provider: PROVIDER_NAMES.openaiResponses,
+      retriable: false,
+      metadata: { providerType: "invalid_request_error", classification: "plan_not_allowed" },
+    });
+    expect(event.error.message).not.toContain("private");
+  });
+
   it("preserves structured failure causes from response.failed events", async () => {
     vi.stubGlobal(
       "fetch",

@@ -7,9 +7,10 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 ### Fixed
 
-- Normalize OpenAI Responses, Cartesia TTS, and ElevenLabs TTS failures into
-  stable TVIC causes for exhausted quota, concurrency limits, unavailable
-  models, and upstream failures.
+- Normalize OpenAI Responses, Groq, Cartesia STT and TTS, and ElevenLabs TTS
+  failures into stable TVIC causes for rejected credentials, exhausted quota,
+  plan restrictions, rate limits, unavailable models and voices, and upstream
+  failures. A generic HTTP 402 no longer implies exhausted quota.
 
 ## 2.2.0
 

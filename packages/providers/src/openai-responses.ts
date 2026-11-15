@@ -30,6 +30,7 @@ import {
   type ProviderClock,
 } from "./common.js";
 import {
+  classifiedProviderError,
   classifyProviderError,
   readBoundedProviderErrorBody,
   type ProviderErrorClassificationInput,
@@ -369,6 +370,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
           status: response.status,
           providerCode: stringField(error, "code") ?? stringField(error, "status"),
           providerType: stringField(error, "type"),
+          providerParam: stringField(error, "param"),
           message: stringField(error, "message"),
           bodyTruncated: body.truncated,
           bodyMalformed: body.text.trim().length > 0 && parsed === null,
@@ -574,6 +576,7 @@ function openAiFailureInput(event: OpenAiStreamEvent): ProviderErrorClassificati
   return {
     providerCode: stringField(error, "code") ?? stringField(error, "status"),
     providerType: stringField(error, "type"),
+    providerParam: stringField(error, "param"),
     message: stringField(error, "message"),
   };
 }
@@ -583,24 +586,26 @@ function openAiProviderFailure(input: ProviderErrorClassificationInput) {
   const hasStructuredSelector =
     typeof input.status === "number" ||
     typeof input.providerCode === "string" ||
-    typeof input.providerType === "string";
+    typeof input.providerType === "string" ||
+    typeof input.providerParam === "string";
   if (!hasStructuredSelector && classification.classification !== "quota_exceeded") {
     return providerError(PROVIDER_ERROR_CODES.openaiResponseFailed, "OpenAI response failed", {
       provider: PROVIDER_NAMES.openaiResponses,
       retriable: true,
     });
   }
-  return providerError(classification.code, openAiFailureMessage(classification.classification), {
-    provider: PROVIDER_NAMES.openaiResponses,
-    retriable: classification.retriable,
-    metadata: { ...classification.metadata, classification: classification.classification },
-  });
+  return classifiedProviderError(
+    PROVIDER_NAMES.openaiResponses,
+    openAiFailureMessage(classification.classification),
+    input,
+  );
 }
 
 function openAiFailureMessage(
   classification:
     | "auth"
     | "quota_exceeded"
+    | "plan_not_allowed"
     | "rate_limited"
     | "invalid_request"
     | "model_unsupported"
@@ -613,6 +618,8 @@ function openAiFailureMessage(
       return "OpenAI rejected the API credentials";
     case "quota_exceeded":
       return "OpenAI credit balance or usage limit exhausted";
+    case "plan_not_allowed":
+      return "OpenAI service tier is not allowed for this project";
     case "rate_limited":
       return "OpenAI API rate limit reached";
     case "invalid_request":

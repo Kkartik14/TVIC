@@ -11,6 +11,8 @@ export type CartesiaMessage = Readonly<Record<string, unknown>> & {
   readonly title?: string;
   readonly error_code?: string;
   readonly status_code?: unknown;
+  readonly bodyTruncated?: boolean;
+  readonly bodyMalformed?: boolean;
   readonly flush_id?: number;
   readonly word_timestamps?: CartesiaAlignment;
   readonly phoneme_timestamps?: CartesiaAlignment;
@@ -29,6 +31,8 @@ export function cartesiaProviderError(message: CartesiaMessage) {
     providerType?: unknown;
     status?: number;
     message?: unknown;
+    bodyTruncated?: boolean;
+    bodyMalformed?: boolean;
   } = {};
   const providerCode =
     typeof message.error_code === "string" && message.error_code.length <= 128
@@ -38,6 +42,8 @@ export function cartesiaProviderError(message: CartesiaMessage) {
   if (message.type !== undefined) input.providerType = message.type;
   const status = integerStatus(message.status_code);
   if (status !== undefined) input.status = status;
+  if (message.bodyTruncated === true) input.bodyTruncated = true;
+  if (message.bodyMalformed === true) input.bodyMalformed = true;
   if (message.message !== undefined || message.title !== undefined) {
     input.message = message.message ?? message.title;
   }
