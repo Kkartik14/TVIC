@@ -87,6 +87,7 @@ const cartesiaApiKey = process.env.CARTESIA_API_KEY!;
 const cartesiaVoiceId = process.env.CARTESIA_VOICE_ID!;
 const agent = createVoiceAgent({
   prompt: "You schedule appointments for a doctor Be concise and confirm the time.",
+  firstMessage: "Thank you for calling. How can I help?",
   providers: {
     telephony: { provider: "web-client-audio" },
     stt: { provider: "deepgram", apiKey: process.env.DEEPGRAM_API_KEY },
@@ -139,6 +140,16 @@ try {
   await agent.stop();
 }
 ```
+
+`firstMessage` is optional. When configured, the managed agent speaks it once
+when a new session starts, before the first caller turn. It is recorded as an
+assistant turn and included in later conversation context; it does not create a
+caller transcript. It is limited to 1,000 Unicode code points and rejects
+control characters and unpaired surrogates before a session is created. Caller
+interruption follows the agent's configured interruption policy. A synthesis
+failure or output without confirmed audio ends the session with
+`tts.delivery_failed`. Events and observation records identify this turn with
+`AGENT_FIRST_MESSAGE_KIND` (`"agent_first_message"`).
 
 `agent.start()` returns `{ sessionId, run }`. The `run` value is both an async
 event stream and an awaitable final result. The separate envelope is required by

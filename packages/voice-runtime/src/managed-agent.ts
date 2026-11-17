@@ -111,6 +111,7 @@ import {
   type TextDeliveryMode,
   type TtsCallSelection,
   type TtsCallSelectionInput,
+  validateFirstMessage,
 } from "@tvic/runtime";
 import {
   configurationError,
@@ -303,6 +304,8 @@ export type ProviderCapabilitySnapshotLoader = (
 
 export interface CreateVoiceAgentOptions {
   readonly prompt: string;
+  /** Spoken once at the start of a new session, before caller input. */
+  readonly firstMessage?: string;
   readonly id?: string;
   readonly name?: string;
   readonly version?: string;
@@ -443,6 +446,7 @@ interface TtsProviderSelection<T> {
 
 interface ResolvedAgent {
   readonly agent: Agent;
+  readonly firstMessage?: string;
   readonly providerCapabilitySnapshots: readonly ProviderCapabilitySnapshot[];
   readonly providerCapabilitySnapshotsSupplied: boolean;
   readonly loadProviderCapabilitySnapshots?: ProviderCapabilitySnapshotLoader;
@@ -2041,6 +2045,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     return configurationError("createVoiceAgent options must be an object");
   }
   const prompt = nonEmpty(options.prompt, "prompt");
+  const firstMessage = validateFirstMessage(options.firstMessage);
   if (!isRecord(options.providers)) {
     return configurationError("providers must be an object");
   }
@@ -2148,6 +2153,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
   });
   return {
     agent,
+    ...(firstMessage !== undefined ? { firstMessage } : {}),
     providerCapabilitySnapshots: capabilitySnapshots,
     providerCapabilitySnapshotsSupplied: options.providerCapabilitySnapshots !== undefined,
     ...(options.loadProviderCapabilitySnapshots !== undefined
@@ -2921,6 +2927,9 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         attachment: record.attachment,
         agent: runAgent,
         callHandle: record.callHandle,
+        ...(this.#resolved.firstMessage !== undefined
+          ? { firstMessage: this.#resolved.firstMessage }
+          : {}),
         ...(this.#audioTap ? { audioTap: this.#audioTap } : {}),
         usageAccumulator: record.usageAccumulator,
         ...(record.sttSelection ? { sttSelection: record.sttSelection } : {}),

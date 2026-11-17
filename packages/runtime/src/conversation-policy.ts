@@ -8,6 +8,7 @@ import type {
   TranscriptEvent,
   Turn,
 } from "@tvic/core";
+import { AGENT_FIRST_MESSAGE_KIND } from "./voice-event.js";
 import { isTranscriptSegmentEvent, validationError, TvicThrowableError } from "@tvic/core";
 
 import { formatPreCallContextAsSystemBlock } from "./memory-loader.js";
@@ -36,6 +37,7 @@ const DEFAULT_MAX_PRE_CALL_BYTES = 16 * 1024;
 export class ConversationPolicy {
   readonly #agent: Agent;
   readonly #history: LlmMessage[] = [];
+  readonly #historyGroups: LlmMessage[][] = [];
   readonly #preCallContext: PreCallContext | undefined;
   readonly #baseSystemInstruction: string;
   #systemInstructionOverride: string | undefined;
@@ -77,6 +79,14 @@ export class ConversationPolicy {
       (a, b) => a.sequence - b.sequence || a.id.localeCompare(b.id),
     );
     for (const turn of orderedTurns) {
+      if (turn.input.metadata?.kind === AGENT_FIRST_MESSAGE_KIND) {
+        if (turn.status === "completed") {
+          this.recordAssistantMessage(turn.output.text ?? "");
+        } else if (turn.status === "cancelled" || turn.status === "interrupted") {
+          this.recordAssistantMessage(turn.output.text ?? "", true);
+        }
+        continue;
+      }
       const transcript = turn.input.transcript;
       if (!transcript) continue;
       if (turn.status === "completed") {
@@ -127,7 +137,7 @@ export class ConversationPolicy {
   }
 
   messagesForTranscript(transcript: string): readonly LlmMessage[] {
-    return this.#buildRequest({ role: "user", content: transcript }, this.#history.slice(1), []);
+    return this.#buildRequest({ role: "user", content: transcript }, this.#historyGroups, []);
   }
 
   messagesForToolContinuation(
@@ -146,7 +156,7 @@ export class ConversationPolicy {
         ),
       );
     }
-    return this.#buildRequest(current, messages.slice(1, -1), [
+    return this.#buildRequest(current, this.#historyGroups, [
       {
         role: "assistant",
         content: assistantText,
@@ -157,20 +167,35 @@ export class ConversationPolicy {
   }
 
   recordTurn(transcript: string, assistantText: string): void {
-    this.#history.push({ role: "user", content: transcript });
-    this.#history.push({ role: "assistant", content: assistantText });
-    this.#trimHistory();
+    this.#appendHistoryGroup([
+      { role: "user", content: transcript },
+      { role: "assistant", content: assistantText },
+    ]);
+  }
+
+  recordAssistantMessage(assistantText: string, interrupted = false): void {
+    this.#appendHistoryGroup([
+      {
+        role: "assistant",
+        content: interrupted
+          ? assistantText
+            ? `[Response interrupted before completion; some of this may not have been heard.] ${assistantText}`
+            : "[Response interrupted before completion.]"
+          : assistantText,
+      },
+    ]);
   }
 
   recordInterruptedTurn(transcript: string, assistantText: string): void {
-    this.#history.push({ role: "user", content: transcript });
-    this.#history.push({
-      role: "assistant",
-      content: assistantText
-        ? `[Response interrupted before completion; some of this may not have been heard.] ${assistantText}`
-        : "[Response interrupted before completion.]",
-    });
-    this.#trimHistory();
+    this.#appendHistoryGroup([
+      { role: "user", content: transcript },
+      {
+        role: "assistant",
+        content: assistantText
+          ? `[Response interrupted before completion; some of this may not have been heard.] ${assistantText}`
+          : "[Response interrupted before completion.]",
+      },
+    ]);
   }
 
   findTool(call: LlmInlineToolCall): ToolDefinition | null {
@@ -202,7 +227,7 @@ export class ConversationPolicy {
 
   #buildRequest(
     current: LlmMessage,
-    history: readonly LlmMessage[],
+    historyGroups: readonly (readonly LlmMessage[])[],
     active: readonly LlmMessage[],
   ): readonly LlmMessage[] {
     const system = this.#history[0];
@@ -227,19 +252,18 @@ export class ConversationPolicy {
     const retained: LlmMessage[] = [];
     let bytes = requiredBytes;
     let messages = required.length;
-    for (let index = history.length - 2; index >= 0; index -= 2) {
-      const pair = history.slice(index, index + 2);
-      if (pair.length !== 2) continue;
-      const pairBytes = messageBytes(pair[0]!) + messageBytes(pair[1]!);
+    for (let index = historyGroups.length - 1; index >= 0; index -= 1) {
+      const group = historyGroups[index]!;
+      const groupBytes = group.reduce((total, message) => total + messageBytes(message), 0);
       if (
-        messages + pair.length > this.#maxHistoryMessages ||
-        bytes + pairBytes > this.#maxHistoryBytes
+        messages + group.length > this.#maxHistoryMessages ||
+        bytes + groupBytes > this.#maxHistoryBytes
       ) {
         break;
       }
-      retained.unshift(...pair);
-      bytes += pairBytes;
-      messages += pair.length;
+      retained.unshift(...group);
+      bytes += groupBytes;
+      messages += group.length;
     }
     return [system, ...retained, current, ...active];
   }
@@ -248,23 +272,32 @@ export class ConversationPolicy {
     const system = this.#history[0];
     if (!system) return;
     const retained: LlmMessage[] = [];
+    const retainedGroups: LlmMessage[][] = [];
     let bytes = messageBytes(system);
     let messages = 1;
-    for (let index = this.#history.length - 2; index >= 1; index -= 2) {
-      const pair = this.#history.slice(index, index + 2);
-      if (pair.length !== 2) continue;
-      const pairBytes = messageBytes(pair[0]!) + messageBytes(pair[1]!);
+    for (let index = this.#historyGroups.length - 1; index >= 0; index -= 1) {
+      const group = this.#historyGroups[index]!;
+      const groupBytes = group.reduce((total, message) => total + messageBytes(message), 0);
       if (
-        messages + pair.length > this.#maxHistoryMessages ||
-        bytes + pairBytes > this.#maxHistoryBytes
+        messages + group.length > this.#maxHistoryMessages ||
+        bytes + groupBytes > this.#maxHistoryBytes
       ) {
         break;
       }
-      retained.unshift(...pair);
-      bytes += pairBytes;
-      messages += pair.length;
+      retained.unshift(...group);
+      retainedGroups.unshift(group);
+      bytes += groupBytes;
+      messages += group.length;
     }
+    this.#historyGroups.splice(0, this.#historyGroups.length, ...retainedGroups);
     this.#history.splice(0, this.#history.length, system, ...retained);
+  }
+
+  #appendHistoryGroup(messages: readonly LlmMessage[]): void {
+    const group = [...messages];
+    this.#historyGroups.push(group);
+    this.#history.push(...group);
+    this.#trimHistory();
   }
 }
 

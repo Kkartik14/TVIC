@@ -40,6 +40,7 @@ export {
   type SessionReaperOptions,
 } from "./session-recovery.js";
 export { ConversationPolicy, type ConversationPolicyOptions } from "./conversation-policy.js";
+export { MAX_FIRST_MESSAGE_CODE_POINTS, validateFirstMessage } from "./first-message.js";
 export {
   PipelineVoiceLoop,
   runPipelineVoiceLoop,
@@ -72,6 +73,7 @@ export type {
   AudioTapPlayoutFrame,
 } from "./audio-tap.js";
 export { PipelineVoiceLoopBuilder } from "./pipeline-loop-builder.js";
+export { AGENT_FIRST_MESSAGE_KIND } from "./voice-event.js";
 export type { DualProtocolResult, VoiceEvent } from "./voice-event.js";
 export type { LiveTerminalSource } from "./terminal-arbitration.js";
 export {

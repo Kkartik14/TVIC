@@ -7,6 +7,8 @@ import type {
 } from "@tvic/core";
 import type { PipelineVoiceLoopResult } from "./pipeline-loop.js";
 
+export const AGENT_FIRST_MESSAGE_KIND = "agent_first_message" as const;
+
 export type VoiceEvent =
   | {
       readonly kind: "transcript_delta";
@@ -20,13 +22,19 @@ export type VoiceEvent =
       readonly turnId: TurnId;
       readonly sequence: number;
     }
-  | { readonly kind: "turn_started"; readonly turnId: TurnId; readonly turnSequence: number }
+  | {
+      readonly kind: "turn_started";
+      readonly turnId: TurnId;
+      readonly turnSequence: number;
+      readonly origin?: typeof AGENT_FIRST_MESSAGE_KIND;
+    }
   | {
       readonly kind: "turn_completed";
       readonly turnId: TurnId;
       readonly status: "completed" | "cancelled" | "failed";
       readonly latencyMs: number;
       readonly delivery?: TurnOutputDelivery;
+      readonly origin?: typeof AGENT_FIRST_MESSAGE_KIND;
     }
   | {
       readonly kind: "tool_call";

@@ -3,6 +3,17 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
+## Unreleased
+
+### Added
+
+- Added optional `firstMessage` text to managed agents. It is spoken and stored
+  as an assistant turn when a new session starts, before caller input. Text is
+  limited to 1,000 Unicode code points and invalid control or surrogate
+  sequences are rejected at construction. First-message events and observation
+  records include a stable origin marker; unconfirmed or failed TTS ends the
+  session with `tts.delivery_failed`.
+
 ## 2.2.0
 
 ### Added

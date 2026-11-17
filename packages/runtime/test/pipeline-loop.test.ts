@@ -27,6 +27,7 @@ import {
 } from "@tvic/core";
 
 import {
+  AGENT_FIRST_MESSAGE_KIND,
   ConversationPolicy,
   createRuntime,
   defineAgent,
@@ -34,6 +35,7 @@ import {
   getSttRecoveryControl,
   PipelineVoiceLoop,
   resolveTtsCallSelection,
+  type VoiceEvent,
   withSttReconnect,
 } from "../src/index.js";
 import { InMemoryRuntime } from "../src/create-runtime.js";
@@ -73,6 +75,152 @@ import {
 describe("PipelineVoiceLoop", () => {
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("does not replay the configured first message for a session with prior turns", async () => {
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const priorTurn = await runtime.startTurn({
+      sessionId: session.id,
+      input: { transcript: "Earlier question", mediaEventIds: [] },
+    });
+    await runtime.endTurn(session.id, priorTurn.id, {
+      reason: "completed",
+      output: { mediaEventIds: [], text: "Earlier answer." },
+    });
+    const storedSession = await runtime.getSession(session.id);
+    expect(storedSession?.state.turnSequence).toBe(1);
+    const resumedSession = {
+      ...session,
+      state: storedSession!.state,
+    };
+    const call = makeCallHandle();
+    const stt = makeStt();
+    let synthesisCount = 0;
+    const tts = makeTts(
+      () => {
+        synthesisCount += 1;
+        return [];
+      },
+      { endStream: true },
+    );
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session: resumedSession,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: makeLlm(() => []),
+        tts,
+      }),
+      callHandle: call.handle,
+      firstMessage: "Welcome back.",
+      llmModel: "gpt-test",
+    });
+
+    const running = loop.run();
+    call.push(streamStarted(session.id));
+    call.push(streamEnded(session.id, "completed"));
+    const result = await running;
+
+    expect(result.turnsHandled).toBe(0);
+    expect(synthesisCount).toBe(0);
+    expect((await runtime.inspectSession(session.id)).turns).toHaveLength(1);
+  });
+
+  it.each(["Hello\u0000 there", "Hello\ud800", "A".repeat(1_001)])(
+    "rejects an invalid first message in the composable runtime: %j",
+    async (firstMessage) => {
+      const runtime = createRuntime();
+      await runtime.start();
+      const agent = buildAgent();
+      const session = await runtime.startSession(agent, { channel: "simulated" });
+
+      expect(
+        () =>
+          new PipelineVoiceLoop({
+            runtime,
+            session,
+            agent,
+            callHandle: makeCallHandle().handle,
+            firstMessage,
+            llmModel: "gpt-test",
+          }),
+      ).toThrow(expect.objectContaining({ code: "voice_runtime.invalid_config" }));
+    },
+  );
+
+  it("marks first-message events and observation records with their origin", async () => {
+    const metrics: Array<Readonly<Record<string, string | number | boolean>>> = [];
+    const recordedTurns: TerminalTurn[] = [];
+    const runtime = createRuntime();
+    await runtime.start();
+    const agent = buildAgent();
+    const session = await runtime.startSession(agent, { channel: "simulated" });
+    const call = makeCallHandle({ playout: "heard" });
+    const stt = makeStt();
+    const latencyRecords: Array<{ readonly origin?: string }> = [];
+    const textRecords: Array<{ readonly origin?: string }> = [];
+    const loop = new PipelineVoiceLoop({
+      runtime,
+      session,
+      agent: withPipelineProviders(agent, {
+        stt: stt.provider,
+        llm: makeLlm(() => []),
+        tts: makeTts((request) => [audioChunk(request, 1), committed(request)], {
+          endStream: true,
+        }),
+      }),
+      callHandle: call.handle,
+      firstMessage: "Welcome back.",
+      llmModel: "gpt-test",
+      onTurnLatency(record) {
+        latencyRecords.push(record);
+      },
+      onAssistantText(record) {
+        textRecords.push(record);
+      },
+      sessionMetricsRecorder: {
+        record(_name, attributes) {
+          if (attributes) metrics.push(attributes);
+        },
+        onTurn(turn) {
+          recordedTurns.push(turn);
+        },
+      },
+    });
+    const run = loop.start();
+    const events: VoiceEvent[] = [];
+    const consumeEvents = (async () => {
+      for await (const event of run) events.push(event);
+    })();
+
+    call.push(streamStarted(session.id));
+    await until(
+      () => call.sent.some((event) => event.type === "media.audio.committed"),
+      "first-message audio commit",
+    );
+    call.push(streamEnded(session.id, "completed"));
+    await run;
+    await consumeEvents;
+
+    expect(events).toContainEqual(
+      expect.objectContaining({ kind: "turn_started", origin: AGENT_FIRST_MESSAGE_KIND }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({ kind: "turn_completed", origin: AGENT_FIRST_MESSAGE_KIND }),
+    );
+    expect(latencyRecords).toContainEqual(
+      expect.objectContaining({ origin: AGENT_FIRST_MESSAGE_KIND }),
+    );
+    expect(textRecords).toContainEqual(
+      expect.objectContaining({ origin: AGENT_FIRST_MESSAGE_KIND }),
+    );
+    expect(metrics).toContainEqual(
+      expect.objectContaining({ turn_origin: AGENT_FIRST_MESSAGE_KIND }),
+    );
+    expect(recordedTurns[0]?.input.metadata?.kind).toBe(AGENT_FIRST_MESSAGE_KIND);
   });
 
   it("rejects an undeclared turn profile before opening STT", async () => {

@@ -88,6 +88,8 @@ import {
 import type { AudioTapOptions } from "./audio-tap.js";
 import { DualProtocolResultImpl } from "./dual-protocol-result.js";
 import { PipelineVoiceLoopBuilder } from "./pipeline-loop-builder.js";
+import { validateFirstMessage } from "./first-message.js";
+import { AGENT_FIRST_MESSAGE_KIND } from "./voice-event.js";
 import type { DualProtocolResult, VoiceEvent } from "./voice-event.js";
 import { drainAsyncIterator } from "./pipeline-loop-boundary.js";
 import { PipelineTerminalCoordinator } from "./pipeline-terminal-boundary.js";
@@ -135,6 +137,8 @@ export interface PipelineVoiceLoopOptions {
   readonly attachment?: SessionAttachment;
   readonly agent: Agent;
   readonly callHandle: CallHandle;
+  /** Spoken once before the first caller turn when this session has no prior turns. */
+  readonly firstMessage?: string;
   readonly llmModel: string;
   readonly llmModelSource?: UsageModelOrigin;
   readonly sttModel?: string;
@@ -206,6 +210,22 @@ type DeadlineResult<T> =
   | { readonly status: "rejected"; readonly error: unknown }
   | { readonly status: "timeout" };
 
+interface DeferredSignal {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+  readonly reject: (reason: unknown) => void;
+}
+
+function deferredSignal(): DeferredSignal {
+  let resolve!: () => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function settleWithinDeadline<T>(
   operation: () => Promise<T>,
   deadlineMs: number,
@@ -242,6 +262,7 @@ export class PipelineVoiceLoop {
   #turnsHandled = 0;
   #turnsFailed = 0;
   #firstTurnError: NormalizedError | null = null;
+  #firstMessageError: NormalizedError | undefined;
   #interruptions = 0;
   #turnChain: Promise<void> = Promise.resolve();
   #active: ActiveTurnControl | null = null;
@@ -282,6 +303,7 @@ export class PipelineVoiceLoop {
   #lastAudioTapTimestampMs = 0;
   #lastAudioTapClockObservationMs = globalThis.performance.now();
   constructor(options: PipelineVoiceLoopOptions) {
+    validateFirstMessage(options.firstMessage);
     this.#lastTurnSequence = options.session.state.turnSequence;
     if (options.turnProfile !== undefined) {
       const provider = options.agent.providers.stt;
@@ -1026,6 +1048,48 @@ export class PipelineVoiceLoop {
       },
     );
 
+    const firstMessage = this.#options.firstMessage;
+    if (firstMessage !== undefined && this.#lastTurnSequence === 0) {
+      const ready = deferredSignal();
+      const startFirstMessage = async (): Promise<void> => {
+        try {
+          await this.#handleTranscript(
+            undefined,
+            { endpointAtMs: this.#sttInput.wallNow() },
+            firstMessage,
+            ready,
+          );
+        } catch (error) {
+          ready.reject(error);
+          throw error;
+        } finally {
+          ready.reject(
+            TvicThrowableError.from(
+              cancelledError(
+                "call.cancelled",
+                "The voice pipeline ended before the first message could start",
+              ),
+            ),
+          );
+        }
+      };
+      this.#turnChain = this.#turnChain.then(startFirstMessage, startFirstMessage);
+      void this.#turnChain.catch(() => undefined);
+      try {
+        await ready.promise;
+      } catch (error) {
+        supervisor.abort(error);
+        await cancelWithTimeout(
+          () => commandController.abort(error),
+          pipelineConstants.CANCELLATION_TIMEOUT_MS,
+          () => this.#cancellationTimeout("stt.abort"),
+        ).catch(() => undefined);
+        await transcriptTask.catch(() => undefined);
+        await this.#turnChain.catch(() => undefined);
+        throw error;
+      }
+    }
+
     let endReason = "remote_hangup";
     let streamError: NormalizedError | null = null;
     let mediaEnded = false;
@@ -1182,6 +1246,9 @@ export class PipelineVoiceLoop {
           retriable: false,
         }),
       );
+    }
+    if (this.#firstMessageError) {
+      throw TvicThrowableError.from(this.#firstMessageError);
     }
     if (!mediaEnded) {
       if (this.#runCancelled || this.#effectiveSignal()?.aborted) {
@@ -1619,9 +1686,22 @@ export class PipelineVoiceLoop {
     }
   }
 
-  async #handleTranscript(transcript: string, timing: UtteranceTiming): Promise<void> {
+  async #handleTranscript(
+    transcript: string | undefined,
+    timing: UtteranceTiming,
+    firstMessage?: string,
+    firstMessageReady?: DeferredSignal,
+  ): Promise<void> {
+    const isFirstMessage = firstMessage !== undefined;
     const checkpointRecovered = await this.#persistenceGate;
-    if (this.#persistenceSessionEnding) return;
+    if (this.#persistenceSessionEnding) {
+      firstMessageReady?.reject(
+        TvicThrowableError.from(
+          cancelledError("call.cancelled", "The voice pipeline was cancelled"),
+        ),
+      );
+      return;
+    }
     if (!checkpointRecovered || this.#persistenceDegraded) {
       const failure =
         this.#lastPersistenceFailure ??
@@ -1631,6 +1711,10 @@ export class PipelineVoiceLoop {
         );
       this.#markPersistenceDegraded(failure, "persistence_gate");
       await this.#endSessionAfterPersistenceFailure(failure);
+      if (isFirstMessage) {
+        this.#firstMessageError = failure;
+        firstMessageReady?.reject(failure);
+      }
       return;
     }
     const sequenceBeforeStart = this.#lastTurnSequence;
@@ -1638,7 +1722,9 @@ export class PipelineVoiceLoop {
     try {
       turn = await this.#options.runtime.startTurn({
         sessionId: this.#options.session.id,
-        input: { transcript, mediaEventIds: [] },
+        input: isFirstMessage
+          ? { mediaEventIds: [], metadata: { kind: AGENT_FIRST_MESSAGE_KIND } }
+          : { transcript: transcript!, mediaEventIds: [] },
       });
       this.#lastTurnSequence = turn.sequence;
       await this.#persistTurnStatus(turn.id, "thinking");
@@ -1658,6 +1744,10 @@ export class PipelineVoiceLoop {
       );
       if (terminal) this.#recoverNonCheckpointPersistence(generation);
       else await this.#endSessionAfterPersistenceFailure(failure);
+      if (isFirstMessage) {
+        this.#firstMessageError = failure;
+        firstMessageReady?.reject(failure);
+      }
       return;
     }
     this.#turnsHandled += 1;
@@ -1685,23 +1775,27 @@ export class PipelineVoiceLoop {
       kind: "turn_started",
       turnId: turn.id,
       turnSequence: turn.sequence,
+      ...(isFirstMessage ? { origin: AGENT_FIRST_MESSAGE_KIND } : {}),
     });
     this.#recordObservation(
       RUNTIME_OBSERVATION_NAMES.TURN_START,
       turn.id,
       {
         turn_sequence: turn.sequence,
+        ...(isFirstMessage ? { turn_origin: AGENT_FIRST_MESSAGE_KIND } : {}),
         ...(timing.listenedMs !== undefined ? { listened_ms: timing.listenedMs } : {}),
         ...(timing.endpointMs !== undefined ? { endpoint_ms: timing.endpointMs } : {}),
       },
       timing.endpointAtMs,
     );
-    this.#emitVoiceEvent({
-      kind: "transcript_delta",
-      text: transcript,
-      turnId: turn.id,
-      isFinal: true,
-    });
+    if (!isFirstMessage) {
+      this.#emitVoiceEvent({
+        kind: "transcript_delta",
+        text: transcript!,
+        turnId: turn.id,
+        isFinal: true,
+      });
+    }
     let terminalWriteMayBeLate = false;
     const detachControlSignal = linkAbortSignal(this.#effectiveSignal(), control.abort);
     const detachAttachmentClear = this.#options.attachment?.signal
@@ -1727,6 +1821,7 @@ export class PipelineVoiceLoop {
       );
       control.abort.abort();
     }
+    firstMessageReady?.resolve();
     const latency: MutableTurnLatency = {
       ...(timing.listenedMs !== undefined ? { listenedMs: timing.listenedMs } : {}),
       ...(timing.endpointMs !== undefined ? { endpointMs: timing.endpointMs } : {}),
@@ -1741,6 +1836,7 @@ export class PipelineVoiceLoop {
         status,
         latencyMs: latency.totalMs ?? this.#durationSince(startedAtMs),
         delivery: turnOutputDelivery(control, textDelivered),
+        ...(isFirstMessage ? { origin: AGENT_FIRST_MESSAGE_KIND } : {}),
       });
     };
     let finalText = "";
@@ -1750,7 +1846,9 @@ export class PipelineVoiceLoop {
     let incrementalFailure: unknown = null;
     let speakingPersisted = false;
     const toolCallIds: ToolCallId[] = [];
-    const incrementalOutput = this.#turnOutput.incrementalTtsInput(turn, control);
+    const incrementalOutput = isFirstMessage
+      ? null
+      : this.#turnOutput.incrementalTtsInput(turn, control);
     const incrementalInput = incrementalOutput?.input ?? null;
     const incrementalPlayback = incrementalInput
       ? incrementalInput.opened
@@ -1776,39 +1874,43 @@ export class PipelineVoiceLoop {
       : undefined;
 
     try {
-      await this.#resolveTurnSystemPrompt(turn);
-      const messages = this.#policy.messagesForTranscript(transcript);
-      const first = await this.#turnOutput.runLlm(turn, messages, control, latency, onLlmText);
-      finalText = first.text;
+      if (isFirstMessage) {
+        finalText = firstMessage;
+      } else {
+        await this.#resolveTurnSystemPrompt(turn);
+        const messages = this.#policy.messagesForTranscript(transcript!);
+        const first = await this.#turnOutput.runLlm(turn, messages, control, latency, onLlmText);
+        finalText = first.text;
 
-      if (!control.abort.signal.aborted && first.toolCalls.length > 0) {
-        if (incrementalInput && !incrementalFailure) {
-          await incrementalInput.flushBoundary().catch((error: unknown) => {
-            incrementalFailure ??= error;
-          });
-        }
-        await this.#persistTurnStatus(turn.id, "calling_tool");
-        const tools = await this.#turnOutput.executeToolCalls(
-          turn,
-          first.toolCalls,
-          control,
-          latency,
-        );
-        toolCallIds.push(...tools.toolCallIds);
-        if (!control.abort.signal.aborted) {
-          const continuation = await this.#turnOutput.runLlm(
+        if (!control.abort.signal.aborted && first.toolCalls.length > 0) {
+          if (incrementalInput && !incrementalFailure) {
+            await incrementalInput.flushBoundary().catch((error: unknown) => {
+              incrementalFailure ??= error;
+            });
+          }
+          await this.#persistTurnStatus(turn.id, "calling_tool");
+          const tools = await this.#turnOutput.executeToolCalls(
             turn,
-            this.#policy.messagesForToolContinuation(
-              messages,
-              first.text,
-              tools.messages,
-              tools.assistantToolCalls,
-            ),
+            first.toolCalls,
             control,
             latency,
-            onLlmText,
           );
-          finalText = continuation.text;
+          toolCallIds.push(...tools.toolCallIds);
+          if (!control.abort.signal.aborted) {
+            const continuation = await this.#turnOutput.runLlm(
+              turn,
+              this.#policy.messagesForToolContinuation(
+                messages,
+                first.text,
+                tools.messages,
+                tools.assistantToolCalls,
+              ),
+              control,
+              latency,
+              onLlmText,
+            );
+            finalText = continuation.text;
+          }
         }
       }
 
@@ -1834,12 +1936,16 @@ export class PipelineVoiceLoop {
           await incrementalPlayback?.catch(() => undefined);
         }
       } catch (error) {
+        const cancelledBeforeFailure = control.abort.signal.aborted;
         audioError = normalizeUnknownError(error, {
           code: "tts.delivery_failed",
           category: "internal",
           retriable: false,
         });
         this.#abortActive("tts_failed");
+        if (isFirstMessage && !cancelledBeforeFailure) {
+          throw TvicThrowableError.from(audioError);
+        }
       }
 
       const cancelledByBargeIn =
@@ -1860,6 +1966,15 @@ export class PipelineVoiceLoop {
         textDelivered === true && !audioDelivered && this.#hasTerminalShutdown();
       control.outputDelivered = audioDelivered || textDelivered === true;
       latency.totalMs = this.#durationSince(startedAtMs);
+
+      if (isFirstMessage && control.interruptedAtMs === null && !audioDelivered) {
+        throw TvicThrowableError.from(
+          internalError(
+            "tts.delivery_failed",
+            "The first message did not produce confirmed audio output",
+          ),
+        );
+      }
 
       // Keep the transport receipt truthful, but never let a late acceptance
       // revive a turn after the run has terminally shut down.
@@ -1894,8 +2009,11 @@ export class PipelineVoiceLoop {
         }
         if (terminal.status !== "cancelled") {
           if (terminal.status === "completed") {
-            this.#policy.recordTurn(transcript, finalText);
-            await this.#updateMemory(turn.id, transcript, finalText).catch(() => undefined);
+            if (isFirstMessage) this.#policy.recordAssistantMessage(finalText);
+            else this.#policy.recordTurn(transcript!, finalText);
+            if (transcript !== undefined) {
+              await this.#updateMemory(turn.id, transcript, finalText).catch(() => undefined);
+            }
           } else {
             this.#turnsFailed += 1;
           }
@@ -1916,8 +2034,11 @@ export class PipelineVoiceLoop {
         }
         if (control.interruptedAtMs !== null && control.cancelReason === "barge_in") {
           const memoryText = interruptedText || finalText;
-          this.#policy.recordInterruptedTurn(transcript, memoryText);
-          await this.#updateMemory(turn.id, transcript, memoryText, true).catch(() => undefined);
+          if (isFirstMessage) this.#policy.recordAssistantMessage(memoryText, true);
+          else {
+            this.#policy.recordInterruptedTurn(transcript!, memoryText);
+            await this.#updateMemory(turn.id, transcript!, memoryText, true).catch(() => undefined);
+          }
         }
         this.#observeTerminalTurn({
           turn,
@@ -1968,7 +2089,8 @@ export class PipelineVoiceLoop {
         });
         return;
       }
-      this.#policy.recordTurn(transcript, finalText);
+      if (isFirstMessage) this.#policy.recordAssistantMessage(finalText);
+      else this.#policy.recordTurn(transcript!, finalText);
       this.#recordTerminalObservation({
         turn,
         terminal,
@@ -1978,7 +2100,9 @@ export class PipelineVoiceLoop {
         audioError,
         latency,
       });
-      await this.#updateMemory(turn.id, transcript, finalText).catch(() => undefined);
+      if (transcript !== undefined) {
+        await this.#updateMemory(turn.id, transcript, finalText).catch(() => undefined);
+      }
       this.#observeTerminalTurn({
         turn,
         terminal,
@@ -2071,7 +2195,8 @@ export class PipelineVoiceLoop {
       }
       if (terminal && terminal.status !== "failed") {
         if (terminal.status === "completed") {
-          this.#policy.recordTurn(transcript, finalText);
+          if (isFirstMessage) this.#policy.recordAssistantMessage(finalText);
+          else this.#policy.recordTurn(transcript!, finalText);
         }
         this.#recordTerminalObservation({
           turn,
@@ -2083,7 +2208,9 @@ export class PipelineVoiceLoop {
           latency,
         });
         if (terminal.status === "completed") {
-          await this.#updateMemory(turn.id, transcript, finalText).catch(() => undefined);
+          if (transcript !== undefined) {
+            await this.#updateMemory(turn.id, transcript, finalText).catch(() => undefined);
+          }
         }
         this.#observeTerminalTurn({
           turn,
@@ -2116,6 +2243,10 @@ export class PipelineVoiceLoop {
         errorEvent: reportedError,
         emitTurnCompleted,
       });
+      if (isFirstMessage) {
+        this.#firstMessageError = turnError;
+        this.#runSupervisor?.abort(turnError);
+      }
     } finally {
       detachControlSignal();
       detachAttachmentClear();
@@ -2133,6 +2264,9 @@ export class PipelineVoiceLoop {
       status: turn.status,
       sequence: turn.sequence,
     };
+    if (turn.input.metadata?.kind === AGENT_FIRST_MESSAGE_KIND) {
+      attributes.turn_origin = AGENT_FIRST_MESSAGE_KIND;
+    }
     if (turn.latency.totalMs !== undefined) attributes.total_ms = turn.latency.totalMs;
     try {
       this.#options.sessionMetricsRecorder?.record("turn.end", attributes);
@@ -2159,6 +2293,9 @@ export class PipelineVoiceLoop {
       audio_delivered: observation.audioDelivered,
       terminal_persisted: terminal !== undefined,
     };
+    if (turn.input.metadata?.kind === AGENT_FIRST_MESSAGE_KIND) {
+      attributes.turn_origin = AGENT_FIRST_MESSAGE_KIND;
+    }
     const latency = terminal?.latency ?? observation.latency;
     if (latency.listenedMs !== undefined) attributes.listened_ms = latency.listenedMs;
     if (latency.endpointMs !== undefined) attributes.endpoint_ms = latency.endpointMs;
@@ -2209,6 +2346,7 @@ export class PipelineVoiceLoop {
       turn,
       status,
       observation.latency,
+      turn.input.metadata?.kind === AGENT_FIRST_MESSAGE_KIND ? AGENT_FIRST_MESSAGE_KIND : undefined,
     );
     reportAssistantText(
       this.#options.onAssistantText,
@@ -2218,6 +2356,7 @@ export class PipelineVoiceLoop {
       observation.finalText,
       observation.textDelivered,
       observation.audioError,
+      turn.input.metadata?.kind === AGENT_FIRST_MESSAGE_KIND ? AGENT_FIRST_MESSAGE_KIND : undefined,
     );
     if (terminal) {
       this.#recordTerminalTurn(terminal);
