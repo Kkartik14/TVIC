@@ -33,6 +33,8 @@ export {
 } from "./managed-agent.js";
 
 export {
+  AGENT_FIRST_MESSAGE_KIND,
+  MAX_FIRST_MESSAGE_CODE_POINTS,
   assertMemoryCapability,
   assertMemoryPolicySupported,
   ConversationPolicy,

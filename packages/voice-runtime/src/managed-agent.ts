@@ -111,6 +111,7 @@ import {
   type TextDeliveryMode,
   type TtsCallSelection,
   type TtsCallSelectionInput,
+  validateFirstMessage,
 } from "@tvic/runtime";
 import {
   configurationError,
@@ -2044,7 +2045,7 @@ function resolveAgent(options: CreateVoiceAgentOptions): ResolvedAgent {
     return configurationError("createVoiceAgent options must be an object");
   }
   const prompt = nonEmpty(options.prompt, "prompt");
-  const firstMessage = optionalString(options.firstMessage, "firstMessage");
+  const firstMessage = validateFirstMessage(options.firstMessage);
   if (!isRecord(options.providers)) {
     return configurationError("providers must be an object");
   }

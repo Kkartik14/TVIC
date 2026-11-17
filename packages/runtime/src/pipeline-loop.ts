@@ -88,6 +88,8 @@ import {
 import type { AudioTapOptions } from "./audio-tap.js";
 import { DualProtocolResultImpl } from "./dual-protocol-result.js";
 import { PipelineVoiceLoopBuilder } from "./pipeline-loop-builder.js";
+import { validateFirstMessage } from "./first-message.js";
+import { AGENT_FIRST_MESSAGE_KIND } from "./voice-event.js";
 import type { DualProtocolResult, VoiceEvent } from "./voice-event.js";
 import { drainAsyncIterator } from "./pipeline-loop-boundary.js";
 import { PipelineTerminalCoordinator } from "./pipeline-terminal-boundary.js";
@@ -301,6 +303,7 @@ export class PipelineVoiceLoop {
   #lastAudioTapTimestampMs = 0;
   #lastAudioTapClockObservationMs = globalThis.performance.now();
   constructor(options: PipelineVoiceLoopOptions) {
+    validateFirstMessage(options.firstMessage);
     this.#lastTurnSequence = options.session.state.turnSequence;
     if (options.turnProfile !== undefined) {
       const provider = options.agent.providers.stt;
@@ -1048,13 +1051,28 @@ export class PipelineVoiceLoop {
     const firstMessage = this.#options.firstMessage;
     if (firstMessage !== undefined && this.#lastTurnSequence === 0) {
       const ready = deferredSignal();
-      const startFirstMessage = (): Promise<void> =>
-        this.#handleTranscript(
-          undefined,
-          { endpointAtMs: this.#sttInput.wallNow() },
-          firstMessage,
-          ready,
-        );
+      const startFirstMessage = async (): Promise<void> => {
+        try {
+          await this.#handleTranscript(
+            undefined,
+            { endpointAtMs: this.#sttInput.wallNow() },
+            firstMessage,
+            ready,
+          );
+        } catch (error) {
+          ready.reject(error);
+          throw error;
+        } finally {
+          ready.reject(
+            TvicThrowableError.from(
+              cancelledError(
+                "call.cancelled",
+                "The voice pipeline ended before the first message could start",
+              ),
+            ),
+          );
+        }
+      };
       this.#turnChain = this.#turnChain.then(startFirstMessage, startFirstMessage);
       void this.#turnChain.catch(() => undefined);
       try {
@@ -1705,7 +1723,7 @@ export class PipelineVoiceLoop {
       turn = await this.#options.runtime.startTurn({
         sessionId: this.#options.session.id,
         input: isFirstMessage
-          ? { mediaEventIds: [], metadata: { kind: "agent_first_message" } }
+          ? { mediaEventIds: [], metadata: { kind: AGENT_FIRST_MESSAGE_KIND } }
           : { transcript: transcript!, mediaEventIds: [] },
       });
       this.#lastTurnSequence = turn.sequence;
@@ -1757,12 +1775,14 @@ export class PipelineVoiceLoop {
       kind: "turn_started",
       turnId: turn.id,
       turnSequence: turn.sequence,
+      ...(isFirstMessage ? { origin: AGENT_FIRST_MESSAGE_KIND } : {}),
     });
     this.#recordObservation(
       RUNTIME_OBSERVATION_NAMES.TURN_START,
       turn.id,
       {
         turn_sequence: turn.sequence,
+        ...(isFirstMessage ? { turn_origin: AGENT_FIRST_MESSAGE_KIND } : {}),
         ...(timing.listenedMs !== undefined ? { listened_ms: timing.listenedMs } : {}),
         ...(timing.endpointMs !== undefined ? { endpoint_ms: timing.endpointMs } : {}),
       },
@@ -1816,6 +1836,7 @@ export class PipelineVoiceLoop {
         status,
         latencyMs: latency.totalMs ?? this.#durationSince(startedAtMs),
         delivery: turnOutputDelivery(control, textDelivered),
+        ...(isFirstMessage ? { origin: AGENT_FIRST_MESSAGE_KIND } : {}),
       });
     };
     let finalText = "";
@@ -2243,6 +2264,9 @@ export class PipelineVoiceLoop {
       status: turn.status,
       sequence: turn.sequence,
     };
+    if (turn.input.metadata?.kind === AGENT_FIRST_MESSAGE_KIND) {
+      attributes.turn_origin = AGENT_FIRST_MESSAGE_KIND;
+    }
     if (turn.latency.totalMs !== undefined) attributes.total_ms = turn.latency.totalMs;
     try {
       this.#options.sessionMetricsRecorder?.record("turn.end", attributes);
@@ -2269,6 +2293,9 @@ export class PipelineVoiceLoop {
       audio_delivered: observation.audioDelivered,
       terminal_persisted: terminal !== undefined,
     };
+    if (turn.input.metadata?.kind === AGENT_FIRST_MESSAGE_KIND) {
+      attributes.turn_origin = AGENT_FIRST_MESSAGE_KIND;
+    }
     const latency = terminal?.latency ?? observation.latency;
     if (latency.listenedMs !== undefined) attributes.listened_ms = latency.listenedMs;
     if (latency.endpointMs !== undefined) attributes.endpoint_ms = latency.endpointMs;
@@ -2319,6 +2346,7 @@ export class PipelineVoiceLoop {
       turn,
       status,
       observation.latency,
+      turn.input.metadata?.kind === AGENT_FIRST_MESSAGE_KIND ? AGENT_FIRST_MESSAGE_KIND : undefined,
     );
     reportAssistantText(
       this.#options.onAssistantText,
@@ -2328,6 +2356,7 @@ export class PipelineVoiceLoop {
       observation.finalText,
       observation.textDelivered,
       observation.audioError,
+      turn.input.metadata?.kind === AGENT_FIRST_MESSAGE_KIND ? AGENT_FIRST_MESSAGE_KIND : undefined,
     );
     if (terminal) {
       this.#recordTerminalTurn(terminal);

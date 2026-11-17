@@ -39,7 +39,7 @@ Important options:
 | Option                            | Purpose                                                                                                            |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `prompt`                          | Agent instructions used as the base system prompt                                                                  |
-| `firstMessage`                    | Optional text spoken once when a new session starts, before the first caller turn                                  |
+| `firstMessage`                    | Optional text of at most 1,000 Unicode code points spoken once before caller input                                 |
 | `providers`                       | Telephony, STT, LLM, and TTS provider instances or configuration objects                                           |
 | `models`                          | Optional model and TTS voice overrides                                                                             |
 | `providerCapabilitySnapshots`     | Optional capability facts; supplying them enables strict snapshot checks                                           |
@@ -56,7 +56,10 @@ Important options:
 
 `firstMessage` is recorded as an assistant turn, without inventing caller
 input, and remains in conversation context for the next model request. The
-normal TTS output and interruption policy apply to it.
+normal TTS output and interruption policy apply to it. It cannot contain
+control characters or unpaired surrogates; invalid text is rejected before a
+session is created. A synthesis failure or output without confirmed audio ends
+the session with `tts.delivery_failed`.
 
 The snapshot loader receives the selected TTS provider, model, and voice,
 `providerCapabilitySnapshotProviders`, any declared
@@ -185,6 +188,12 @@ The event union contains:
 `tool_result` includes the terminal tool `status`. Failed results include a
 safe `error.code` and `error.message`; ambiguous outcomes carry
 `recoveryPolicy: "do_not_replay"` so a host can avoid an automatic retry.
+
+First-message turns do not emit a `transcript_delta`. Their `turn_started` and
+`turn_completed` events include `origin: AGENT_FIRST_MESSAGE_KIND`. The same
+constant is exported from `voice-runtime`; latency and assistant-text
+observation records include the `origin` field, and turn metrics use
+`turn_origin`.
 
 Use one async iterator per run. Awaiting the run multiple times is safe.
 

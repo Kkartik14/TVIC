@@ -8,6 +8,7 @@ import type {
   TranscriptEvent,
   Turn,
 } from "@tvic/core";
+import { AGENT_FIRST_MESSAGE_KIND } from "./voice-event.js";
 import { isTranscriptSegmentEvent, validationError, TvicThrowableError } from "@tvic/core";
 
 import { formatPreCallContextAsSystemBlock } from "./memory-loader.js";
@@ -78,7 +79,7 @@ export class ConversationPolicy {
       (a, b) => a.sequence - b.sequence || a.id.localeCompare(b.id),
     );
     for (const turn of orderedTurns) {
-      if (turn.input.metadata?.kind === "agent_first_message") {
+      if (turn.input.metadata?.kind === AGENT_FIRST_MESSAGE_KIND) {
         if (turn.status === "completed") {
           this.recordAssistantMessage(turn.output.text ?? "");
         } else if (turn.status === "cancelled" || turn.status === "interrupted") {

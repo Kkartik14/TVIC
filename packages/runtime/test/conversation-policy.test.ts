@@ -15,7 +15,12 @@ import {
   type TranscriptEvent,
 } from "@tvic/core";
 
-import { ConversationPolicy, defineAgent, defineTool } from "../src/index.js";
+import {
+  AGENT_FIRST_MESSAGE_KIND,
+  ConversationPolicy,
+  defineAgent,
+  defineTool,
+} from "../src/index.js";
 import { TEST_PROVIDER_CAPABILITIES } from "./harness.js";
 
 const audioPolicy: AgentAudioPolicy = {
@@ -95,6 +100,35 @@ describe("ConversationPolicy", () => {
     expect(policy.messagesForTranscript("I need to reschedule.")).toEqual([
       { role: "system", content: "You book tables." },
       { role: "assistant", content: "Welcome to our appointment desk." },
+      { role: "user", content: "I need to reschedule." },
+    ]);
+  });
+
+  it("hydrates an interrupted first-message turn with an interruption marker", () => {
+    const policy = new ConversationPolicy({ agent: testAgent() });
+    const firstMessage = {
+      id: "turn_interrupted_first_message" as never,
+      sessionId: "session_policy" as SessionId,
+      sequence: 1,
+      status: "cancelled",
+      reason: "barge_in",
+      input: { mediaEventIds: [], metadata: { kind: AGENT_FIRST_MESSAGE_KIND } },
+      output: { mediaEventIds: [], text: "Welcome to our appointment desk." },
+      toolCallIds: [],
+      startedAt: timestamp,
+      endedAt: timestamp,
+      latency: {},
+    } as Turn;
+
+    policy.hydrateTurns([firstMessage]);
+
+    expect(policy.messagesForTranscript("I need to reschedule.")).toEqual([
+      { role: "system", content: "You book tables." },
+      {
+        role: "assistant",
+        content:
+          "[Response interrupted before completion; some of this may not have been heard.] Welcome to our appointment desk.",
+      },
       { role: "user", content: "I need to reschedule." },
     ]);
   });

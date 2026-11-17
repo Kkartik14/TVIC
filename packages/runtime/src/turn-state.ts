@@ -13,6 +13,7 @@ export interface TurnLatencyRecord {
   readonly turnId: TurnId;
   readonly sequence: number;
   readonly status: "completed" | "cancelled" | "failed";
+  readonly origin?: "agent_first_message";
   readonly latency: TurnLatency;
 }
 
@@ -58,6 +59,7 @@ export function reportTurnLatency(
   turn: Turn,
   status: TurnLatencyRecord["status"],
   latency: MutableTurnLatency,
+  origin?: TurnLatencyRecord["origin"],
 ): void {
   if (!report) return;
   try {
@@ -66,6 +68,7 @@ export function reportTurnLatency(
       turnId: turn.id,
       sequence: turn.sequence,
       status,
+      ...(origin !== undefined ? { origin } : {}),
       latency: { ...latency },
     });
   } catch {}

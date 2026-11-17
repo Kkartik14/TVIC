@@ -5,6 +5,7 @@ export interface AssistantTextRecord {
   readonly turnId: TurnId;
   readonly sequence: number;
   readonly status: "completed" | "cancelled" | "failed";
+  readonly origin?: "agent_first_message";
   readonly text: string;
   readonly delivered?: boolean;
   readonly audioError?: NormalizedError;
@@ -18,6 +19,7 @@ export function reportAssistantText(
   text: string,
   delivered: boolean | undefined,
   audioError: NormalizedError | null,
+  origin?: AssistantTextRecord["origin"],
 ): void {
   if (!report) return;
   try {
@@ -26,6 +28,7 @@ export function reportAssistantText(
       turnId: turn.id,
       sequence: turn.sequence,
       status,
+      ...(origin !== undefined ? { origin } : {}),
       text,
       ...(delivered !== undefined ? { delivered } : {}),
       ...(audioError ? { audioError } : {}),

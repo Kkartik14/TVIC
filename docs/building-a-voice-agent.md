@@ -79,8 +79,13 @@ configuration fails before a session is created.
 
 `firstMessage` is optional. When present, TVIC speaks it once as the new session
 starts, before the first caller turn. It is stored as an assistant turn and
-included in the next model request without adding a caller transcript. Caller
-speech can interrupt it under the configured interruption policy.
+included in the next model request without adding a caller transcript. It must
+contain at most 1,000 Unicode code points, with no control characters or
+unpaired surrogates; invalid text is rejected before a session is created.
+Caller speech can interrupt it under the configured interruption policy. If
+synthesis fails or ends without confirmed audio, the session fails with
+`tts.delivery_failed`. The first-message turn is identified in events and
+observation records by `AGENT_FIRST_MESSAGE_KIND` (`"agent_first_message"`).
 
 ## Choose providers and models
 
