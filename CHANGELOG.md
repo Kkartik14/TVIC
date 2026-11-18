@@ -3,6 +3,13 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
+## Unreleased
+
+### Fixed
+
+- Sarvam WebSocket TTS no longer emits an audio commit when a provider final
+  arrives with no pending audio chunks.
+
 ## 2.2.0
 
 ### Added

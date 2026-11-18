@@ -11,6 +11,7 @@ import {
   type SessionId,
   type Timestamp,
   type TtsSessionOpenRequest,
+  type TtsEvent,
   type TtsUsageReporter,
   type TurnId,
 } from "@tvic/core";
@@ -1113,6 +1114,42 @@ describe("Sarvam Bulbul TTS adapter", () => {
     socket.receive(JSON.stringify({ type: "event", data: { event_type: "final" } }));
     await finished;
     expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("does not emit a media commit when finish receives a final with no pending audio", async () => {
+    const socket = new FakeSocket();
+    const session = new SarvamTtsStream(socket as never, request, streamOptions());
+    const iterator = session.events[Symbol.asyncIterator]();
+
+    const firstFlush = session.flush();
+    const pcm = new Uint8Array(640).fill(5);
+    socket.receive(
+      JSON.stringify({
+        type: "audio",
+        data: { content_type: "audio/pcm", audio: Buffer.from(pcm).toString("base64") },
+      }),
+    );
+    socket.receive(JSON.stringify({ type: "event", data: { event_type: "final" } }));
+    await firstFlush;
+
+    const firstFlushEvents = [await iterator.next(), await iterator.next(), await iterator.next()];
+    expect(firstFlushEvents.map((result) => result.value?.type)).toEqual([
+      "media.audio.chunk",
+      "media.audio.committed",
+      "tts.flush.completed",
+    ]);
+    expect(firstFlushEvents[1]?.value).toMatchObject({ sequenceRange: [1, 1], frameCount: 320 });
+
+    const finished = session.finish();
+    expect(JSON.parse(socket.sent.at(-1) ?? "{}")).toEqual({ type: "flush" });
+    socket.receive(JSON.stringify({ type: "event", data: { event_type: "final" } }));
+    await finished;
+
+    const finishEvents: TtsEvent[] = [];
+    for (let result = await iterator.next(); !result.done; result = await iterator.next()) {
+      finishEvents.push(result.value);
+    }
+    expect(finishEvents.map((event) => event.type)).toEqual(["tts.flush.completed"]);
   });
 
   it("makes concurrent finish callers wait for the same provider final event", async () => {

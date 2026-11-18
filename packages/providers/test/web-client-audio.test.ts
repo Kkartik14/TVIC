@@ -547,7 +547,7 @@ describe("WebClientAudioCallHandle", () => {
     ).toEqual([1, 1]);
   });
 
-  it("accepts Sarvam WebSocket audio after each commit resets the transport sequence", async () => {
+  it("accepts Sarvam WebSocket audio and omits an empty commit on finish", async () => {
     const ttsSocket = new FakeSarvamWebSocket();
     const provider = createSarvamTtsProvider({
       apiKey: "test",
@@ -583,8 +583,25 @@ describe("WebClientAudioCallHandle", () => {
       await expect(handle.send(committed)).resolves.toBe(true);
     }
 
+    await stream.finish();
+    const finalEvents: TtsEvent[] = [];
+    for (let result = await iterator.next(); !result.done; result = await iterator.next()) {
+      finalEvents.push(result.value);
+    }
+    const finalOutputEvents = finalEvents.filter(
+      (event) => event.type === "media.audio.chunk" || event.type === "media.audio.committed",
+    );
+    const finalSendResults = [];
+    for (const event of finalOutputEvents) {
+      finalSendResults.push(await handle.send(event as OutputMediaEvent));
+    }
+
     expect(chunkSequences).toEqual([1, 1]);
-    await stream.cancel();
+    expect(finalEvents.map((event) => event.type)).toEqual(["tts.flush.completed"]);
+    expect(finalSendResults).toEqual([]);
+    expect(finalSendResults.every(Boolean)).toBe(true);
+    expect(socket.closedWith).toBeUndefined();
+    await handle.close("completed");
   });
 
   it("normalizes invalid output media and unsupported provider operations", async () => {
@@ -1160,6 +1177,7 @@ class FakeElevenLabsSocket {
 
 class FakeSarvamWebSocket {
   readyState: number = WebSocket.OPEN;
+  #flushCount = 0;
   readonly #handlers = new Map<string, Array<(...args: never[]) => void>>();
 
   on(event: string, handler: (...args: never[]) => void): this {
@@ -1172,14 +1190,17 @@ class FakeSarvamWebSocket {
   send(data: string): void {
     const message = JSON.parse(data) as { type?: string };
     if (message.type !== "flush") return;
-    this.text({
-      type: "audio",
-      data: {
-        content_type: "audio/pcm",
-        audio: Buffer.from([1, 2]).toString("base64"),
-        request_id: "sarvam-test",
-      },
-    });
+    this.#flushCount += 1;
+    if (this.#flushCount <= 2) {
+      this.text({
+        type: "audio",
+        data: {
+          content_type: "audio/pcm",
+          audio: Buffer.from([1, 2]).toString("base64"),
+          request_id: "sarvam-test",
+        },
+      });
+    }
     this.text({ type: "event", data: { event_type: "final" } });
   }
 
