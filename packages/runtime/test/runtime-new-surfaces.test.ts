@@ -128,6 +128,16 @@ describe("new runtime surfaces", () => {
         },
       }),
     ).toThrow("minSpeechMs must be a non-negative finite number");
+
+    expect(() =>
+      defineAgent({
+        ...base,
+        interruptionPolicy: {
+          ...base.interruptionPolicy,
+          confirmWithTranscript: "yes" as never,
+        },
+      }),
+    ).toThrow("confirmWithTranscript must be a boolean when provided");
   });
 
   it("rejects a session memory quota when the adapter cannot enforce it", async () => {

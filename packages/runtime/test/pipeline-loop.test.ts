@@ -2982,7 +2982,14 @@ describe("PipelineVoiceLoop", () => {
   it("interrupts active playout on Twilio DTMF input", async () => {
     const runtime = createRuntime();
     await runtime.start();
-    const agent = buildAgent();
+    const agent = buildAgent({
+      interruptionPolicy: {
+        mode: "graceful",
+        minSpeechMs: 30,
+        trimOutputOnInterrupt: true,
+        confirmWithTranscript: true,
+      },
+    });
     const session = await runtime.startSession(agent, { channel: "simulated" });
     const call = makeCallHandle();
     const stt = makeStt();
@@ -4311,6 +4318,121 @@ describe("PipelineVoiceLoop", () => {
     const snapshot = await runtime.inspectSession(session.id);
     expect(snapshot.turns[0]?.status).toBe("cancelled");
   });
+
+  it.each(["deepgram", "cartesia", "sarvam", "assemblyai", "elevenlabs", "soniox"])(
+    "measures transcript-confirmed barge-in with %s timing",
+    async (providerName) => {
+      let monotonicMs = 0;
+      const runtime = createRuntime({
+        clock: { now: () => TS, monotonicMs: () => monotonicMs },
+      });
+      await runtime.start();
+      const agent = buildAgent({
+        interruptionPolicy: {
+          mode: "graceful",
+          minSpeechMs: 200,
+          trimOutputOnInterrupt: true,
+          confirmWithTranscript: true,
+        },
+      });
+      const session = await runtime.startSession(agent, { channel: "simulated" });
+      const call = makeCallHandle();
+      const stt = makeStt(providerName);
+      const llm = makeLlm((req) => [
+        llmEvent(req, 1, { type: "llm.started", model: req.model }),
+        llmEvent(req, 2, { type: "llm.completed", text: "a long answer", toolCalls: [] }),
+      ]);
+      const tts = makeControlledTts();
+      const loop = new PipelineVoiceLoop({
+        runtime,
+        session,
+        agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: tts.provider }),
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      });
+
+      const running = loop.run();
+      let ended = false;
+      try {
+        call.push(streamStarted(session.id));
+        stt.pushFinal(session.id, "tell me everything");
+        await until(() => tts.ready, "tts opened");
+        tts.pushChunk(1);
+        await until(() => call.sent.length >= 1, "agent speaking");
+
+        vi.useFakeTimers();
+        stt.pushSpeechStarted(session.id);
+        await vi.advanceTimersByTimeAsync(0);
+        monotonicMs = 600;
+        await vi.advanceTimersByTimeAsync(600);
+        expect(call.clearCalls).toBe(0);
+
+        stt.pushPartial(session.id, "...");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(call.clearCalls).toBe(0);
+
+        const providerSpans: Record<
+          string,
+          | { readonly short: readonly [number, number]; readonly long: readonly [number, number] }
+          | undefined
+        > = {
+          deepgram: { short: [3_820, 3_900], long: [3_820, 4_080] },
+          cartesia: undefined,
+          sarvam: undefined,
+          assemblyai: undefined,
+          elevenlabs: undefined,
+          soniox: { short: [1_000, 1_080], long: [1_000, 1_250] },
+        };
+        const spans = providerSpans[providerName];
+        if (spans) {
+          // Deepgram maps these to word timestamps; Soniox maps them to token spans.
+          stt.pushPartial(session.id, "yeah", spans.short[0], spans.short[1]);
+          await vi.advanceTimersByTimeAsync(0);
+          expect(call.clearCalls).toBe(0);
+
+          monotonicMs = 800;
+          await vi.advanceTimersByTimeAsync(200);
+          expect(call.clearCalls).toBe(0);
+
+          stt.pushPartial(session.id, "yeah", spans.short[0], spans.short[1]);
+          await vi.advanceTimersByTimeAsync(0);
+          expect(call.clearCalls).toBe(0);
+
+          stt.pushPartial(session.id, "yeah please stop", spans.long[0], spans.long[1]);
+          await vi.advanceTimersByTimeAsync(0);
+          expect(call.clearCalls).toBe(1);
+        } else {
+          // These adapters emit normalized transcript events without audio offsets.
+          stt.pushPartial(session.id, "yeah");
+          await vi.advanceTimersByTimeAsync(0);
+          expect(call.clearCalls).toBe(0);
+
+          monotonicMs = 799;
+          await vi.advanceTimersByTimeAsync(199);
+          expect(call.clearCalls).toBe(0);
+
+          monotonicMs = 800;
+          await vi.advanceTimersByTimeAsync(1);
+          expect(call.clearCalls).toBe(1);
+        }
+
+        tts.end();
+        call.push(streamEnded(session.id));
+        ended = true;
+        const result = await running;
+        expect(result.interruptions).toBe(1);
+        const snapshot = await runtime.inspectSession(session.id);
+        expect(snapshot.turns).toHaveLength(1);
+        expect(snapshot.turns[0]?.status).toBe("cancelled");
+      } finally {
+        if (!ended) {
+          tts.end();
+          call.push(streamEnded(session.id));
+        }
+        await running.catch(() => undefined);
+      }
+    },
+  );
 
   it("does not interrupt on caller speech during TTS startup (before any audio is sent)", async () => {
     const runtime = createRuntime();

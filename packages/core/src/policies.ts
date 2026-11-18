@@ -22,6 +22,8 @@ export interface InterruptionPolicy {
   readonly mode: InterruptionMode;
   readonly minSpeechMs: number;
   readonly trimOutputOnInterrupt: boolean;
+  /** Require recognized transcript text before speech can interrupt playout. */
+  readonly confirmWithTranscript?: boolean;
 }
 
 export interface IdempotencyPolicy {

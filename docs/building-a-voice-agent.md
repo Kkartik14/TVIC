@@ -518,6 +518,15 @@ The default interruption policy is graceful interruption with a 200 millisecond
 minimum speech duration and output trimming enabled. Set it explicitly when the
 application needs a different policy:
 
+Set `confirmWithTranscript: true` when a VAD signal alone should not stop output.
+A recognized word in a partial or final transcript must confirm the interruption. If the
+provider supplies transcript audio offsets, the transcribed segment must span at
+least `minSpeechMs`; otherwise the runtime measures the active speech candidate
+after transcript confirmation, starting at that confirmation rather than an
+earlier VAD event. Deepgram offsets use word timestamps, not the full result
+window. Partials can confirm barge-in, but they never commit a caller turn.
+Leaving this option unset preserves the existing default.
+
 ```ts
 const agent = createVoiceAgent({
   prompt: "You are a concise assistant.",
@@ -525,6 +534,7 @@ const agent = createVoiceAgent({
     mode: "graceful",
     minSpeechMs: 250,
     trimOutputOnInterrupt: true,
+    confirmWithTranscript: true,
   },
   providers,
 });

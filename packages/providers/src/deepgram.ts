@@ -244,6 +244,7 @@ const DEEPGRAM_CAPABILITIES = {
 } satisfies ProviderCapabilities;
 
 const DEEPGRAM_NON_TRANSCRIPT_TYPES = new Set(["Metadata", "UtteranceEnd", "KeepAlive"]);
+const DEEPGRAM_UTTERANCE_END_MS = 1_000;
 
 export interface DeepgramSttProviderOptions {
   readonly apiKey: string;
@@ -264,6 +265,7 @@ interface DeepgramResult {
   readonly err_msg?: string;
   readonly message?: string;
   readonly timestamp?: number;
+  readonly last_word_end?: number;
   readonly is_final?: boolean;
   readonly speech_final?: boolean;
   readonly duration?: number;
@@ -276,6 +278,12 @@ interface DeepgramAlternative {
   readonly transcript?: string;
   readonly confidence?: number;
   readonly languages?: readonly string[];
+  readonly words?: readonly DeepgramWord[];
+}
+
+interface DeepgramWord {
+  readonly start?: number;
+  readonly end?: number;
 }
 
 export class DeepgramSttProvider implements SpeechToTextProvider {
@@ -415,6 +423,9 @@ export class DeepgramSttProvider implements SpeechToTextProvider {
     url.searchParams.set("endpointing", String(this.#endpointingMs));
     url.searchParams.set("vad_events", String(this.#vadEvents));
     url.searchParams.set("punctuate", String(this.#punctuate));
+    if (request.interimResults) {
+      url.searchParams.set("utterance_end_ms", String(DEEPGRAM_UTTERANCE_END_MS));
+    }
     if (request.language) {
       url.searchParams.set("language", request.language);
     } else if (languagePolicy?.mode === "fixed") {
@@ -545,6 +556,10 @@ export class DeepgramSttStream implements SttStream {
   #hasSentAudio = false;
   #providerDurationFinalized = false;
   #failed = false;
+  #lastFinalAudioEndMs: number | undefined;
+  #lastEndpointAudioOffsetMs: number | undefined;
+  #pendingUtteranceEndAudioOffsetMs: number | undefined;
+  #finalsPendingEndpoint = false;
   #closeTimer: ReturnType<typeof setTimeout> | undefined;
   #closePromise: Promise<void> | undefined;
   #resolveClose: (() => void) | undefined;
@@ -732,6 +747,10 @@ export class DeepgramSttStream implements SttStream {
       this.#reportProviderDuration(parsed.duration);
       return;
     }
+    if (messageType === "UtteranceEnd") {
+      this.#handleUtteranceEnd(parsed);
+      return;
+    }
     if (messageType !== "Results" && !DEEPGRAM_NON_TRANSCRIPT_TYPES.has(messageType)) {
       this.#fail(
         providerError(
@@ -753,12 +772,13 @@ export class DeepgramSttStream implements SttStream {
     const alternative = parsed.channel?.alternatives?.[0];
     const text = alternative?.transcript?.trim();
     const timestamp = this.#clock.now();
-    const audioStartMs = secondsToMs(parsed.start);
-    const audioDurationMs = secondsToMs(parsed.duration);
-    const audioEndMs =
-      typeof audioStartMs === "number" && typeof audioDurationMs === "number"
-        ? audioStartMs + audioDurationMs
+    const resultStartMs = secondsToMs(parsed.start);
+    const resultDurationMs = secondsToMs(parsed.duration);
+    const resultEndMs =
+      typeof resultStartMs === "number" && typeof resultDurationMs === "number"
+        ? resultStartMs + resultDurationMs
         : undefined;
+    const transcriptWordOffsets = deepgramWordOffsetsMs(alternative?.words);
 
     if (text) {
       if (
@@ -774,8 +794,8 @@ export class DeepgramSttStream implements SttStream {
             ? { confidence: alternative.confidence }
             : {}),
           ...(alternative?.languages?.[0] ? { language: alternative.languages[0] } : {}),
-          ...(typeof audioStartMs === "number" ? { audioStartMs } : {}),
-          ...(typeof audioEndMs === "number" ? { audioEndMs } : {}),
+          ...(transcriptWordOffsets ? { audioStartMs: transcriptWordOffsets.startMs } : {}),
+          ...(transcriptWordOffsets ? { audioEndMs: transcriptWordOffsets.endMs } : {}),
           startTimestamp: timestamp,
           endTimestamp: timestamp,
           ...(parsed.metadata
@@ -786,33 +806,82 @@ export class DeepgramSttStream implements SttStream {
         return;
       }
       this.#sequence += 1;
+      if (parsed.is_final === true) {
+        this.#lastFinalAudioEndMs = resultEndMs ?? this.#lastFinalAudioEndMs;
+        this.#finalsPendingEndpoint = true;
+        if (parsed.speech_final !== true && this.#pendingUtteranceEndAudioOffsetMs !== undefined) {
+          this.#emitEndpoint(
+            Math.max(this.#lastFinalAudioEndMs ?? 0, this.#pendingUtteranceEndAudioOffsetMs ?? 0),
+          );
+        }
+      }
     }
 
     if (!text && (parsed.is_final === true || parsed.speech_final === true)) {
+      this.#pendingUtteranceEndAudioOffsetMs = undefined;
       return;
     }
 
     if (parsed.speech_final) {
-      if (
-        !this.#pushEvent({
-          id: this.#ids.next(),
-          type: "stt.endpoint",
-          direction: "input",
-          sessionId: this.#request.sessionId,
-          sequence: this.#sequence,
-          provider: PROVIDER_NAMES.deepgram,
-          reason: "provider",
-          timestamp,
-          ...(typeof audioEndMs === "number" ? { audioOffsetMs: audioEndMs } : {}),
-          ...(parsed.metadata
-            ? { metadata: { deepgram: boundedProviderMetadata(parsed.metadata) } }
-            : {}),
-        })
-      ) {
-        return;
-      }
-      this.#sequence += 1;
+      this.#emitEndpoint(resultEndMs, timestamp, parsed.metadata);
     }
+  }
+
+  #handleUtteranceEnd(message: DeepgramResult): void {
+    const audioOffsetMs = secondsToMs(message.last_word_end);
+    if (audioOffsetMs === undefined) return;
+    if (
+      this.#lastEndpointAudioOffsetMs !== undefined &&
+      audioOffsetMs <= this.#lastEndpointAudioOffsetMs
+    ) {
+      return;
+    }
+    if (this.#finalsPendingEndpoint) {
+      this.#emitEndpoint(
+        Math.max(audioOffsetMs, this.#lastFinalAudioEndMs ?? 0),
+        this.#clock.now(),
+        message.metadata,
+      );
+      return;
+    }
+    if (this.#pendingUtteranceEndAudioOffsetMs !== undefined) {
+      this.#pendingUtteranceEndAudioOffsetMs = Math.max(
+        audioOffsetMs,
+        this.#pendingUtteranceEndAudioOffsetMs,
+      );
+      return;
+    }
+    if (!this.#hasSentAudio) return;
+    this.#pendingUtteranceEndAudioOffsetMs = audioOffsetMs;
+    void this.commit().catch(() => undefined);
+  }
+
+  #emitEndpoint(
+    audioOffsetMs?: number,
+    timestamp = this.#clock.now(),
+    metadata?: Readonly<Record<string, unknown>>,
+  ): void {
+    if (
+      !this.#pushEvent({
+        id: this.#ids.next(),
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: this.#request.sessionId,
+        sequence: this.#sequence,
+        provider: PROVIDER_NAMES.deepgram,
+        reason: "provider",
+        timestamp,
+        ...(typeof audioOffsetMs === "number" ? { audioOffsetMs } : {}),
+        ...(metadata ? { metadata: { deepgram: boundedProviderMetadata(metadata) } } : {}),
+      })
+    ) {
+      return;
+    }
+    this.#sequence += 1;
+    this.#lastEndpointAudioOffsetMs =
+      audioOffsetMs ?? this.#lastFinalAudioEndMs ?? this.#lastEndpointAudioOffsetMs;
+    this.#pendingUtteranceEndAudioOffsetMs = undefined;
+    this.#finalsPendingEndpoint = false;
   }
 
   #closeQueue(): void {
@@ -917,6 +986,24 @@ function secondsToMs(seconds: number | undefined): number | undefined {
     : undefined;
 }
 
+function deepgramWordOffsetsMs(
+  words: readonly DeepgramWord[] | undefined,
+): { readonly startMs: number; readonly endMs: number } | undefined {
+  if (!words || words.length === 0) return undefined;
+  let startMs = Number.POSITIVE_INFINITY;
+  let endMs = Number.NEGATIVE_INFINITY;
+  for (const word of words) {
+    const wordStartMs = secondsToMs(word.start);
+    const wordEndMs = secondsToMs(word.end);
+    if (wordStartMs === undefined || wordEndMs === undefined || wordEndMs < wordStartMs) {
+      return undefined;
+    }
+    startMs = Math.min(startMs, wordStartMs);
+    endMs = Math.max(endMs, wordEndMs);
+  }
+  return Number.isFinite(startMs) && Number.isFinite(endMs) ? { startMs, endMs } : undefined;
+}
+
 function validateDeepgramResult(message: DeepgramResult): ReturnType<typeof providerError> | null {
   if (typeof message.type !== "string") {
     return providerError(
@@ -943,6 +1030,7 @@ function validateDeepgramResult(message: DeepgramResult): ReturnType<typeof prov
     message.timestamp,
     message.start,
     ...(message.type === "Metadata" ? [] : [message.duration]),
+    ...(message.type === "UtteranceEnd" ? [message.last_word_end] : []),
   ];
   for (const value of timingValues) {
     if (
@@ -961,6 +1049,13 @@ function validateDeepgramResult(message: DeepgramResult): ReturnType<typeof prov
         },
       );
     }
+  }
+  if (message.type === "UtteranceEnd" && secondsToMs(message.last_word_end) === undefined) {
+    return providerError(
+      STT_ERROR_CODES.protocolError,
+      "Deepgram returned an invalid UtteranceEnd boundary",
+      { provider: PROVIDER_NAMES.deepgram, retriable: false },
+    );
   }
   if (message.type !== "Results") {
     return null;

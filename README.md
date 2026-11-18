@@ -51,8 +51,9 @@ rule is the difference between a runtime you can debug and one that quietly lies
   streaming TTS, media out.
 - Turn boundaries that separate transcript finality from endpointing, with a
   debounced silence window, an absolute utterance cap, and a commit on hangup.
-- Barge-in driven by the earliest speech signal available, gated by a minimum
-  speech duration, with output clearing and playout confirmation.
+- Barge-in driven by normalized speech signals, gated by a minimum duration.
+  Hosts can opt in to require recognized transcript text, so VAD alone never
+  interrupts and a partial can confirm without committing a turn.
 - Incremental TTS: sentences stream into a prosody-preserving synthesis session
   while the model is still generating, so audio starts before the reply is finished.
 - Provider capability negotiation that fails agent construction with an exact error

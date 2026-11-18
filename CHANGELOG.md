@@ -3,6 +3,23 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
+## Unreleased
+
+### Added
+
+- Added opt-in transcript-confirmed barge-in. When enabled, VAD speech-start
+  events alone do not interrupt; a recognized word in a partial or final must
+  confirm the candidate and meet `minSpeechMs` before output is cleared. The
+  default remains unchanged. Deepgram uses word timestamps for this span;
+  providers without transcript offsets measure from transcript confirmation.
+
+### Fixed
+
+- Deepgram STT now uses `UtteranceEnd` to emit an endpoint for accepted final
+  transcript segments, while waiting for a final result when only partial text
+  has arrived. An empty finalization response discards its pending marker, and
+  duplicate markers cannot terminate a later utterance.
+
 ## 2.2.0
 
 ### Added
