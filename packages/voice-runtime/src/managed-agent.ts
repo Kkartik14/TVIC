@@ -103,6 +103,7 @@ import {
   type DualProtocolResult,
   type AudioTapDrainContext,
   type AudioTapOptions,
+  type AssistantTextRecord,
   type PipelineVoiceLoopResult,
   type PipelineVoiceLoopOptions,
   type SttReconnectOptions,
@@ -319,6 +320,8 @@ export interface CreateVoiceAgentOptions {
   readonly contextPolicy?: AgentContextPolicy;
   readonly interruptionPolicy?: InterruptionPolicy;
   readonly audioTap?: AudioTapOptions;
+  /** Observes each terminal assistant turn; callback errors are ignored by the runtime. */
+  readonly onAssistantText?: (record: AssistantTextRecord) => void;
   readonly runtime?: RuntimeOptions;
 }
 
@@ -2202,6 +2205,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
   readonly providers: VoiceAgentProviderNames;
   readonly #resolved: ResolvedAgent;
   readonly #audioTap: AudioTapOptions | undefined;
+  readonly #onAssistantText: CreateVoiceAgentOptions["onAssistantText"];
   readonly #runtime: ReturnType<typeof createRuntime>;
   readonly #records = new Set<ManagedStartRecord>();
   readonly #generationController = new AbortController();
@@ -2218,6 +2222,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
 
   constructor(options: CreateVoiceAgentOptions) {
     this.#audioTap = validateAudioTapOptions(options.audioTap);
+    this.#onAssistantText = options.onAssistantText;
     this.#resolved = resolveAgent(options);
     this.id = this.#resolved.agent.id;
     this.name = this.#resolved.agent.name;
@@ -2922,6 +2927,7 @@ class ManagedVoiceAgent implements VoiceAgentWithSessionLifecycle {
         agent: runAgent,
         callHandle: record.callHandle,
         ...(this.#audioTap ? { audioTap: this.#audioTap } : {}),
+        ...(this.#onAssistantText ? { onAssistantText: this.#onAssistantText } : {}),
         usageAccumulator: record.usageAccumulator,
         ...(record.sttSelection ? { sttSelection: record.sttSelection } : {}),
         ...(record.ttsSelection ? { ttsSelection: record.ttsSelection } : {}),

@@ -67,6 +67,7 @@ import {
   type AudioTapDrainContext,
   type AudioTapOptions,
   type AudioTapSummary,
+  type AssistantTextRecord,
 } from "../src/index.js";
 import { validateRunOptions } from "../src/managed-agent-validation.js";
 import { ManagedVoiceAgentRun } from "../src/managed-agent-run.js";
@@ -230,6 +231,153 @@ describe("managed voice agent", () => {
     expect(loadOptions.voiceIds).toEqual(["voice"]);
     expect(MAX_TTS_VOICES_BY_LANGUAGE_ENTRIES).toBe(128);
     expect([variant, sttSelection, sttInput, ttsSelection, ttsInput]).toHaveLength(5);
+  });
+
+  it("forwards one completed assistant-text observation and swallows observer errors", async () => {
+    const observations: AssistantTextRecord[] = [];
+    const harness = createLifecycleHarness({
+      onAssistantText(record) {
+        observations.push(record);
+        throw new Error("observer failed");
+      },
+      completeLlm: async (request) =>
+        lifecycleLlmCompletion(request, "Your appointment is booked."),
+      synthesizeTts: async (request) => lifecycleTtsOutput(request),
+      callHandleFactory: (callHandle) => ({
+        ...callHandle,
+        async confirmPlayout() {
+          return true;
+        },
+      }),
+    });
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+      });
+      const run = session.run;
+      void run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      const timestamp = nowTimestamp();
+      harness.transcripts.push({
+        id: "assistant-text-final" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 1,
+        provider: "lifecycle-stt",
+        text: "Book an appointment.",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      harness.transcripts.push({
+        id: "assistant-text-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 2,
+        provider: "lifecycle-stt",
+        reason: "provider",
+        timestamp,
+      });
+      harness.inbound.push(streamEndedEvent(session.sessionId));
+
+      await expect(run).resolves.toMatchObject({ terminalReason: "completed" });
+      expect(observations).toHaveLength(1);
+      expect(observations[0]).toMatchObject({
+        sessionId: session.sessionId,
+        status: "completed",
+        text: "Your appointment is booked.",
+      });
+    } finally {
+      await harness.agent.stop();
+    }
+  });
+
+  it("forwards the partial assistant text when a managed turn is interrupted", async () => {
+    const observations: AssistantTextRecord[] = [];
+    let markPartialTextObserved!: () => void;
+    const partialTextObserved = new Promise<void>((resolve) => {
+      markPartialTextObserved = resolve;
+    });
+    let releaseLlm!: () => void;
+    const waitForCancellation = new Promise<void>((resolve) => {
+      releaseLlm = resolve;
+    });
+    const harness = createLifecycleHarness({
+      onAssistantText: (record) => observations.push(record),
+      completeLlm: async (request) => ({
+        events: (async function* () {
+          yield lifecycleLlmStarted(request);
+          yield {
+            id: "assistant-text-partial-token" as ProviderEventId,
+            type: "llm.token" as const,
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            sequence: 2,
+            provider: "lifecycle-llm",
+            timestamp: nowTimestamp(),
+            text: "The first sentence is partial.",
+          };
+          markPartialTextObserved();
+          await waitForCancellation;
+        })(),
+        async cancel() {
+          releaseLlm();
+        },
+      }),
+    });
+    const cancellation = new AbortController();
+
+    try {
+      const session = await harness.agent.start({
+        callHandle: harness.callHandle,
+        channel: "simulated",
+        signal: cancellation.signal,
+      });
+      const run = session.run;
+      void run.catch(() => undefined);
+      harness.inbound.push(streamStartedEvent(session.sessionId));
+      await harness.sttOpened;
+      const timestamp = nowTimestamp();
+      harness.transcripts.push({
+        id: "assistant-text-partial-final" as ProviderEventId,
+        type: "stt.final",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 1,
+        provider: "lifecycle-stt",
+        text: "Please answer.",
+        startTimestamp: timestamp,
+        endTimestamp: timestamp,
+      });
+      harness.transcripts.push({
+        id: "assistant-text-partial-endpoint" as ProviderEventId,
+        type: "stt.endpoint",
+        direction: "input",
+        sessionId: session.sessionId,
+        sequence: 2,
+        provider: "lifecycle-stt",
+        reason: "provider",
+        timestamp,
+      });
+      harness.inbound.push(streamEndedEvent(session.sessionId));
+      await partialTextObserved;
+      cancellation.abort();
+
+      await expect(run).rejects.toMatchObject({ category: "cancelled" });
+      expect(observations).toHaveLength(1);
+      expect(observations[0]).toMatchObject({
+        sessionId: session.sessionId,
+        status: "cancelled",
+        text: "The first sentence is partial.",
+      });
+    } finally {
+      releaseLlm();
+      await harness.agent.stop();
+    }
   });
 
   it("rejects an unsupported configured TTS combination during agent creation", () => {
@@ -5684,6 +5832,81 @@ describe("managed voice agent", () => {
   });
 });
 
+function lifecycleLlmStarted(request: Parameters<LLMProvider["complete"]>[0]): LlmStreamEvent {
+  return {
+    id: "assistant-text-llm-started" as ProviderEventId,
+    type: "llm.started",
+    sessionId: request.sessionId,
+    turnId: request.turnId,
+    sequence: 1,
+    provider: "lifecycle-llm",
+    timestamp: nowTimestamp(),
+    model: request.model,
+  };
+}
+
+function lifecycleLlmCompletion(
+  request: Parameters<LLMProvider["complete"]>[0],
+  text: string,
+): LlmCompletion {
+  const events = new AsyncQueue<LlmStreamEvent>();
+  events.push(lifecycleLlmStarted(request));
+  events.push({
+    id: "assistant-text-llm-completed" as ProviderEventId,
+    type: "llm.completed",
+    sessionId: request.sessionId,
+    turnId: request.turnId,
+    sequence: 2,
+    provider: "lifecycle-llm",
+    timestamp: nowTimestamp(),
+    text,
+    toolCalls: [],
+  });
+  events.close();
+  return { events, async cancel() {} };
+}
+
+function lifecycleTtsOutput(request: TtsSynthesisRequest): TtsStream {
+  const events = new AsyncQueue<TtsEvent>();
+  const audio = createMediaEvent({
+    id: "assistant-text-tts-audio" as never,
+    type: "media.audio.chunk",
+    sessionId: request.sessionId,
+    turnId: request.turnId,
+    sequence: 1,
+    direction: "output",
+    timestamp: nowTimestamp(),
+    monotonicOffsetMs: 0,
+    provider: "lifecycle-tts",
+    audio: {
+      format: PCM16_16K_MONO,
+      durationMs: 20,
+      frameCount: 320,
+      bytes: new Uint8Array(640),
+    },
+  });
+  events.push(audio as OutputAudioChunk);
+  events.push(
+    createMediaEvent({
+      id: "assistant-text-tts-committed" as never,
+      type: "media.audio.committed",
+      sessionId: request.sessionId,
+      turnId: request.turnId,
+      sequence: 2,
+      direction: "output",
+      timestamp: nowTimestamp(),
+      monotonicOffsetMs: 20,
+      provider: "lifecycle-tts",
+      durationMs: 20,
+      frameCount: 320,
+      sequenceRange: [1, 1],
+      chunkIds: [audio.id],
+    }),
+  );
+  events.close();
+  return { events, async cancel() {} };
+}
+
 interface LifecycleHarness {
   readonly agent: ReturnType<typeof createVoiceAgent>;
   readonly callHandle: CallHandle;
@@ -5696,6 +5919,7 @@ interface LifecycleHarness {
 
 interface LifecycleHarnessOptions {
   readonly audioTap?: AudioTapOptions;
+  readonly onAssistantText?: (record: AssistantTextRecord) => void;
   readonly runtime?: RuntimeOptions;
   readonly models?: VoiceAgentModels;
   readonly sttVocabulary?: readonly string[];
@@ -5832,6 +6056,7 @@ function createLifecycleHarness(options: LifecycleHarnessOptions = {}): Lifecycl
       ...(options.tools ? { tools: options.tools } : {}),
       ...(options.memoryPolicy ? { memoryPolicy: options.memoryPolicy } : {}),
       ...(options.audioTap ? { audioTap: options.audioTap } : {}),
+      ...(options.onAssistantText ? { onAssistantText: options.onAssistantText } : {}),
       ...(options.providerCapabilitySnapshots !== undefined
         ? { providerCapabilitySnapshots: options.providerCapabilitySnapshots }
         : {}),
