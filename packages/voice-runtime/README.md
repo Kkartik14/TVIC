@@ -140,6 +140,11 @@ try {
 }
 ```
 
+`createVoiceAgent` also accepts an optional `onAssistantText` observer. It runs once
+after each terminal turn and receives the assistant text available at that point,
+including partial text for cancelled or interrupted turns. It is observational: if
+the callback throws, the runtime swallows the error and continues the call.
+
 `agent.start()` returns `{ sessionId, run }`. The `run` value is both an async
 event stream and an awaitable final result. The separate envelope is required by
 JavaScript Promise assimilation rules; returning the Promise-like run directly
