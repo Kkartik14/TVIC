@@ -811,6 +811,7 @@ export class DeepgramSttStream implements SttStream {
     }
 
     if (!text && (parsed.is_final === true || parsed.speech_final === true)) {
+      this.#pendingUtteranceEndAudioOffsetMs = undefined;
       return;
     }
 
