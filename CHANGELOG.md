@@ -3,6 +3,15 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
+## Unreleased
+
+### Fixed
+
+- Deepgram STT now uses `UtteranceEnd` to emit an endpoint for accepted final
+  transcript segments, while waiting for a final result when only partial text
+  has arrived. An empty finalization response discards its pending marker, and
+  duplicate markers cannot terminate a later utterance.
+
 ## 2.2.0
 
 ### Added
