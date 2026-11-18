@@ -36,6 +36,7 @@ import {
   AssemblyAiSttStream,
   ElevenLabsSttProvider,
   ElevenLabsSttStream,
+  CartesiaSttProvider,
   CartesiaTtsProvider,
   CartesiaTtsStream,
   DeepgramSttProvider,
@@ -5909,14 +5910,20 @@ function createSttUsageRecorder(): {
 class FakeSocket {
   readonly sent: string[] = [];
   readonly binarySent: Buffer[] = [];
+  respondTo: ((data: string) => void) | undefined;
   readyState: number = WebSocket.OPEN;
   bufferedAmount = 0;
   closeCalls = 0;
-  readonly #handlers = new Map<string, ((value?: unknown) => void)[]>();
+  readonly #handlers = new Map<string, ((value?: unknown, reason?: unknown) => void)[]>();
 
   send(data: string | Buffer, callback?: (error?: Error) => void): void {
-    if (typeof data === "string") this.sent.push(data);
-    else this.binarySent.push(Buffer.from(data));
+    if (typeof data === "string") {
+      this.sent.push(data);
+      callback?.();
+      this.respondTo?.(data);
+      return;
+    }
+    this.binarySent.push(Buffer.from(data));
     callback?.();
   }
 
@@ -5926,9 +5933,15 @@ class FakeSocket {
     this.#emit("close");
   }
 
-  on(event: "message" | "close" | "error", handler: (value?: never) => void): this {
+  closeNormally(): void {
+    this.closeCalls += 1;
+    this.readyState = WebSocket.CLOSED;
+    this.#emit("close", 1000, Buffer.from(""));
+  }
+
+  on(event: "message" | "close" | "error", handler: (value?: never, reason?: never) => void): this {
     const handlers = this.#handlers.get(event) ?? [];
-    handlers.push(handler as (value?: unknown) => void);
+    handlers.push(handler as (value?: unknown, reason?: unknown) => void);
     this.#handlers.set(event, handlers);
     return this;
   }
@@ -5941,12 +5954,126 @@ class FakeSocket {
     this.#emit("message", data);
   }
 
-  #emit(event: string, value?: unknown): void {
+  #emit(event: string, value?: unknown, reason?: unknown): void {
     for (const handler of this.#handlers.get(event) ?? []) {
-      handler(value);
+      handler(value, reason);
     }
   }
 }
+
+describe("STT interruption timing shapes", () => {
+  const request = {
+    sessionId: "session_interruption_timing_shapes" as SessionId,
+    format: PCM16_16K_MONO,
+    interimResults: true,
+  };
+
+  it.each([
+    {
+      provider: PROVIDER_NAMES.deepgram,
+      create: (socket: FakeSocket) =>
+        new DeepgramSttProvider({ apiKey: "test", webSocketFactory: () => socket as never }).open({
+          ...request,
+          model: "nova-3",
+        }),
+      frame: {
+        type: "Results",
+        is_final: false,
+        start: 3,
+        duration: 1,
+        channel: {
+          alternatives: [{ transcript: "yeah", words: [{ word: "yeah", start: 3.82, end: 3.9 }] }],
+        },
+      },
+      offsets: { audioStartMs: 3_820, audioEndMs: 3_900 },
+    },
+    {
+      provider: PROVIDER_NAMES.cartesiaStt,
+      create: (socket: FakeSocket) =>
+        new CartesiaSttProvider({
+          apiKey: "test",
+          mode: "manual",
+          webSocketFactory: () => socket as never,
+        }).open({ ...request, model: "ink-2" }),
+      frame: { type: "transcript", is_final: false, text: "yeah", request_id: "req-1" },
+    },
+    {
+      provider: PROVIDER_NAMES.sarvam,
+      create: (socket: FakeSocket) =>
+        new SarvamSttProvider({ apiKey: "test", webSocketFactory: () => socket as never }).open(
+          request,
+        ),
+      frame: { type: "data", data: { transcript: "yeah", is_final: false, request_id: "req-1" } },
+    },
+    {
+      provider: PROVIDER_NAMES.assemblyaiStt,
+      create: async (socket: FakeSocket) => {
+        const provider = new AssemblyAiSttProvider({
+          apiKey: "test",
+          webSocketFactory: () => {
+            queueMicrotask(() =>
+              socket.receive(
+                JSON.stringify({ type: "Begin", id: "session-1", expires_at: 1_900_000_000 }),
+              ),
+            );
+            return socket as never;
+          },
+        });
+        return provider.open(request);
+      },
+      frame: { type: "Turn", transcript: "yeah", end_of_turn: false, turn_order: 1 },
+    },
+    {
+      provider: PROVIDER_NAMES.elevenlabsStt,
+      create: (socket: FakeSocket) =>
+        new ElevenLabsSttProvider({ apiKey: "test", webSocketFactory: () => socket as never }).open(
+          request,
+        ),
+      frame: { message_type: "partial_transcript", text: "yeah" },
+    },
+    {
+      provider: PROVIDER_NAMES.sonioxStt,
+      create: (socket: FakeSocket) =>
+        new SonioxSttProvider({ apiKey: "test", webSocketFactory: () => socket as never }).open(
+          request,
+        ),
+      frame: { tokens: [{ text: "yeah", is_final: false, start_ms: 3_820, end_ms: 3_900 }] },
+      offsets: { audioStartMs: 3_820, audioEndMs: 3_900 },
+    },
+  ])(
+    "normalizes $provider timing from its own wire format",
+    async ({ provider, create, frame, offsets }) => {
+      const socket = new FakeSocket();
+      socket.respondTo = (data) => {
+        if (data === JSON.stringify({ type: "CloseStream" })) socket.closeNormally();
+        else if (data === "close" || data === JSON.stringify({ type: "close" })) {
+          socket.receive(JSON.stringify({ type: "done" }));
+        } else if (data === JSON.stringify({ type: "Terminate" })) {
+          socket.receive(JSON.stringify({ type: "Termination" }));
+        } else if (data === "") socket.receive(JSON.stringify({ finished: true }));
+      };
+      const stream = await create(socket);
+      const iterator = stream.events[Symbol.asyncIterator]();
+
+      socket.receive(JSON.stringify(frame));
+
+      const event = await iterator.next();
+      expect(event).toMatchObject({
+        done: false,
+        value: { type: "stt.partial", text: "yeah" },
+      });
+      if (offsets) {
+        expect(event).toMatchObject({ value: { provider, ...offsets } });
+      } else {
+        expect(event).toMatchObject({ value: { provider } });
+        expect(event).not.toHaveProperty("value.audioStartMs");
+        expect(event).not.toHaveProperty("value.audioEndMs");
+      }
+
+      await stream.close();
+    },
+  );
+});
 
 function sseStream(
   events: readonly Readonly<Record<string, unknown>>[],
