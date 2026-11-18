@@ -53,6 +53,13 @@ Important options:
 | `sttVocabulary`                   | Default STT vocabulary terms merged into each call's terms                                                         |
 | `ttsVoicesByLanguage`             | Default language-to-voice map used when a call does not choose a voice                                             |
 
+`interruptionPolicy.confirmWithTranscript` is optional and defaults to `false`.
+When enabled, a recognized word in a partial or final transcript must confirm a
+speech candidate before it can interrupt playout. Partials can confirm interruption but
+do not commit a turn. If the transcript event includes both audio offsets, their
+span must meet `minSpeechMs`; providers without those offsets use the candidate's
+active duration after transcript confirmation.
+
 The snapshot loader receives the selected TTS provider, model, and voice,
 `providerCapabilitySnapshotProviders`, any declared
 `providerCapabilitySnapshotSelections`, and

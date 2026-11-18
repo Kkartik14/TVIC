@@ -66,6 +66,9 @@ export class PipelineSttInput {
         readonly turnId: Turn["id"];
         readonly startedAtMs: number;
         readonly audioOffsetMs?: number;
+        readonly transcriptConfirmed: boolean;
+        readonly transcriptAudioStartMs?: number;
+        readonly transcriptAudioEndMs?: number;
       }
     | undefined;
 
@@ -355,7 +358,11 @@ export class PipelineSttInput {
     }
 
     if (event.type === "stt.speech.started") {
-      this.#startBargeInCandidate(active, event.audioOffsetMs);
+      this.#startBargeInCandidate(
+        active,
+        event.audioOffsetMs,
+        this.#options.interruptionPolicy.confirmWithTranscript !== true,
+      );
       return;
     }
 
@@ -368,6 +375,12 @@ export class PipelineSttInput {
     if (!isTranscriptSegmentEvent(event) || event.text.trim().length === 0) {
       return;
     }
+    if (this.#options.interruptionPolicy.confirmWithTranscript === true) {
+      if (!/[\p{L}\p{N}]/u.test(event.text)) return;
+      this.#confirmBargeInCandidate(active, event.audioStartMs, event.audioEndMs);
+      await this.#interruptIfSpeechThresholdMet(event.audioEndMs);
+      return;
+    }
     this.#startBargeInCandidate(active, event.audioStartMs);
     await this.#interruptIfSpeechThresholdMet(event.audioEndMs);
   }
@@ -375,19 +388,35 @@ export class PipelineSttInput {
   async #interruptIfSpeechThresholdMet(audioEndMs: number | undefined): Promise<boolean> {
     const candidate = this.#speechCandidate;
     if (!candidate) return false;
-    const audioSpeechMs =
-      typeof candidate.audioOffsetMs === "number" && typeof audioEndMs === "number"
+    const requiresTranscript = this.#options.interruptionPolicy.confirmWithTranscript === true;
+    if (requiresTranscript && !candidate.transcriptConfirmed) return false;
+    const transcriptSpeechMs =
+      typeof candidate.transcriptAudioStartMs === "number" &&
+      typeof candidate.transcriptAudioEndMs === "number"
+        ? candidate.transcriptAudioEndMs - candidate.transcriptAudioStartMs
+        : undefined;
+    const audioSpeechMs = requiresTranscript
+      ? (transcriptSpeechMs ?? 0)
+      : typeof candidate.audioOffsetMs === "number" && typeof audioEndMs === "number"
         ? audioEndMs - candidate.audioOffsetMs
         : 0;
     const activeSpeechMs = this.#timing.activeNow() - candidate.startedAtMs;
-    if (Math.max(audioSpeechMs, activeSpeechMs) < this.#options.interruptionPolicy.minSpeechMs) {
+    const speechDurationMs =
+      requiresTranscript && transcriptSpeechMs !== undefined
+        ? audioSpeechMs
+        : Math.max(audioSpeechMs, activeSpeechMs);
+    if (speechDurationMs < this.#options.interruptionPolicy.minSpeechMs) {
       return false;
     }
     await this.#options.interrupt("barge_in");
     return true;
   }
 
-  #startBargeInCandidate(active: ActiveTurnControl, audioOffsetMs?: number): void {
+  #startBargeInCandidate(
+    active: ActiveTurnControl,
+    audioOffsetMs?: number,
+    transcriptConfirmed = true,
+  ): void {
     if (this.#speechCandidate?.turnId === active.turnId) {
       return;
     }
@@ -395,28 +424,95 @@ export class PipelineSttInput {
     this.#speechCandidate = {
       turnId: active.turnId,
       startedAtMs: this.#timing.activeNow(),
+      transcriptConfirmed,
       ...(typeof audioOffsetMs === "number" ? { audioOffsetMs } : {}),
     };
-    if (this.#options.interruptionPolicy.minSpeechMs <= 0) {
+    if (
+      this.#options.interruptionPolicy.minSpeechMs <= 0 &&
+      (this.#options.interruptionPolicy.confirmWithTranscript !== true || transcriptConfirmed)
+    ) {
       this.#requestBargeIn();
       return;
     }
     this.#scheduleBargeInTimer(active);
   }
 
+  #confirmBargeInCandidate(
+    active: ActiveTurnControl,
+    audioStartMs: number | undefined,
+    audioEndMs: number | undefined,
+  ): void {
+    const current = this.#speechCandidate;
+    const sameTurn = current?.turnId === active.turnId;
+    const currentTranscriptAudioStartMs = sameTurn ? current?.transcriptAudioStartMs : undefined;
+    const currentTranscriptAudioEndMs = sameTurn ? current?.transcriptAudioEndMs : undefined;
+    const transcriptAudioStartMs =
+      typeof audioStartMs === "number"
+        ? Math.min(currentTranscriptAudioStartMs ?? audioStartMs, audioStartMs)
+        : currentTranscriptAudioStartMs;
+    const transcriptAudioEndMs =
+      typeof audioEndMs === "number"
+        ? Math.max(currentTranscriptAudioEndMs ?? audioEndMs, audioEndMs)
+        : currentTranscriptAudioEndMs;
+    if (!sameTurn) {
+      this.cancelBargeInCandidate();
+    }
+    this.#speechCandidate = {
+      turnId: active.turnId,
+      startedAtMs: sameTurn ? current.startedAtMs : this.#timing.activeNow(),
+      transcriptConfirmed: true,
+      ...(sameTurn && typeof current.audioOffsetMs === "number"
+        ? { audioOffsetMs: current.audioOffsetMs }
+        : typeof audioStartMs === "number"
+          ? { audioOffsetMs: audioStartMs }
+          : {}),
+      ...(typeof transcriptAudioStartMs === "number" ? { transcriptAudioStartMs } : {}),
+      ...(typeof transcriptAudioEndMs === "number" ? { transcriptAudioEndMs } : {}),
+    };
+    if (this.#options.interruptionPolicy.minSpeechMs <= 0) {
+      return;
+    }
+    if (typeof transcriptAudioStartMs === "number" && typeof transcriptAudioEndMs === "number") {
+      if (this.#bargeInTimer !== null) clearTimeout(this.#bargeInTimer);
+      this.#bargeInTimer = null;
+      return;
+    }
+    this.#scheduleBargeInTimer(active);
+  }
+
   #scheduleBargeInTimer(active: ActiveTurnControl): void {
-    if (!this.#speechCandidate || !this.#timing.isHealthy) {
+    const candidate = this.#speechCandidate;
+    if (
+      !candidate ||
+      !this.#timing.isHealthy ||
+      (this.#options.interruptionPolicy.confirmWithTranscript === true &&
+        (!candidate.transcriptConfirmed ||
+          (typeof candidate.transcriptAudioStartMs === "number" &&
+            typeof candidate.transcriptAudioEndMs === "number")))
+    ) {
       return;
     }
     if (this.#bargeInTimer !== null) {
       clearTimeout(this.#bargeInTimer);
     }
-    const elapsed = Math.max(0, this.#timing.activeNow() - this.#speechCandidate.startedAtMs);
+    const elapsed = Math.max(0, this.#timing.activeNow() - candidate.startedAtMs);
     const remaining = Math.max(0, this.#options.interruptionPolicy.minSpeechMs - elapsed);
     this.#bargeInTimer = setTimeout(() => {
       this.#bargeInTimer = null;
       const current = this.#options.getActive();
-      if (this.#timing.isHealthy && current?.turnId === active.turnId && !current.outputDelivered) {
+      const speechCandidate = this.#speechCandidate;
+      if (
+        this.#timing.isHealthy &&
+        current?.turnId === active.turnId &&
+        !current.outputDelivered &&
+        (this.#options.interruptionPolicy.confirmWithTranscript !== true ||
+          (speechCandidate?.turnId === active.turnId &&
+            speechCandidate.transcriptConfirmed &&
+            !(
+              typeof speechCandidate.transcriptAudioStartMs === "number" &&
+              typeof speechCandidate.transcriptAudioEndMs === "number"
+            )))
+      ) {
         this.#requestBargeIn();
       }
     }, remaining);

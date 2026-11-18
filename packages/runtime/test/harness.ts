@@ -449,7 +449,7 @@ export function makeCallHandle(
   };
 }
 
-export function makeStt() {
+export function makeStt(providerName = "fake-stt") {
   let deliveredEvents = 0;
   const transcripts = pushable<TranscriptEvent>(() => {
     deliveredEvents += 1;
@@ -459,7 +459,7 @@ export function makeStt() {
   let currentSessionId: SessionId | undefined;
   let openRequest: SttOpenRequest | undefined;
   const provider: SpeechToTextProvider = {
-    name: "fake-stt",
+    name: providerName,
     kind: "stt",
     version: "0.1.0",
     capabilities: TEST_PROVIDER_CAPABILITIES,
@@ -480,7 +480,7 @@ export function makeStt() {
               direction: "input",
               sessionId: currentSessionId,
               sequence,
-              provider: "fake-stt",
+              provider: providerName,
               reason: "manual",
               timestamp: TS,
             });
@@ -506,7 +506,7 @@ export function makeStt() {
         direction: "input",
         sessionId,
         sequence,
-        provider: "fake-stt",
+        provider: providerName,
         text,
         startTimestamp: TS,
         endTimestamp: TS,
@@ -518,7 +518,7 @@ export function makeStt() {
         direction: "input",
         sessionId,
         sequence,
-        provider: "fake-stt",
+        provider: providerName,
         reason: "provider",
         timestamp: TS,
       });
@@ -532,7 +532,7 @@ export function makeStt() {
         direction: "input",
         sessionId,
         sequence,
-        provider: "fake-stt",
+        provider: providerName,
         text,
         startTimestamp: TS,
         endTimestamp: TS,
@@ -547,7 +547,7 @@ export function makeStt() {
         direction: "input",
         sessionId,
         sequence,
-        provider: "fake-stt",
+        provider: providerName,
         timestamp: TS,
         audioOffsetMs,
       });
@@ -561,14 +561,14 @@ export function makeStt() {
         direction: "input",
         sessionId,
         sequence,
-        provider: "fake-stt",
+        provider: providerName,
         reason: "silence",
         timestamp: TS,
         ...(typeof audioOffsetMs === "number" ? { audioOffsetMs } : {}),
       });
       sequence += 1;
     },
-    pushPartial(sessionId: SessionId, text: string) {
+    pushPartial(sessionId: SessionId, text: string, audioStartMs?: number, audioEndMs?: number) {
       currentSessionId = sessionId;
       transcripts.push({
         id: `stt_partial_${sequence}` as ProviderEventId,
@@ -576,8 +576,10 @@ export function makeStt() {
         direction: "input",
         sessionId,
         sequence,
-        provider: "fake-stt",
+        provider: providerName,
         text,
+        ...(typeof audioStartMs === "number" ? { audioStartMs } : {}),
+        ...(typeof audioEndMs === "number" ? { audioEndMs } : {}),
         startTimestamp: TS,
         endTimestamp: TS,
       });

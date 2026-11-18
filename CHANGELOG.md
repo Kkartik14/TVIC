@@ -5,6 +5,13 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 ## Unreleased
 
+### Added
+
+- Added opt-in transcript-confirmed barge-in. When enabled, VAD speech-start
+  events alone do not interrupt; a recognized word in a partial or final must
+  confirm the candidate and meet `minSpeechMs` before output is cleared. The
+  default remains unchanged.
+
 ### Fixed
 
 - Deepgram STT now uses `UtteranceEnd` to emit an endpoint for accepted final

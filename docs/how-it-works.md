@@ -46,6 +46,13 @@ TVIC sends canonical PCM16 little-endian audio to the selected STT provider. The
 adapter normalizes provider messages into partial transcripts, final transcripts,
 speech signals, and endpoint information.
 
+An opt-in transcript-confirmed interruption policy requires a recognized word
+before a speech candidate can interrupt playout. A partial may confirm the
+interruption without committing a caller turn. When transcript audio offsets are
+available, their span must meet `minSpeechMs`; otherwise the runtime uses the
+active candidate duration after transcript confirmation. The default policy
+continues to accept the earliest speech signal as before.
+
 A final transcript is not automatically the same thing as a completed turn. TVIC
 uses endpointing, voice activity detection (VAD), manual commits, interruption
 policy, and timing limits to decide when the caller has finished.

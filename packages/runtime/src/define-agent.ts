@@ -218,6 +218,17 @@ function assertAgentPolicyValues(
       ),
     );
   }
+  if (
+    interruptionPolicy.confirmWithTranscript !== undefined &&
+    typeof interruptionPolicy.confirmWithTranscript !== "boolean"
+  ) {
+    throw TvicThrowableError.from(
+      validationError(
+        "agent.invalid_interruption_policy",
+        "confirmWithTranscript must be a boolean when provided",
+      ),
+    );
+  }
 }
 
 function assertProviderSetCompatible(

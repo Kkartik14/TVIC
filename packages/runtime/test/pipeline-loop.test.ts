@@ -2982,7 +2982,14 @@ describe("PipelineVoiceLoop", () => {
   it("interrupts active playout on Twilio DTMF input", async () => {
     const runtime = createRuntime();
     await runtime.start();
-    const agent = buildAgent();
+    const agent = buildAgent({
+      interruptionPolicy: {
+        mode: "graceful",
+        minSpeechMs: 30,
+        trimOutputOnInterrupt: true,
+        confirmWithTranscript: true,
+      },
+    });
     const session = await runtime.startSession(agent, { channel: "simulated" });
     const call = makeCallHandle();
     const stt = makeStt();
@@ -4311,6 +4318,79 @@ describe("PipelineVoiceLoop", () => {
     const snapshot = await runtime.inspectSession(session.id);
     expect(snapshot.turns[0]?.status).toBe("cancelled");
   });
+
+  it.each(["deepgram", "cartesia", "sarvam", "assemblyai", "elevenlabs", "soniox"])(
+    "requires a recognized transcript before barge-in for %s",
+    async (providerName) => {
+      const runtime = createRuntime();
+      await runtime.start();
+      const agent = buildAgent({
+        interruptionPolicy: {
+          mode: "graceful",
+          minSpeechMs: 30,
+          trimOutputOnInterrupt: true,
+          confirmWithTranscript: true,
+        },
+      });
+      const session = await runtime.startSession(agent, { channel: "simulated" });
+      const call = makeCallHandle();
+      const stt = makeStt(providerName);
+      const llm = makeLlm((req) => [
+        llmEvent(req, 1, { type: "llm.started", model: req.model }),
+        llmEvent(req, 2, { type: "llm.completed", text: "a long answer", toolCalls: [] }),
+      ]);
+      const tts = makeControlledTts();
+      const loop = new PipelineVoiceLoop({
+        runtime,
+        session,
+        agent: withPipelineProviders(agent, { stt: stt.provider, llm, tts: tts.provider }),
+        callHandle: call.handle,
+        llmModel: "gpt-test",
+      });
+
+      const running = loop.run();
+      let ended = false;
+      try {
+        call.push(streamStarted(session.id));
+        stt.pushFinal(session.id, "tell me everything");
+        await until(() => tts.ready, "tts opened");
+        tts.pushChunk(1);
+        await until(() => call.sent.length >= 1, "agent speaking");
+
+        vi.useFakeTimers();
+        stt.pushSpeechStarted(session.id, 1_000);
+        await vi.advanceTimersByTimeAsync(40);
+        expect(call.clearCalls).toBe(0);
+
+        stt.pushPartial(session.id, "...", 1_000, 1_040);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(call.clearCalls).toBe(0);
+
+        stt.pushPartial(session.id, "please", 1_000, 1_010);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(call.clearCalls).toBe(0);
+
+        stt.pushPartial(session.id, "please stop", 1_000, 1_040);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(call.clearCalls).toBe(1);
+
+        tts.end();
+        call.push(streamEnded(session.id));
+        ended = true;
+        const result = await running;
+        expect(result.interruptions).toBe(1);
+        const snapshot = await runtime.inspectSession(session.id);
+        expect(snapshot.turns).toHaveLength(1);
+        expect(snapshot.turns[0]?.status).toBe("cancelled");
+      } finally {
+        if (!ended) {
+          tts.end();
+          call.push(streamEnded(session.id));
+        }
+        await running.catch(() => undefined);
+      }
+    },
+  );
 
   it("does not interrupt on caller speech during TTS startup (before any audio is sent)", async () => {
     const runtime = createRuntime();
