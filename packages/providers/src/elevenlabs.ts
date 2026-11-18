@@ -725,12 +725,17 @@ export class ElevenLabsTtsStream implements TtsSession {
       const text = boundedProviderMessage(
         message.error ?? message.message ?? "ElevenLabs synthesis failed",
       );
+      const errorId =
+        message.code === 1008 && isElevenLabsProviderErrorId(message.error)
+          ? message.error
+          : undefined;
       const providerCode =
-        typeof message.code === "string"
+        errorId ??
+        (typeof message.code === "string"
           ? message.code
           : typeof message.status === "string"
             ? message.status
-            : undefined;
+            : undefined);
       const observedCode = providerCode ?? message.code ?? message.status;
       const metadata = observedCode !== undefined ? { providerCode: observedCode } : undefined;
       const voiceError = elevenLabsVoiceNotFoundSocketError(
@@ -1088,6 +1093,14 @@ function isValidElevenLabsErrorCode(value: unknown): value is string | number {
     value.length > 0 &&
     value.length <= 128 &&
     !/[\u0000-\u001f\u007f]/u.test(value)
+  );
+}
+
+function isElevenLabsProviderErrorId(value: unknown): value is string {
+  return (
+    isValidElevenLabsErrorCode(value) &&
+    typeof value === "string" &&
+    /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/iu.test(value)
   );
 }
 

@@ -1940,7 +1940,7 @@ describe("ElevenLabs TTS boundaries", () => {
       category: "provider",
       provider: PROVIDER_NAMES.elevenlabs,
       retriable: false,
-      metadata: { providerCode: 1008 },
+      metadata: { providerCode: "voice_id_does_not_exist" },
     });
     expect(error?.metadata).not.toHaveProperty("outcomeUnknown");
     expect(socket.readyState).toBe(WebSocket.CLOSED);
@@ -1965,11 +1965,11 @@ describe("ElevenLabs TTS boundaries", () => {
     await expect(iterator.next()).rejects.toMatchObject({
       code: TVIC_ERROR_CODES.providerVoiceUnsupported,
       retriable: false,
-      metadata: { providerCode: 1008, outcomeUnknown: true },
+      metadata: { providerCode: "voice_id_does_not_exist", outcomeUnknown: true },
     });
   });
 
-  it("does not turn an unrelated 1008 provider error into a voice rejection", async () => {
+  it("classifies an invalid API key from a 1008 error frame", async () => {
     const socket = new FakeSocket();
     const session = new ElevenLabsTtsStream(socket as never, request, {
       clock: fixedClock,
@@ -1982,8 +1982,9 @@ describe("ElevenLabs TTS boundaries", () => {
     socket.receive({ code: 1008, error: "invalid_api_key" });
 
     await expect(next).rejects.toMatchObject({
-      code: `${PROVIDER_NAMES.elevenlabs}.tts.error`,
-      metadata: { providerCode: 1008, outcomeUnknown: true },
+      code: TVIC_ERROR_CODES.providerAuthFailed,
+      retriable: false,
+      metadata: { providerCode: "invalid_api_key", outcomeUnknown: true },
     });
   });
 
