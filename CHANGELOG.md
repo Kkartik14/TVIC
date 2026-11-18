@@ -10,7 +10,8 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 - Added opt-in transcript-confirmed barge-in. When enabled, VAD speech-start
   events alone do not interrupt; a recognized word in a partial or final must
   confirm the candidate and meet `minSpeechMs` before output is cleared. The
-  default remains unchanged.
+  default remains unchanged. Deepgram uses word timestamps for this span;
+  providers without transcript offsets measure from transcript confirmation.
 
 ### Fixed
 

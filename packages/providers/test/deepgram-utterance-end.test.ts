@@ -61,6 +61,31 @@ function sentJson(socket: FakeSocket): unknown[] {
 }
 
 describe("Deepgram UtteranceEnd", () => {
+  it("uses word timestamps instead of the result window for transcript offsets", async () => {
+    const { socket, stream, iterator } = makeStream();
+
+    socket.receive({
+      type: "Results",
+      is_final: false,
+      start: 3,
+      duration: 1,
+      channel: {
+        alternatives: [
+          {
+            transcript: "yeah",
+            words: [{ word: "yeah", start: 3.82, end: 3.9 }],
+          },
+        ],
+      },
+    });
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: "stt.partial", text: "yeah", audioStartMs: 3_820, audioEndMs: 3_900 },
+      done: false,
+    });
+    await finishStream(stream, socket);
+  });
+
   it("ends accepted final segments once and ignores duplicate or late markers", async () => {
     const { socket, stream, iterator } = makeStream();
     await stream.sendAudio({

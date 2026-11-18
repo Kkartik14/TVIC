@@ -278,6 +278,12 @@ interface DeepgramAlternative {
   readonly transcript?: string;
   readonly confidence?: number;
   readonly languages?: readonly string[];
+  readonly words?: readonly DeepgramWord[];
+}
+
+interface DeepgramWord {
+  readonly start?: number;
+  readonly end?: number;
 }
 
 export class DeepgramSttProvider implements SpeechToTextProvider {
@@ -766,12 +772,13 @@ export class DeepgramSttStream implements SttStream {
     const alternative = parsed.channel?.alternatives?.[0];
     const text = alternative?.transcript?.trim();
     const timestamp = this.#clock.now();
-    const audioStartMs = secondsToMs(parsed.start);
-    const audioDurationMs = secondsToMs(parsed.duration);
-    const audioEndMs =
-      typeof audioStartMs === "number" && typeof audioDurationMs === "number"
-        ? audioStartMs + audioDurationMs
+    const resultStartMs = secondsToMs(parsed.start);
+    const resultDurationMs = secondsToMs(parsed.duration);
+    const resultEndMs =
+      typeof resultStartMs === "number" && typeof resultDurationMs === "number"
+        ? resultStartMs + resultDurationMs
         : undefined;
+    const transcriptWordOffsets = deepgramWordOffsetsMs(alternative?.words);
 
     if (text) {
       if (
@@ -787,8 +794,8 @@ export class DeepgramSttStream implements SttStream {
             ? { confidence: alternative.confidence }
             : {}),
           ...(alternative?.languages?.[0] ? { language: alternative.languages[0] } : {}),
-          ...(typeof audioStartMs === "number" ? { audioStartMs } : {}),
-          ...(typeof audioEndMs === "number" ? { audioEndMs } : {}),
+          ...(transcriptWordOffsets ? { audioStartMs: transcriptWordOffsets.startMs } : {}),
+          ...(transcriptWordOffsets ? { audioEndMs: transcriptWordOffsets.endMs } : {}),
           startTimestamp: timestamp,
           endTimestamp: timestamp,
           ...(parsed.metadata
@@ -800,7 +807,7 @@ export class DeepgramSttStream implements SttStream {
       }
       this.#sequence += 1;
       if (parsed.is_final === true) {
-        this.#lastFinalAudioEndMs = audioEndMs ?? this.#lastFinalAudioEndMs;
+        this.#lastFinalAudioEndMs = resultEndMs ?? this.#lastFinalAudioEndMs;
         this.#finalsPendingEndpoint = true;
         if (parsed.speech_final !== true && this.#pendingUtteranceEndAudioOffsetMs !== undefined) {
           this.#emitEndpoint(
@@ -816,7 +823,7 @@ export class DeepgramSttStream implements SttStream {
     }
 
     if (parsed.speech_final) {
-      this.#emitEndpoint(audioEndMs, timestamp, parsed.metadata);
+      this.#emitEndpoint(resultEndMs, timestamp, parsed.metadata);
     }
   }
 
@@ -977,6 +984,24 @@ function secondsToMs(seconds: number | undefined): number | undefined {
   return Number.isFinite(milliseconds) && milliseconds <= MAX_PROVIDER_AUDIO_OFFSET_MS
     ? milliseconds
     : undefined;
+}
+
+function deepgramWordOffsetsMs(
+  words: readonly DeepgramWord[] | undefined,
+): { readonly startMs: number; readonly endMs: number } | undefined {
+  if (!words || words.length === 0) return undefined;
+  let startMs = Number.POSITIVE_INFINITY;
+  let endMs = Number.NEGATIVE_INFINITY;
+  for (const word of words) {
+    const wordStartMs = secondsToMs(word.start);
+    const wordEndMs = secondsToMs(word.end);
+    if (wordStartMs === undefined || wordEndMs === undefined || wordEndMs < wordStartMs) {
+      return undefined;
+    }
+    startMs = Math.min(startMs, wordStartMs);
+    endMs = Math.max(endMs, wordEndMs);
+  }
+  return Number.isFinite(startMs) && Number.isFinite(endMs) ? { startMs, endMs } : undefined;
 }
 
 function validateDeepgramResult(message: DeepgramResult): ReturnType<typeof providerError> | null {

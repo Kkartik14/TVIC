@@ -1559,7 +1559,14 @@ describe("provider utilities", () => {
         start: 0,
         duration: 0.4,
         channel: {
-          alternatives: [{ transcript: "hello", confidence: 0.91, languages: ["en"] }],
+          alternatives: [
+            {
+              transcript: "hello",
+              confidence: 0.91,
+              languages: ["en"],
+              words: [{ word: "hello", start: 0, end: 0.4 }],
+            },
+          ],
         },
       }),
     );
@@ -1585,7 +1592,15 @@ describe("provider utilities", () => {
         speech_final: true,
         start: 0.4,
         duration: 0.3,
-        channel: { alternatives: [{ transcript: "there", confidence: 0.9 }] },
+        channel: {
+          alternatives: [
+            {
+              transcript: "there",
+              confidence: 0.9,
+              words: [{ word: "there", start: 0.4, end: 0.7 }],
+            },
+          ],
+        },
       }),
     );
 

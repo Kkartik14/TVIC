@@ -4320,14 +4320,17 @@ describe("PipelineVoiceLoop", () => {
   });
 
   it.each(["deepgram", "cartesia", "sarvam", "assemblyai", "elevenlabs", "soniox"])(
-    "requires a recognized transcript before barge-in for %s",
+    "measures transcript-confirmed barge-in with %s timing",
     async (providerName) => {
-      const runtime = createRuntime();
+      let monotonicMs = 0;
+      const runtime = createRuntime({
+        clock: { now: () => TS, monotonicMs: () => monotonicMs },
+      });
       await runtime.start();
       const agent = buildAgent({
         interruptionPolicy: {
           mode: "graceful",
-          minSpeechMs: 30,
+          minSpeechMs: 200,
           trimOutputOnInterrupt: true,
           confirmWithTranscript: true,
         },
@@ -4358,21 +4361,60 @@ describe("PipelineVoiceLoop", () => {
         await until(() => call.sent.length >= 1, "agent speaking");
 
         vi.useFakeTimers();
-        stt.pushSpeechStarted(session.id, 1_000);
-        await vi.advanceTimersByTimeAsync(40);
+        stt.pushSpeechStarted(session.id);
+        await vi.advanceTimersByTimeAsync(0);
+        monotonicMs = 600;
+        await vi.advanceTimersByTimeAsync(600);
         expect(call.clearCalls).toBe(0);
 
-        stt.pushPartial(session.id, "...", 1_000, 1_040);
+        stt.pushPartial(session.id, "...");
         await vi.advanceTimersByTimeAsync(0);
         expect(call.clearCalls).toBe(0);
 
-        stt.pushPartial(session.id, "please", 1_000, 1_010);
-        await vi.advanceTimersByTimeAsync(0);
-        expect(call.clearCalls).toBe(0);
+        const providerSpans: Record<
+          string,
+          | { readonly short: readonly [number, number]; readonly long: readonly [number, number] }
+          | undefined
+        > = {
+          deepgram: { short: [3_820, 3_900], long: [3_820, 4_080] },
+          cartesia: undefined,
+          sarvam: undefined,
+          assemblyai: undefined,
+          elevenlabs: undefined,
+          soniox: { short: [1_000, 1_080], long: [1_000, 1_250] },
+        };
+        const spans = providerSpans[providerName];
+        if (spans) {
+          // Deepgram maps these to word timestamps; Soniox maps them to token spans.
+          stt.pushPartial(session.id, "yeah", spans.short[0], spans.short[1]);
+          await vi.advanceTimersByTimeAsync(0);
+          expect(call.clearCalls).toBe(0);
 
-        stt.pushPartial(session.id, "please stop", 1_000, 1_040);
-        await vi.advanceTimersByTimeAsync(0);
-        expect(call.clearCalls).toBe(1);
+          monotonicMs = 800;
+          await vi.advanceTimersByTimeAsync(200);
+          expect(call.clearCalls).toBe(0);
+
+          stt.pushPartial(session.id, "yeah", spans.short[0], spans.short[1]);
+          await vi.advanceTimersByTimeAsync(0);
+          expect(call.clearCalls).toBe(0);
+
+          stt.pushPartial(session.id, "yeah please stop", spans.long[0], spans.long[1]);
+          await vi.advanceTimersByTimeAsync(0);
+          expect(call.clearCalls).toBe(1);
+        } else {
+          // These adapters emit normalized transcript events without audio offsets.
+          stt.pushPartial(session.id, "yeah");
+          await vi.advanceTimersByTimeAsync(0);
+          expect(call.clearCalls).toBe(0);
+
+          monotonicMs = 799;
+          await vi.advanceTimersByTimeAsync(199);
+          expect(call.clearCalls).toBe(0);
+
+          monotonicMs = 800;
+          await vi.advanceTimersByTimeAsync(1);
+          expect(call.clearCalls).toBe(1);
+        }
 
         tts.end();
         call.push(streamEnded(session.id));

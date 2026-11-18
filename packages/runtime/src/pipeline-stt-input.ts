@@ -459,7 +459,8 @@ export class PipelineSttInput {
     }
     this.#speechCandidate = {
       turnId: active.turnId,
-      startedAtMs: sameTurn ? current.startedAtMs : this.#timing.activeNow(),
+      startedAtMs:
+        sameTurn && current.transcriptConfirmed ? current.startedAtMs : this.#timing.activeNow(),
       transcriptConfirmed: true,
       ...(sameTurn && typeof current.audioOffsetMs === "number"
         ? { audioOffsetMs: current.audioOffsetMs }
