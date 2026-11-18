@@ -642,6 +642,8 @@ export class SarvamTtsStream implements TtsSession {
   }
 
   #pushCommittedEvent(): boolean {
+    if (this.#currentChunkIds.length === 0) return true;
+
     const committed: MediaAudioCommittedEvent = createMediaEvent({
       id: this.#mediaEventId("committed"),
       type: "media.audio.committed",

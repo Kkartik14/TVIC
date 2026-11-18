@@ -722,6 +722,10 @@ and optional `dict_id`. The WebSocket adapter remains the path for incremental
 LLM text, repeated turns, and explicit buffering/flush control; HTTP streaming
 does not replace that lifecycle.
 
+WebSocket flushes emit `media.audio.committed` only when audio chunks are
+pending. Finishing a session after its audio has already been committed does not
+create an empty sequence range.
+
 Per-call `ttsSpeed` maps to Sarvam's `pace` and must be in the 0.5–2.0 range.
 Bulbul v4 requires a persona voice and language. Sarvam accepts the `ml-IN` and
 `od-IN` language codes, but its current v4 persona catalog does not list
