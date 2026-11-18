@@ -38,7 +38,7 @@ import {
   type ElevenLabsTtsHttpSynthesisRequest,
   type HttpTransport,
 } from "./elevenlabs-http.js";
-import { VOICE_NOT_FOUND_CODES } from "./provider-error-classifier.js";
+import { classifyProviderError, VOICE_NOT_FOUND_CODES } from "./provider-error-classifier.js";
 
 const ELEVENLABS_TTS_DEFAULT_URL = "https://api.elevenlabs.io/v1/text-to-speech";
 const ELEVENLABS_DIALOGUE_DEFAULT_URL = "https://api.elevenlabs.io/v1/text-to-dialogue";
@@ -468,12 +468,17 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
   const body = await readBoundedResponseText(response).catch(() => "");
   const parsed = parseJsonObject(body);
   const nested = asRecord(parsed?.detail) ?? asRecord(parsed?.error);
+  const nestedCode = typeof nested?.code === "string" ? boundedString(nested.code, 128) : undefined;
+  const legacyStatus =
+    typeof nested?.status === "string" ? boundedString(nested.status, 128) : undefined;
   const providerCode =
-    typeof nested?.status === "string"
-      ? boundedString(nested.status, 128)
-      : typeof parsed?.code === "string"
-        ? boundedString(parsed.code, 128)
-        : undefined;
+    nestedCode !== undefined && nestedCode !== "bad_request"
+      ? nestedCode
+      : (legacyStatus ??
+        nestedCode ??
+        (typeof parsed?.code === "string" ? boundedString(parsed.code, 128) : undefined));
+  const providerType =
+    typeof nested?.type === "string" ? boundedString(nested.type, 128) : undefined;
   const message =
     typeof nested?.message === "string"
       ? boundedString(nested.message, 1_024)
@@ -482,29 +487,62 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
         : typeof parsed?.message === "string"
           ? boundedString(parsed.message, 1_024)
           : `ElevenLabs TTS request failed with HTTP ${response.status}`;
-  const metadata = { httpStatus: response.status, ...(providerCode ? { providerCode } : {}) };
-  if (
-    /credit|balance|quota/.test(`${providerCode ?? ""} ${message}`.toLowerCase()) ||
-    response.status === 429
-  ) {
+  const classification = classifyProviderError({
+    status: response.status,
+    providerCode,
+    providerType,
+    message,
+  });
+  const metadata = { ...classification.metadata, classification: classification.classification };
+  const safeMessage = elevenLabsClassificationMessage(classification.classification);
+  if (classification.code === TVIC_ERROR_CODES.providerQuotaExceeded) {
     return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerRateLimited, message, {
+      providerError(TVIC_ERROR_CODES.providerQuotaExceeded, safeMessage, {
         provider: PROVIDER_NAMES.elevenlabs,
+        retriable: false,
         metadata,
       }),
     );
   }
-  if (response.status === 401 || response.status === 403) {
+  if (classification.code === TVIC_ERROR_CODES.providerPlanNotAllowed) {
     return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerAuthFailed, message, {
+      providerError(TVIC_ERROR_CODES.providerPlanNotAllowed, safeMessage, {
         provider: PROVIDER_NAMES.elevenlabs,
+        retriable: false,
         metadata,
       }),
     );
   }
-  if (providerCode !== undefined && VOICE_NOT_FOUND_CODES.has(providerCode)) {
+  if (classification.code === TVIC_ERROR_CODES.providerRateLimited) {
     return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerVoiceUnsupported, message, {
+      providerError(TVIC_ERROR_CODES.providerRateLimited, safeMessage, {
+        provider: PROVIDER_NAMES.elevenlabs,
+        retriable: true,
+        metadata,
+      }),
+    );
+  }
+  if (classification.code === TVIC_ERROR_CODES.providerAuthFailed) {
+    return TvicThrowableError.from(
+      providerError(TVIC_ERROR_CODES.providerAuthFailed, safeMessage, {
+        provider: PROVIDER_NAMES.elevenlabs,
+        retriable: false,
+        metadata,
+      }),
+    );
+  }
+  if (classification.code === TVIC_ERROR_CODES.providerVoiceUnsupported) {
+    return TvicThrowableError.from(
+      providerError(TVIC_ERROR_CODES.providerVoiceUnsupported, safeMessage, {
+        provider: PROVIDER_NAMES.elevenlabs,
+        retriable: false,
+        metadata,
+      }),
+    );
+  }
+  if (classification.code === TVIC_ERROR_CODES.providerModelUnsupported) {
+    return TvicThrowableError.from(
+      providerError(TVIC_ERROR_CODES.providerModelUnsupported, safeMessage, {
         provider: PROVIDER_NAMES.elevenlabs,
         retriable: false,
         metadata,
@@ -513,19 +551,53 @@ export async function elevenLabsHttpResponseError(response: Response): Promise<T
   }
   if (response.status === 400 || response.status === 404 || response.status === 422) {
     return TvicThrowableError.from(
-      providerError(TVIC_ERROR_CODES.providerInvalidRequest, message, {
+      providerError(TVIC_ERROR_CODES.providerInvalidRequest, safeMessage, {
         provider: PROVIDER_NAMES.elevenlabs,
         metadata,
       }),
     );
   }
   return TvicThrowableError.from(
-    providerError(PROVIDER_ERROR_CODES.elevenlabsTts, message, {
+    providerError(PROVIDER_ERROR_CODES.elevenlabsTts, "ElevenLabs returned an unrecognized error", {
       provider: PROVIDER_NAMES.elevenlabs,
       metadata,
       retriable: false,
     }),
   );
+}
+
+function elevenLabsClassificationMessage(
+  classification:
+    | "auth"
+    | "quota_exceeded"
+    | "plan_not_allowed"
+    | "rate_limited"
+    | "invalid_request"
+    | "model_unsupported"
+    | "voice_unsupported"
+    | "upstream"
+    | "protocol",
+): string {
+  switch (classification) {
+    case "auth":
+      return "ElevenLabs rejected the API credentials";
+    case "quota_exceeded":
+      return "ElevenLabs reported insufficient credits or quota";
+    case "plan_not_allowed":
+      return "ElevenLabs does not allow this feature on the current plan";
+    case "rate_limited":
+      return "ElevenLabs rate limit was reached";
+    case "invalid_request":
+      return "ElevenLabs rejected the request";
+    case "model_unsupported":
+      return "ElevenLabs model is unavailable";
+    case "voice_unsupported":
+      return "ElevenLabs voice was not found";
+    case "upstream":
+      return "ElevenLabs is temporarily unavailable";
+    case "protocol":
+      return "ElevenLabs returned an unrecognized error";
+  }
 }
 
 /**

@@ -29,6 +29,12 @@ import {
   providerError,
   type ProviderClock,
 } from "./common.js";
+import {
+  classifiedProviderError,
+  classifyProviderError,
+  readBoundedProviderErrorBody,
+  type ProviderErrorClassificationInput,
+} from "./provider-error-classifier.js";
 
 export interface OpenAiResponsesLlmProviderOptions {
   readonly apiKey: string;
@@ -265,16 +271,7 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
                 provider: PROVIDER_NAMES.openaiResponses,
                 timestamp: this.#clock.now(),
                 ...providerModelFromEvent(event),
-                error: providerError(
-                  PROVIDER_ERROR_CODES.openaiResponseFailed,
-                  type === "response.failed"
-                    ? "OpenAI response failed"
-                    : "OpenAI returned an error event",
-                  {
-                    provider: PROVIDER_NAMES.openaiResponses,
-                    retriable: true,
-                  },
-                ),
+                error: openAiProviderFailure(openAiFailureInput(event)),
                 usageReport,
               })
             )
@@ -361,8 +358,27 @@ export class OpenAiResponsesLlmProvider implements LLMProvider {
       clearTimeout(responseTimer);
     }
 
-    if (!response.ok || !response.body) {
-      await response.body?.cancel().catch(() => undefined);
+    if (!response.ok) {
+      const body = await readBoundedProviderErrorBody(response).catch(() => ({
+        text: "",
+        truncated: false,
+      }));
+      const parsed = body.text.trim() ? parseJsonObject(body.text) : null;
+      const error = objectField(parsed, "error") ?? parsed;
+      throw TvicThrowableError.from(
+        openAiProviderFailure({
+          status: response.status,
+          providerCode: stringField(error, "code") ?? stringField(error, "status"),
+          providerType: stringField(error, "type"),
+          providerParam: stringField(error, "param"),
+          message: stringField(error, "message"),
+          bodyTruncated: body.truncated,
+          bodyMalformed: body.text.trim().length > 0 && parsed === null,
+        }),
+      );
+    }
+
+    if (!response.body) {
       throw TvicThrowableError.from(
         providerError(
           PROVIDER_ERROR_CODES.openaiHttp,
@@ -551,6 +567,72 @@ function parseSseFrame(frame: string): OpenAiStreamEvent | null {
     );
   }
   return parsed as OpenAiStreamEvent;
+}
+
+function openAiFailureInput(event: OpenAiStreamEvent): ProviderErrorClassificationInput {
+  const responseError = objectField(objectField(event, "response"), "error");
+  const eventError = objectField(event, "error");
+  const error = responseError ?? eventError;
+  return {
+    providerCode: stringField(error, "code") ?? stringField(error, "status"),
+    providerType: stringField(error, "type"),
+    providerParam: stringField(error, "param"),
+    message: stringField(error, "message"),
+  };
+}
+
+function openAiProviderFailure(input: ProviderErrorClassificationInput) {
+  const classification = classifyProviderError(input);
+  const hasStructuredSelector =
+    typeof input.status === "number" ||
+    typeof input.providerCode === "string" ||
+    typeof input.providerType === "string" ||
+    typeof input.providerParam === "string";
+  if (!hasStructuredSelector && classification.classification !== "quota_exceeded") {
+    return providerError(PROVIDER_ERROR_CODES.openaiResponseFailed, "OpenAI response failed", {
+      provider: PROVIDER_NAMES.openaiResponses,
+      retriable: true,
+    });
+  }
+  return classifiedProviderError(
+    PROVIDER_NAMES.openaiResponses,
+    openAiFailureMessage(classification.classification),
+    input,
+  );
+}
+
+function openAiFailureMessage(
+  classification:
+    | "auth"
+    | "quota_exceeded"
+    | "plan_not_allowed"
+    | "rate_limited"
+    | "invalid_request"
+    | "model_unsupported"
+    | "voice_unsupported"
+    | "upstream"
+    | "protocol",
+): string {
+  switch (classification) {
+    case "auth":
+      return "OpenAI rejected the API credentials";
+    case "quota_exceeded":
+      return "OpenAI credit balance or usage limit exhausted";
+    case "plan_not_allowed":
+      return "OpenAI service tier is not allowed for this project";
+    case "rate_limited":
+      return "OpenAI API rate limit reached";
+    case "invalid_request":
+      return "OpenAI rejected the request";
+    case "model_unsupported":
+      return "OpenAI does not support the requested model";
+    case "voice_unsupported":
+      return "OpenAI does not support the requested voice";
+    case "upstream":
+      return "OpenAI API is temporarily unavailable";
+    case "protocol":
+      return "OpenAI returned an unrecognized provider error";
+  }
 }
 
 function objectField(

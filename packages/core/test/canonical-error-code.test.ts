@@ -88,6 +88,23 @@ describe("1.1.0 canonical error-code migration evidence", () => {
     });
   });
 
+  it("[1.1.2:canonical-error:provider.plan_not_allowed]", async () => {
+    await assertErrorMigrationEvidence({
+      exercise: () =>
+        reviewed(
+          providerError("provider.plan_not_allowed", "plan restriction evidence", {
+            retriable: false,
+          }),
+        ),
+      expected: {
+        code: "provider.plan_not_allowed",
+        retriable: false,
+        retryOwner: retryOwner,
+        persistedReadPolicy: persistedReadPolicy,
+      },
+    });
+  });
+
   it("[1.1.2:canonical-error:provider.transport_write_failed]", async () => {
     await assertErrorMigrationEvidence({
       exercise: () =>

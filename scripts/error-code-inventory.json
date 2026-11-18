@@ -1583,6 +1583,24 @@
       ]
     },
     {
+      "code": "provider.plan_not_allowed",
+      "owner": "core",
+      "status": "canonical",
+      "legacyAliases": [],
+      "retriable": false,
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable",
+      "observedFactories": ["exported:TVIC_ERROR_CODES"],
+      "sourceLocations": [
+        {
+          "file": "packages/core/src/constants.ts",
+          "line": 7,
+          "column": 28,
+          "kind": "exported:TVIC_ERROR_CODES"
+        }
+      ]
+    },
+    {
       "code": "provider.quota_exceeded",
       "owner": "core",
       "status": "canonical",
@@ -5165,6 +5183,7 @@
     "tts.transport.unexpected_eof",
     "llm.provider.unexpected_eof",
     "provider.quota_exceeded",
+    "provider.plan_not_allowed",
     "provider.transport_write_failed",
     "provider.transport_timeout"
   ],
@@ -5359,6 +5378,16 @@
       "compatibilityTest": {
         "file": "packages/core/test/canonical-error-code.test.ts",
         "pattern": "[1.1.2:canonical-error:provider.quota_exceeded]"
+      },
+      "retryOwner": "provider-selector",
+      "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"
+    },
+    {
+      "canonicalCode": "provider.plan_not_allowed",
+      "sourceCodes": ["provider.plan_not_allowed"],
+      "compatibilityTest": {
+        "file": "packages/core/test/canonical-error-code.test.ts",
+        "pattern": "[1.1.2:canonical-error:provider.plan_not_allowed]"
       },
       "retryOwner": "provider-selector",
       "persistedReadPolicy": "persist canonical code; preserve bounded legacyCode; unknown persisted code is never retriable"

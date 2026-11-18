@@ -18,6 +18,12 @@ describe("shared provider error classifier", () => {
       false,
     ],
     [
+      "Cartesia concurrency code without a status fallback",
+      { providerCode: "concurrency_limited" },
+      TVIC_ERROR_CODES.providerRateLimited,
+      true,
+    ],
+    [
       "exhausted billing message",
       { message: "  credits   exhausted " },
       TVIC_ERROR_CODES.providerQuotaExceeded,
@@ -67,8 +73,14 @@ describe("shared provider error classifier", () => {
       false,
     ],
     [
-      "402 unknown is quota",
+      "402 unknown is not proof of exhausted quota",
       { status: 402, providerCode: "billing_state" },
+      TVIC_ERROR_CODES.providerProtocolInvalid,
+      false,
+    ],
+    [
+      "ElevenLabs explicit payment-required response",
+      { status: 402, providerCode: "insufficient_credits", providerType: "payment_required" },
       TVIC_ERROR_CODES.providerQuotaExceeded,
       false,
     ],
@@ -80,6 +92,24 @@ describe("shared provider error classifier", () => {
     ],
   ] as const)("classifies %s without substring guessing", (_name, input, code, retriable) => {
     expect(classifyProviderError(input)).toMatchObject({ code, retriable });
+  });
+
+  it.each([
+    ["Cartesia higher-plan feature", { providerCode: "plan_upgrade_required" }],
+    [
+      "ElevenLabs feature unavailable on current plan",
+      { providerCode: "feature_not_available", providerType: "authorization_error" },
+    ],
+    [
+      "OpenAI service tier disallowed for project",
+      { providerType: "invalid_request_error", providerParam: "service_tier" },
+    ],
+  ] as const)("classifies %s separately from invalid requests", (_name, input) => {
+    expect(classifyProviderError(input)).toMatchObject({
+      code: "provider.plan_not_allowed",
+      retriable: false,
+      classification: "plan_not_allowed",
+    });
   });
 
   it.each([

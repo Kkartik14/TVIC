@@ -4,6 +4,7 @@ export const TVIC_ERROR_CODES = Object.freeze({
   providerAuthFailed: "provider.auth_failed",
   providerRateLimited: "provider.rate_limited",
   providerQuotaExceeded: "provider.quota_exceeded",
+  providerPlanNotAllowed: "provider.plan_not_allowed",
   providerTransportWriteFailed: "provider.transport_write_failed",
   providerTransportTimeout: "provider.transport_timeout",
   providerModelUnsupported: "provider.model_unsupported",

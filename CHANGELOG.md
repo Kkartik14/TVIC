@@ -3,6 +3,15 @@
 This file records user-facing changes to `voice-runtime`. Release evidence and
 publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
+## Unreleased
+
+### Fixed
+
+- Normalize OpenAI Responses, Groq, Cartesia STT and TTS, and ElevenLabs TTS
+  failures into stable TVIC causes for rejected credentials, exhausted quota,
+  plan restrictions, rate limits, unavailable models and voices, and upstream
+  failures. A generic HTTP 402 no longer implies exhausted quota.
+
 ## 2.2.0
 
 ### Added

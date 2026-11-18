@@ -1,3 +1,4 @@
+import type { IncomingMessage } from "node:http";
 import WebSocket from "ws";
 
 import {
@@ -26,6 +27,7 @@ const LEGACY_PROVIDER_ERROR_CODES: Readonly<Record<string, string>> = TVIC_ERROR
 const CANONICAL_NON_RETRIABLE_PROVIDER_CODES = new Set<string>([
   TVIC_ERROR_CODES.providerAuthFailed,
   TVIC_ERROR_CODES.providerQuotaExceeded,
+  TVIC_ERROR_CODES.providerPlanNotAllowed,
   TVIC_ERROR_CODES.providerTransportWriteFailed,
   TVIC_ERROR_CODES.providerTransportTimeout,
   TVIC_ERROR_CODES.providerInvalidRequest,
@@ -581,6 +583,7 @@ export const WEBSOCKET_CONNECT_TIMEOUT_MS = 10_000;
 export interface OpenWebSocketOptions {
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  readonly onUnexpectedResponse?: (response: IncomingMessage) => Error | Promise<Error>;
 }
 
 interface WebSocketConnectFailure extends Error {
@@ -605,21 +608,31 @@ export function openWebSocket(
     return Promise.resolve();
   }
   return new Promise((resolve, reject) => {
-    const cleanup = (): void => {
-      clearTimeout(timer);
+    let settled = false;
+    const detachSocketListeners = (): void => {
       socket.off("open", onOpen);
       socket.off("error", onError);
       socket.off("close", onClose);
+      socket.off("unexpected-response", onUnexpectedResponse);
+    };
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      detachSocketListeners();
       options.signal?.removeEventListener("abort", onAbort);
     };
-    const onOpen = (): void => {
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
       cleanup();
-      resolve();
+      if (error) reject(error);
+      else resolve();
+    };
+    const onOpen = (): void => {
+      finish();
     };
     const onError = (error: Error): void => {
-      cleanup();
       safeClose(socket);
-      reject(error);
+      finish(error);
     };
     const onClose = (code: number, reason: Buffer): void => {
       cleanup();
@@ -634,21 +647,51 @@ export function openWebSocket(
         },
       });
       safeClose(socket);
-      reject(error);
+      finish(error);
+    };
+    const onUnexpectedResponse = (_request: unknown, response: IncomingMessage): void => {
+      socket.off("open", onOpen);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+      socket.off("unexpected-response", onUnexpectedResponse);
+      if (!options.onUnexpectedResponse) {
+        response.resume();
+        const error = new Error(
+          `WebSocket upgrade rejected with HTTP ${response.statusCode ?? "unknown"}`,
+        ) as WebSocketConnectFailure;
+        Object.defineProperty(error, "httpStatus", {
+          configurable: false,
+          enumerable: false,
+          value: response.statusCode,
+        });
+        safeClose(socket);
+        finish(error);
+        return;
+      }
+      void Promise.resolve()
+        .then(() => options.onUnexpectedResponse?.(response))
+        .then(
+          (error) => {
+            safeClose(socket);
+            finish(error);
+          },
+          (error: unknown) => {
+            safeClose(socket);
+            finish(error instanceof Error ? error : new Error("WebSocket upgrade was rejected"));
+          },
+        );
     };
     const onAbort = (): void => {
-      cleanup();
       safeClose(socket);
-      reject(
+      finish(
         TvicThrowableError.from(
           cancelledError("provider.connection_cancelled", "WebSocket connect was cancelled"),
         ),
       );
     };
     const timer = setTimeout(() => {
-      cleanup();
       safeClose(socket);
-      reject(
+      finish(
         TvicThrowableError.from(
           timeoutError(
             "provider.connection_timeout",
@@ -661,7 +704,61 @@ export function openWebSocket(
     socket.on("open", onOpen);
     socket.on("error", onError);
     socket.on("close", onClose);
+    socket.on("unexpected-response", onUnexpectedResponse);
     if (options.signal?.aborted) onAbort();
+  });
+}
+
+const MAX_WEBSOCKET_ERROR_BODY_BYTES = 16 * 1024;
+
+export function readBoundedWebSocketErrorBody(
+  response: IncomingMessage,
+): Promise<{ readonly text: string; readonly truncated: boolean }> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let truncated = false;
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      response.off("data", onData);
+      response.off("end", finish);
+      response.off("error", finish);
+      response.off("aborted", finish);
+      resolve({ text: Buffer.concat(chunks).toString("utf8"), truncated });
+    };
+    const onData = (value: Buffer | Uint8Array | string): void => {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      const remaining = MAX_WEBSOCKET_ERROR_BODY_BYTES - total;
+      if (remaining <= 0) {
+        truncated = true;
+        response.resume();
+        finish();
+        return;
+      }
+      if (chunk.byteLength > remaining) {
+        chunks.push(chunk.subarray(0, remaining));
+        total += remaining;
+        truncated = true;
+        response.resume();
+        finish();
+        return;
+      }
+      chunks.push(chunk);
+      total += chunk.byteLength;
+    };
+    const timer = setTimeout(() => {
+      truncated = true;
+      response.resume();
+      finish();
+    }, 1_000);
+    response.on("data", onData);
+    response.once("end", finish);
+    response.once("error", finish);
+    response.once("aborted", finish);
+    response.resume();
   });
 }
 
