@@ -9,7 +9,8 @@ publishing instructions remain in [docs/releasing.md](./docs/releasing.md).
 
 - Deepgram STT now uses `UtteranceEnd` to emit an endpoint for accepted final
   transcript segments, while waiting for a final result when only partial text
-  has arrived.
+  has arrived. An empty finalization response discards its pending marker, and
+  duplicate markers cannot terminate a later utterance.
 
 ## 2.2.0
 

@@ -374,7 +374,9 @@ results for this signal). If Deepgram has already sent final transcript segments
 the adapter emits one endpoint for them when `UtteranceEnd` arrives. If only
 partial results exist, it requests finalization and waits for Deepgram's final
 transcript; partial text is never promoted to a final transcript. Noise-only
-input therefore does not create a transcript endpoint.
+input therefore does not create a transcript endpoint. If finalization returns
+no transcript, its pending marker is discarded so it cannot terminate a later
+utterance. The adapter omits `utterance_end_ms` when `interimResults` is false.
 
 Official references: [model and language information](https://developers.deepgram.com/docs/models-languages-overview), [end-of-speech detection](https://developers.deepgram.com/docs/understanding-end-of-speech-detection), and [streaming API reference](https://developers.deepgram.com/reference/speech-to-text/listen-streaming).
 
